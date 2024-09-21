@@ -1,0 +1,43 @@
+[package]
+name = "planetary"
+version = "0.1.0"
+description = "A Kubernetes-based task executor for the Task Execution Service (TES) specification"
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+clap = { workspace = true, optional = true }
+clap-verbosity-flag = { workspace = true, optional = true }
+eyre.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+ordered-float.workspace = true
+rand.workspace = true
+serde.workspace = true
+tes.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tower.workspace = true
+tracing-log = { workspace = true, optional = true }
+tracing-subscriber.workspace = true
+tracing.workspace = true
+twox-hash.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["binaries"]
+binaries = ["dep:clap", "dep:clap-verbosity-flag", "dep:tracing-log"]
+
+[[bin]]
+name = "planetary"
+path = "src/main.rs"
+required-features = ["binaries"]
