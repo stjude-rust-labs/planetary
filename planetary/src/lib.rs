@@ -1,11 +1,13 @@
 //! A Kubernetes-based task executor for the Task Execution Service (TES)
 //! specification.
 
-pub mod engine;
-pub mod name;
 pub mod server;
-pub mod task;
+pub mod services;
 
-pub use engine::Engine;
 pub use server::Server;
-pub use task::TaskMap;
+
+/// Formats a log message by including a time stamp.
+#[macro_export]
+macro_rules! format_log_message {
+    ($($arg:tt)*) => { format!("[{ts}] {args}", ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ"), args = format_args!($($arg)*)) }
+}

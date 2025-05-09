@@ -10,18 +10,31 @@ license.workspace = true
 edition.workspace = true
 
 [dependencies]
+planetary-db = { version = "0.1.0", path = "../planetary-db" }
+anyhow.workspace = true
+async-trait.workspace = true
 axum.workspace = true
+axum-extra.workspace = true
+bon.workspace = true
+cfg-if.workspace = true
 chrono.workspace = true
 clap = { workspace = true, optional = true }
 clap-verbosity-flag = { workspace = true, optional = true }
-eyre.workspace = true
+futures.workspace = true
+glob.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
 ordered-float.workspace = true
 rand.workspace = true
+secrecy.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+shlex.workspace = true
 tes.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
 tower-http.workspace = true
 tower.workspace = true
 tracing-log = { workspace = true, optional = true }
@@ -34,10 +47,12 @@ url.workspace = true
 workspace = true
 
 [features]
-default = ["binaries"]
-binaries = ["dep:clap", "dep:clap-verbosity-flag", "dep:tracing-log"]
+default = ["cli", "postgres"]
+cli = ["dep:clap", "dep:clap-verbosity-flag", "dep:tracing-log"]
+postgres = ["planetary-db/postgres"]
 
 [[bin]]
 name = "planetary"
 path = "src/main.rs"
-required-features = ["binaries"]
+required-features = ["cli"]
+

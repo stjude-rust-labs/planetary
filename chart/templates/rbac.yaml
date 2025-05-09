@@ -2,12 +2,18 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  namespace: default
-  name: job-creator
+  namespace: planetary
+  name: planetary-role
 rules:
-- apiGroups: ["batch"]
-  resources: ["jobs"]
+- apiGroups: [""]
+  resources: ["pods"]
   verbs: ["create", "get", "list", "watch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["create", "delete"]
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -24,14 +30,14 @@ automountServiceAccountToken: true
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: job-creator-binding
-  namespace: default
+  name: planetary-role-binding
+  namespace: planetary
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: job-creator
+  name: planetary-role
 subjects:
 - kind: ServiceAccount
-  name: planetary-service-account
+  name: {{ include "chart.serviceAccountName" . | default "planetary-service-account" }}
   namespace: default
 {{- end }}
