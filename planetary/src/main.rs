@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
+use clap_verbosity_flag::WarnLevel;
 use eyre::Context;
 use kube::Client;
 use planetary::Server;
@@ -56,7 +57,7 @@ pub struct Args {
 
     /// The verbosity flags.
     #[command(flatten)]
-    verbose: Verbosity,
+    verbose: Verbosity<WarnLevel>,
 }
 
 /// Builds TES service information from the provided arguments.

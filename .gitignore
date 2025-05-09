@@ -1,3 +1,4 @@
 /target
 /deploy
+/chart/*.tgz
 .DS_Store

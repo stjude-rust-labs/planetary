@@ -26,7 +26,7 @@ impl Generator for Alphanumeric {
         let mut rng = ThreadRng::default();
 
         let random: String = (&mut rng)
-            .sample_iter(&rand::distributions::Alphanumeric)
+            .sample_iter(&rand::distr::Alphanumeric)
             .take(self.length)
             .map(char::from)
             .map(|c| c.to_ascii_lowercase())

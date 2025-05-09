@@ -121,7 +121,6 @@ impl Engine {
             );
         }
 
-        results.sort();
         results
     }
 

@@ -264,8 +264,6 @@ impl Deref for JobGroup {
 
 #[cfg(test)]
 mod tests {
-    use ordered_float::OrderedFloat;
-
     use super::*;
 
     #[test]
@@ -273,8 +271,8 @@ mod tests {
         let tes = TesResources {
             cpu_cores: Some(1),
             preemptible: Some(true),
-            ram_gb: Some(OrderedFloat(4.)),
-            disk_gb: Some(OrderedFloat(16.)),
+            ram_gb: Some(4.),
+            disk_gb: Some(16.),
             zones: Some(vec![String::from("foobar")]),
         };
 

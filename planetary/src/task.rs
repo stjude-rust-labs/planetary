@@ -1,18 +1,19 @@
 //! Tasks.
 
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
 use tes::v1::types::Task as TesTask;
 use tes::v1::types::task::State as TesState;
-use twox_hash::RandomXxh3HashBuilder64;
+use twox_hash::XxHash3_64;
 
 /// The default capacity of maps and sets.
 pub const DEFAULT_CAPACITY: usize = 0xFFFF;
 
 /// The inner type of maps and sets.
-type Inner<K, V> = HashMap<K, V, RandomXxh3HashBuilder64>;
+type Inner<K, V> = HashMap<K, V, BuildHasherDefault<XxHash3_64>>;
 
 /// An underlying map type.
 struct Map(Inner<String, TesTask>);
@@ -35,7 +36,7 @@ impl Default for Map {
     fn default() -> Self {
         Self(HashMap::with_capacity_and_hasher(
             DEFAULT_CAPACITY,
-            RandomXxh3HashBuilder64::default(),
+            BuildHasherDefault::default(),
         ))
     }
 }

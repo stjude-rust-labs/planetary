@@ -44,4 +44,4 @@ EXPOSE 6492
 ENTRYPOINT ["/usr/local/bin/planetary"]
 
 # Set the default arguments.
-CMD ["-vvv", "--server-version", "1.0.0"]
+CMD ["-v", "--server-version", "1.0.0"]
