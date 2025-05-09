@@ -7,6 +7,8 @@ image:
   pullPolicy: IfNotPresent
   tag: "latest"
 
+database: {}
+
 imagePullSecrets: []
 
 serviceAccount:
@@ -56,19 +58,9 @@ resources:
     cpu: 2000m
     memory: 2148Mi
 
-# Additional volumes on the output Deployment definition.
 volumes: []
-# - name: foo
-#   secret:
-#     secretName: mysecret
-#     optional: false
-
-# Additional volumeMounts on the output Deployment definition.
 volumeMounts: []
-# - name: foo
-#   mountPath: "/etc/foo"
-#   readOnly: true
-
 nodeSelector: {}
 tolerations: []
 affinity: {}
+

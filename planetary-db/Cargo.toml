@@ -1,0 +1,33 @@
+[package]
+name = "planetary-db"
+description = "Database support for Planetary"
+version = "0.1.0"
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+diesel = { workspace = true, optional = true }
+diesel-async = { workspace = true, optional = true }
+diesel-derive-enum = { workspace = true, optional = true }
+diesel_migrations = { workspace = true, optional = true }
+rand.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["postgres"]
+postgres = ["dep:diesel", "dep:diesel-async", "dep:diesel-derive-enum", "dep:diesel_migrations"]
