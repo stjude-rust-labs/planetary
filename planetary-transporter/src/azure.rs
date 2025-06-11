@@ -64,12 +64,11 @@ pub(crate) fn is_azure_url(url: &Url) -> bool {
 pub(crate) async fn copy(source: &str, destination: &str, source_is_dir: bool) -> Result<()> {
     let mut command = Command::new("azcopy");
 
-    // Currently the output of `azcopy` isn't terribly useful for when there's a
-    // problem We discard it here in favor of a simplistic "failed to upload
-    // file" message
+    // TODO: evaluate the output of `azcopy` and check to see if it is safe to
+    // include in the system log
     command
         .args(["cp", source, destination])
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
     if source_is_dir {
@@ -84,7 +83,17 @@ pub(crate) async fn copy(source: &str, destination: &str, source_is_dir: bool) -
         .context("failed to wait for `azcopy`")?;
 
     if !output.status.success() {
-        bail!("azcopy failed with {status}", status = output.status);
+        match std::str::from_utf8(&output.stdout) {
+            Ok(stdout) => {
+                bail!(
+                    "azcopy failed with {status}:\n{stdout}",
+                    status = output.status
+                );
+            }
+            Err(_) => {
+                bail!("azcopy failed with {status}", status = output.status);
+            }
+        }
     }
 
     Ok(())

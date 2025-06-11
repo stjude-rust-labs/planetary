@@ -756,7 +756,7 @@ impl TaskOrchestrator {
         command: &str,
     ) -> String {
         let mut script = String::new();
-        script.push_str("set -euo pipefail;");
+        script.push_str("set -eu;");
 
         // Add check for stdin file existence
         if let Some(stdin) = stdin {
@@ -1158,6 +1158,8 @@ impl TaskOrchestrator {
             .executor_index()?
             .context("missing executor index annotation")?;
 
+        // If the task ran too quickly, we might not have seen a running event
+        // Therefore, transition the state to running before completing it
         if executor_index == 0
             && self
                 .database
@@ -1219,6 +1221,32 @@ impl TaskOrchestrator {
             .context("missing executor index annotation")?;
 
         if pod.executor_ignore_error()? == Some(true) {
+            // If the task ran too quickly, we might not have seen a running event
+            // Therefore, transition the state to running before completing it
+            if executor_index == 0
+                && self
+                    .database
+                    .update_task_state(
+                        tes_id,
+                        State::Running,
+                        &[&format_log_message!(
+                            "executor {executor_index} of task `{tes_id}` is now running"
+                        )],
+                    )
+                    .await?
+            {
+                info!("task `{tes_id}` is now running");
+            }
+
+            self.database
+                .append_system_log(
+                    tes_id,
+                    &[&format_log_message!(
+                        "executor {executor_index} of task `{tes_id}` has failed (ignored error)"
+                    )],
+                )
+                .await?;
+
             // Start the next executor, if there is one; if not, schedule an outputs pod or
             // mark the task as completed
             let task_io = self.database.get_task_io(tes_id).await?;
