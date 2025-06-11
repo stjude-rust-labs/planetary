@@ -86,12 +86,12 @@ pub(crate) async fn copy(source: &str, destination: &str, source_is_dir: bool) -
         match std::str::from_utf8(&output.stdout) {
             Ok(stdout) => {
                 bail!(
-                    "azcopy failed with {status}:\n{stdout}",
+                    "`azcopy` failed with {status}:\n{stdout}",
                     status = output.status
                 );
             }
             Err(_) => {
-                bail!("azcopy failed with {status}", status = output.status);
+                bail!("`azcopy` failed with {status}", status = output.status);
             }
         }
     }
