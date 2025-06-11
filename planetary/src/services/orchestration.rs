@@ -608,62 +608,33 @@ impl TaskOrchestrator {
     ) -> OrchestrationResult<()> {
         debug!("creating executor pod `{name}` for task `{tes_id}`");
 
-        let mut command = String::new();
+        let stdin = executor
+            .stdin
+            .as_ref()
+            .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stdin path `{p}`")))
+            .transpose()?;
 
-        // Set up stdout redirection
-        if let Some(stdout) = &executor.stdout {
-            let stdout = shlex::try_quote(stdout)
-                .with_context(|| format!("invalid stdout path `{stdout}`"))?;
+        let stdout = executor
+            .stdout
+            .as_ref()
+            .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stdout path `{p}`")))
+            .transpose()?;
 
-            command.push_str(&format!(
-                r#"
-out="${{TMPDIR:-/tmp}}/stdout";
-mkfifo "$out";
-tee -a {stdout} < "$out" &
-"#
-            ));
-        }
+        let stderr = executor
+            .stderr
+            .as_ref()
+            .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stderr path `{p}`")))
+            .transpose()?;
 
-        // Set up stderr redirection
-        if let Some(stderr) = &executor.stderr {
-            let stderr = shlex::try_quote(stderr)
-                .with_context(|| format!("invalid stderr path `{stderr}`"))?;
+        let command = shlex::try_join(executor.command.iter().map(AsRef::as_ref))
+            .map_err(|_| Error::System("task command was invalid".into()))?;
 
-            command.push_str(&format!(
-                r#"
-err="${{TMPDIR:-/tmp}}/stderr";
-mkfifo "$err";
-tee -a {stderr} < "$err" >&2 &
-"#
-            ));
-        }
-
-        // Join the command
-        command.push_str(
-            &shlex::try_join(executor.command.iter().map(AsRef::as_ref))
-                .map_err(|_| Error::System("task command was invalid".into()))?,
+        let script = Self::format_executor_script(
+            stdin.as_deref(),
+            stdout.as_deref(),
+            stderr.as_deref(),
+            &command,
         );
-
-        if executor.stdout.is_some() {
-            command.push_str(" >\"$out\"");
-        }
-
-        if executor.stderr.is_some() {
-            command.push_str(" 2>\"$err\"");
-        }
-
-        // Setup stdin
-        if let Some(stdin) = &executor.stdin {
-            command.push_str(" < ");
-            command.push_str(
-                &shlex::try_quote(stdin)
-                    .with_context(|| format!("invalid stdin path `{stdin}`"))?,
-            );
-        }
-
-        // We must wait for the background tee jobs to complete, otherwise buffers might
-        // not be flushed
-        command.push_str("; wait $(jobs -p)");
 
         let volume_mounts = task_io
             .inputs
@@ -740,7 +711,7 @@ tee -a {stderr} < "$err" >&2 &
                 containers: vec![Container {
                     name: "executor-0".to_string(),
                     image: Some(executor.image),
-                    args: Some(vec!["-c".to_string(), command]),
+                    args: Some(vec!["-c".to_string(), script]),
                     command: Some(vec!["/bin/sh".to_string()]),
                     env: executor.env.map(|e| {
                         e.into_iter()
@@ -772,6 +743,75 @@ tee -a {stderr} < "$err" >&2 &
 
         self.pods.create(&PostParams::default(), &pod).await?;
         Ok(())
+    }
+
+    /// Formats an executor script into a single line that can be used with `sh
+    /// -c`.
+    ///
+    /// It is expected that the arguments are already shell quoted.
+    fn format_executor_script(
+        stdin: Option<&str>,
+        stdout: Option<&str>,
+        stderr: Option<&str>,
+        command: &str,
+    ) -> String {
+        let mut script = String::new();
+        script.push_str("set -euo pipefail;");
+
+        // Add check for stdin file existence
+        if let Some(stdin) = stdin {
+            script.push_str("! [ -f ");
+            script.push_str(stdin);
+            script.push_str(r#" ] && >&2 echo "executor stdin file "#);
+            script.push_str(stdin);
+            script.push_str(r#" does not exist" && exit 1;"#);
+        }
+
+        // Set up stdout redirection
+        // We use tee so that both Kubernetes and the requested stdout file have the
+        // output
+        if let Some(stdout) = stdout {
+            script.push_str(r#"out="${TMPDIR:-/tmp}/stdout";"#);
+            script.push_str(r#"mkfifo "$out";"#);
+            script.push_str("tee -a ");
+            script.push_str(stdout);
+            script.push_str(r#" < "$out" &"#);
+        }
+
+        // Set up stderr redirection
+        // We use tee so that both Kubernetes and the requested stderr file have the
+        // output
+        if let Some(stderr) = stderr {
+            script.push_str(r#"err="${TMPDIR:-/tmp}/stderr";"#);
+            script.push_str(r#"mkfifo "$err";"#);
+            script.push_str("tee -a ");
+            script.push_str(stderr);
+            script.push_str(r#" < "$err" &"#);
+        }
+
+        // Add the command
+        script.push_str(command);
+
+        // Redirect stdout
+        if stdout.is_some() {
+            script.push_str(" >\"$out\"");
+        }
+
+        // Redirect stderr
+        if stderr.is_some() {
+            script.push_str(" 2>\"$err\"");
+        }
+
+        // Redirect stdin
+        if let Some(stdin) = stdin {
+            script.push_str(" < ");
+            script.push_str(stdin);
+        }
+
+        // We must wait for the background tee jobs to complete, otherwise buffers might
+        // not be flushed
+        script.push_str("; wait $(jobs -p)");
+        script
     }
 
     /// Creates a pod for a uploading outputs.
