@@ -64,8 +64,7 @@ pub(crate) fn is_azure_url(url: &Url) -> bool {
 pub(crate) async fn copy(source: &str, destination: &str, source_is_dir: bool) -> Result<()> {
     let mut command = Command::new("azcopy");
 
-    // TODO: evaluate the output of `azcopy` and check to see if it is safe to
-    // include in the system log
+    // Note: azcopy doesn't log anything to stderr, even errors.
     command
         .args(["cp", source, destination])
         .stdout(Stdio::piped())
@@ -83,6 +82,8 @@ pub(crate) async fn copy(source: &str, destination: &str, source_is_dir: bool) -
         .context("failed to wait for `azcopy`")?;
 
     if !output.status.success() {
+        // TODO: evaluate the output of `azcopy` and check to see if it is safe to
+        // include in the system log
         match std::str::from_utf8(&output.stdout) {
             Ok(stdout) => {
                 bail!(

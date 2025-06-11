@@ -103,8 +103,8 @@ const PLANETARY_EXECUTOR_IGNORE_ERROR_ANNOTATION: &str = "planetary/executor-ign
 /// created immediately after the completion of the inputs pod.
 const PLANETARY_AFTER_INPUTS_ANNOTATION: &str = "planetary/after-inputs";
 
-/// The maximum number of lines to tail for a pod's logs.
-const MAX_LOG_TAIL_LINES: i64 = 10;
+/// The maximum number of lines to tail for an executor pod's logs.
+const MAX_EXECUTOR_LOG_LINES: i64 = 10;
 
 /// Formats a pod name given the TES task id, pod kind, and executor index.
 ///
@@ -1465,7 +1465,13 @@ impl TaskOrchestrator {
                         .logs(
                             &name,
                             &LogParams {
-                                tail_lines: Some(MAX_LOG_TAIL_LINES),
+                                tail_lines: match pod.kind()? {
+                                    PodKind::Inputs | PodKind::Outputs => {
+                                        // For an inputs and outputs pod, read all the log
+                                        None
+                                    }
+                                    PodKind::Executor => Some(MAX_EXECUTOR_LOG_LINES),
+                                },
                                 ..Default::default()
                             },
                         )
