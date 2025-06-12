@@ -4,9 +4,11 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use diesel::Connection;
+use diesel_async::AsyncConnection;
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::pooled_connection::deadpool::Pool;
+use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_migrations::EmbeddedMigrations;
 use diesel_migrations::HarnessWithOutput;
 use diesel_migrations::MigrationHarness;
@@ -555,37 +557,53 @@ impl Database for PostgresDatabase {
         name: &str,
         kind: PodKind,
         executor_index: Option<usize>,
-    ) -> DatabaseResult<()> {
+    ) -> DatabaseResult<bool> {
         use diesel::*;
         use diesel_async::RunQueryDsl;
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        // Find the task
-        let task_id = schema::tasks::table
-            .select(schema::tasks::id)
-            .filter(schema::tasks::tes_id.eq(tes_id))
-            .first(&mut conn)
-            .await
-            .optional()
-            .map_err(Error::Diesel)?
-            .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
+        let transaction = conn.transaction(|conn| {
+            async move {
+                // Find the task and its state
+                let task = schema::tasks::table
+                    .select(models::MinimalTask::as_select())
+                    .filter(schema::tasks::tes_id.eq(tes_id))
+                    .for_update()
+                    .first(conn)
+                    .await
+                    .optional()
+                    .map_err(Error::Diesel)?
+                    .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
 
-        // Insert the pod
-        diesel::insert_into(schema::pods::table)
-            .values(models::NewPod {
-                task_id,
-                name,
-                kind: kind.into(),
-                state: PodState::Unknown.into(),
-                executor_index: executor_index
-                    .map(|i| i.try_into().expect("executor index is out of range")),
-            })
-            .execute(&mut conn)
-            .await
-            .map_err(Error::Diesel)?;
+                match task.state {
+                    models::TaskState::Canceling | models::TaskState::Canceled => {
+                        return Ok::<_, Error>(false);
+                    }
+                    _ => {}
+                }
 
-        Ok(())
+                // Insert the pod
+                diesel::insert_into(schema::pods::table)
+                    .values(models::NewPod {
+                        task_id: task.id,
+                        name,
+                        kind: kind.into(),
+                        state: PodState::Unknown.into(),
+                        executor_index: executor_index
+                            .map(|i| i.try_into().expect("executor index is out of range")),
+                    })
+                    .execute(conn)
+                    .await
+                    .map_err(Error::Diesel)?;
+
+                Ok(true)
+            }
+            .scope_boxed()
+        });
+
+        let inserted = transaction.await?;
+        Ok(inserted)
     }
 
     /// Updates the state of a pod.
@@ -601,7 +619,7 @@ impl Database for PostgresDatabase {
         use diesel::*;
         use diesel_async::RunQueryDsl;
 
-        // Determine the allowed previous state for the task.
+        // Determine the allowed previous state for the pod.
         let previous = match state {
             // Unknown has no previous state
             PodState::Unknown => {

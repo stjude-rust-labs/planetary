@@ -217,14 +217,16 @@ pub trait Database: Send + Sync + 'static {
 
     /// Inserts a pod into the database.
     ///
-    /// Returns the database identifier for the pod.
+    /// Returns `Ok(true)` if the pod was inserted or `Ok(false)` if the pod
+    /// could not be inserted because the associated task is canceling or
+    /// canceled.
     async fn insert_pod(
         &self,
         tes_id: &str,
         name: &str,
         kind: PodKind,
         executor_index: Option<usize>,
-    ) -> DatabaseResult<()>;
+    ) -> DatabaseResult<bool>;
 
     /// Updates the state of a pod.
     ///

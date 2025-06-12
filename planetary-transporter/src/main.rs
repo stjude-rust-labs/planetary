@@ -505,8 +505,7 @@ async fn upload_directory(
             .await
             .with_context(|| {
                 format!(
-                    "failed to upload output `{path}` to `{url}`",
-                    path = output.path,
+                    "failed to upload output `{container_path}` to `{url}`",
                     url = DisplayUrl(&url),
                 )
             })?;
