@@ -23,13 +23,16 @@
 //! Likewise, if the `--outputs` option is used with `--targets /mnt/outputs`,
 //! it will access `/mnt/outputs/0`, `/mnt/outputs/1`, etc.
 
-use std::fmt;
+use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::io::stderr;
+use std::num::NonZero;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::thread::available_parallelism;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -38,58 +41,31 @@ use anyhow::bail;
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
-use futures::stream::StreamExt;
+use cloud::CopyEvent;
+use cloud::UrlExt;
 use glob::Pattern;
 use planetary_db::Database;
 use reqwest::Url;
 use tes::v1::types::responses::OutputFile;
-use tes::v1::types::task::Input;
 use tes::v1::types::task::IoType;
 use tes::v1::types::task::Output;
 use tokio::fs::File;
 use tokio::fs::create_dir_all;
-use tokio::io::AsyncWriteExt;
-use tokio::io::BufWriter;
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
+use tokio::select;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::Receiver;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::oneshot;
 use tracing::error;
 use tracing::info;
-use tracing_log::AsTrace;
+use tracing::warn;
+use tracing::warn_span;
+use tracing_indicatif::IndicatifLayer;
+use tracing_indicatif::span_ext::IndicatifSpanExt;
+use tracing_indicatif::style::ProgressStyle;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
 use walkdir::WalkDir;
-
-mod azure;
-
-/// The maximum number of concurrent downloads.
-const MAX_CONCURRENT_DOWNLOADS: usize = 10;
-
-/// Rewrites a cloud storage URL to `https`.
-pub fn rewrite_url(url: &str) -> Result<Url> {
-    let url: Url = url
-        .parse()
-        .with_context(|| format!("invalid URL `{url}`", url = DisplayUrl(url)))?;
-    match url.scheme() {
-        "http" | "https" => Ok(url),
-        "az" => Ok(azure::rewrite_url(&url)?),
-        scheme => bail!("URL scheme `{scheme}` is not supported"),
-    }
-}
-
-/// Helper for displaying URLs in log messages.
-struct DisplayUrl<T>(T);
-
-impl<T: AsRef<str>> fmt::Display for DisplayUrl<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = self.0.as_ref();
-        let url = if let Some(index) = s.find('?') {
-            &s[..index]
-        } else {
-            s
-        };
-
-        write!(f, "{url}")
-    }
-}
 
 /// The mode of operation.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,9 +110,9 @@ struct Args {
     /// The TES identifier of the task.
     tes_id: String,
 
-    /// The verbosity flags.
+    /// The verbosity level.
     #[command(flatten)]
-    verbose: Verbosity<WarnLevel>,
+    verbosity: Verbosity<WarnLevel>,
 }
 
 impl Args {
@@ -147,6 +123,53 @@ impl Args {
                 Ok(Arc::new(planetary_db::postgres::PostgresDatabase::new(self.database_url.clone())?))
             } else {
                 compile_error!("no database feature was enabled");
+            }
+        }
+    }
+}
+
+/// Handles events that may occur during the copy operation.
+///
+/// This is responsible for showing and updating progress bars for files
+/// being transferred.
+async fn handle_events(mut events: Receiver<CopyEvent>, mut shutdown: oneshot::Receiver<()>) {
+    let mut bars = HashMap::new();
+    let mut warned = false;
+
+    loop {
+        select! {
+            _ = &mut shutdown => break,
+            event = events.recv() => match event {
+                Ok(CopyEvent::TransferStarted { id, path, size }) => {
+                    let bar = warn_span!("progress");
+                    let style = ProgressStyle::with_template(
+                        "[{elapsed_precise:.cyan/blue}] {bar:40.cyan/blue} {bytes:.cyan/blue} / \
+                            {total_bytes:.cyan/blue} ({bytes_per_sec:.cyan/blue}) [ETA \
+                            {eta_precise:.cyan/blue}]: {msg}",
+                    )
+                    .unwrap();
+                    bar.pb_set_style(&style);
+                    bar.pb_set_length(size);
+                    bar.pb_set_message(path.to_str().unwrap_or("<unknown>"));
+                    bar.pb_start();
+                    bars.insert(id, (bar, 0u64));
+                }
+                Ok(CopyEvent::TransferProgress { id, transferred }) => {
+                    if let Some((bar, position)) = bars.get_mut(&id) {
+                        *position += transferred;
+                        bar.pb_set_position(*position);
+                    }
+                }
+                Ok(CopyEvent::TransferComplete { id }) => {
+                    bars.remove(&id);
+                }
+                Err(RecvError::Closed) => break,
+                Err(RecvError::Lagged(_)) => {
+                    if !warned {
+                        warn!("event stream is lagging: progress may be incorrect");
+                        warned = true;
+                    }
+                }
             }
         }
     }
@@ -183,39 +206,71 @@ async fn download_inputs(
         )
     })?;
 
-    // Spawn concurrent input downloads
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
-    let mut set = JoinSet::new();
+    let (events_tx, events_rx) =
+        broadcast::channel(16 * available_parallelism().map(NonZero::get).unwrap_or(1));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let handler = tokio::spawn(async move { handle_events(events_rx, shutdown_rx).await });
+
     for (index, input) in task_io.inputs.into_iter().enumerate() {
-        let semaphore = semaphore.clone();
         let path = inputs_dir.join(index.to_string());
-        set.spawn(async move {
-            let _permit = semaphore.acquire().await.expect("failed to acquire permit");
 
-            let path = path
-                .to_str()
-                .with_context(|| format!("path `{path}` is not UTF-8", path = path.display()))?;
+        // Write the contents if directly given
+        if let Some(contents) = &input.content {
+            assert_eq!(
+                input.ty,
+                IoType::File,
+                "cannot create content for a directory"
+            );
 
-            if input.ty == IoType::File {
-                download_file(&input, path).await?;
-            } else {
-                download_directory(&input, path).await?;
-            }
+            info!(
+                "creating input file `{path}` with specified contents",
+                path = input.path,
+            );
 
-            anyhow::Ok(())
-        });
-    }
+            tokio::fs::write(&path, contents).await.with_context(|| {
+                format!("failed to create input file `{path}`", path = input.path)
+            })?;
+            continue;
+        }
 
-    // Wait for all downloads to complete
-    loop {
-        let res = set.join_next().await;
-        match res {
-            Some(res) => {
-                res.expect("task panicked")?;
-            }
-            None => break,
+        let url = input
+            .url
+            .context("input is missing a URL")?
+            .parse::<Url>()
+            .context("input URL is invalid")?;
+
+        // Perform the copy
+        cloud::copy(
+            Default::default(),
+            url.clone(),
+            &path,
+            Some(events_tx.clone()),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to download input `{url}` to `{path}`",
+                url = url.display(),
+                path = input.path
+            )
+        })?;
+
+        // Check that the result matches the input type
+        match (path.is_file(), input.ty) {
+            (true, IoType::Directory) => bail!(
+                "input `{url}` was a file but the input type was `DIRECTORY`",
+                url = url.display()
+            ),
+            (false, IoType::File) => bail!(
+                "input `{url}` was a directory but the input type was `FILE`",
+                url = url.display()
+            ),
+            _ => {}
         }
     }
+
+    shutdown_tx.send(()).ok();
+    handler.await.expect("failed to join events handler");
 
     // We also need to create any file outputs so that Kubernetes will mount them as
     // files and not directories
@@ -234,103 +289,6 @@ async fn download_inputs(
     Ok(())
 }
 
-/// Downloads a file input to the given path.
-async fn download_file(input: &Input, path: &str) -> Result<()> {
-    assert_eq!(input.ty, IoType::File);
-
-    if let Some(contents) = &input.content {
-        info!(
-            "creating input file `{path}` with specified contents",
-            path = input.path,
-        );
-        return tokio::fs::write(&path, contents)
-            .await
-            .with_context(|| format!("failed to create input file `{path}`", path = input.path));
-    }
-
-    let url = input.url.as_deref().context("input is missing URL")?;
-    let url: Url = rewrite_url(url)
-        .with_context(|| format!("invalid input URL `{url}`", url = DisplayUrl(url)))?;
-
-    info!(
-        "downloading `{url}` to input file `{path}`",
-        url = DisplayUrl(&url),
-        path = input.path,
-    );
-
-    if azure::is_azure_url(&url) {
-        // Use copy as it might be more efficient that downloading the file as a stream
-        return azure::copy(url.as_str(), path, false)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to download input `{url}` to `{path}`",
-                    url = DisplayUrl(&url),
-                    path = input.path,
-                )
-            });
-    }
-
-    let response = reqwest::get(url.as_str())
-        .await
-        .with_context(|| format!("failed to download `{url}`"))?;
-
-    if response.status().is_success() {
-        bail!(
-            "failed to download `{url}`: server returned status {status}",
-            url = DisplayUrl(&url),
-            status = response.status()
-        );
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut writer =
-        BufWriter::new(File::create(&path).await.with_context(|| {
-            format!("failed to create input file `{path}`", path = input.path,)
-        })?);
-    loop {
-        let chunk = stream.next().await;
-        match chunk {
-            Some(chunk) => {
-                let chunk = chunk.with_context(|| format!("failed to download `{url}`"))?;
-                writer.write_all(&chunk).await?;
-            }
-            None => break,
-        }
-    }
-    writer.flush().await?;
-    Ok(())
-}
-
-/// Downloads a directory input to the given path.
-async fn download_directory(input: &Input, path: &str) -> Result<()> {
-    assert_eq!(input.ty, IoType::Directory);
-
-    let url = input.url.as_deref().context("input is missing URL")?;
-    let url: Url = rewrite_url(url)
-        .with_context(|| format!("invalid input URL `{url}`", url = DisplayUrl(url)))?;
-
-    info!(
-        "downloading `{url}` to input directory `{path}`",
-        url = DisplayUrl(&url),
-        path = input.path,
-    );
-
-    if azure::is_azure_url(&url) {
-        return azure::copy(url.as_str(), path, true)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to download input `{url}` to `{path}`",
-                    url = DisplayUrl(&url),
-                    path = input.path,
-                )
-            });
-    } else {
-        bail!("only Azure storage URLs are currently supported")
-    }
-}
-
 /// Uploads outputs from the specified outputs directory.
 async fn upload_outputs(
     database: Arc<dyn Database>,
@@ -342,12 +300,14 @@ async fn upload_outputs(
         anyhow!("failed to retrieve information for task `{tes_id}`")
     })?;
 
+    let (events_tx, events_rx) =
+        broadcast::channel(16 * available_parallelism().map(NonZero::get).unwrap_or(1));
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let handler = tokio::spawn(async move { handle_events(events_rx, shutdown_rx).await });
+
     let mut files = Vec::new();
     for (index, output) in task_io.outputs.iter().enumerate() {
-        let url: Url = rewrite_url(&output.url).with_context(|| {
-            format!("invalid output URL `{url}`", url = DisplayUrl(&output.url))
-        })?;
-
+        let url = output.url.parse::<Url>().context("output URL is invalid")?;
         let path = outputs_dir.join(index.to_string());
         let metadata = path.metadata().with_context(|| {
             format!(
@@ -361,11 +321,22 @@ async fn upload_outputs(
             .with_context(|| format!("path `{path}` is not UTF-8", path = path.display()))?;
 
         if metadata.is_file() {
-            upload_file(output, url, path, metadata.len(), &mut files).await?;
+            upload_file(
+                output,
+                url,
+                path,
+                metadata.len(),
+                events_tx.clone(),
+                &mut files,
+            )
+            .await?;
         } else {
-            upload_directory(output, &url, path, &mut files).await?;
+            upload_directory(output, &url, path, events_tx.clone(), &mut files).await?;
         }
     }
+
+    shutdown_tx.send(()).ok();
+    handler.await.expect("failed to join events handler");
 
     database.update_task_output_files(tes_id, &files).await?;
     Ok(())
@@ -377,6 +348,7 @@ async fn upload_file(
     mut url: Url,
     path: &str,
     size: u64,
+    events: broadcast::Sender<CopyEvent>,
     files: &mut Vec<OutputFile>,
 ) -> Result<()> {
     if output.ty != IoType::File {
@@ -386,25 +358,16 @@ async fn upload_file(
         );
     }
 
-    info!(
-        "uploading output file `{path}` to `{url}`",
-        path = output.path,
-        url = DisplayUrl(&url),
-    );
-
-    if azure::is_azure_url(&url) {
-        azure::copy(path, url.as_str(), false)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to upload output `{path}` to `{url}`",
-                    path = output.path,
-                    url = DisplayUrl(&url),
-                )
-            })?;
-    } else {
-        bail!("only Azure storage URLs are currently supported")
-    }
+    // Perform the copy
+    cloud::copy(Default::default(), path, url.clone(), Some(events))
+        .await
+        .with_context(|| {
+            format!(
+                "failed to upload output `{path}` to `{url}`",
+                path = output.path,
+                url = url.display(),
+            )
+        })?;
 
     // Clear the query and fragment before saving the output
     url.set_query(None);
@@ -423,6 +386,7 @@ async fn upload_directory(
     output: &Output,
     url: &Url,
     path: &str,
+    events: broadcast::Sender<CopyEvent>,
     files: &mut Vec<OutputFile>,
 ) -> Result<()> {
     if output.ty != IoType::Directory {
@@ -473,7 +437,7 @@ async fn upload_directory(
 
         info!(
             "uploading output file `{container_path}` to `{url}`",
-            url = DisplayUrl(url)
+            url = url.display()
         );
 
         let mut url = url.clone();
@@ -494,24 +458,16 @@ async fn upload_directory(
             }
         }
 
-        if azure::is_azure_url(&url) {
-            azure::copy(
-                entry.path().to_str().with_context(|| {
-                    format!("path `{path}` is not UTF-8", path = entry.path().display())
-                })?,
-                url.as_str(),
-                false,
-            )
+        // Perform the copy
+        cloud::copy(Default::default(), path, url.clone(), Some(events.clone()))
             .await
             .with_context(|| {
                 format!(
-                    "failed to upload output `{container_path}` to `{url}`",
-                    url = DisplayUrl(&url),
+                    "failed to upload output `{path}` to `{url}`",
+                    path = output.path,
+                    url = url.display(),
                 )
             })?;
-        } else {
-            bail!("only Azure storage URLs are currently supported")
-        }
 
         // Clear the query and fragment before saving the output
         url.set_query(None);
@@ -533,14 +489,30 @@ pub async fn main() -> Result<()> {
     let args = Args::parse();
 
     match std::env::var("RUST_LOG") {
-        Ok(_) => tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env())
-            .with_ansi(std::io::stdout().is_terminal())
-            .init(),
-        Err(_) => tracing_subscriber::fmt()
-            .with_max_level(args.verbose.log_level_filter().as_trace())
-            .with_ansi(std::io::stdout().is_terminal())
-            .init(),
+        Ok(_) => {
+            let indicatif_layer = IndicatifLayer::new();
+            let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+                .with_env_filter(EnvFilter::from_default_env())
+                .with_ansi(stderr().is_terminal())
+                .with_writer(indicatif_layer.get_stderr_writer())
+                .finish()
+                .with(indicatif_layer);
+
+            tracing::subscriber::set_global_default(subscriber)?;
+        }
+
+        Err(_) => {
+            let indicatif_layer = IndicatifLayer::new();
+
+            let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+                .with_max_level(args.verbosity)
+                .with_ansi(stderr().is_terminal())
+                .with_writer(indicatif_layer.get_stderr_writer())
+                .finish()
+                .with(indicatif_layer);
+
+            tracing::subscriber::set_global_default(subscriber)?;
+        }
     }
 
     match args.mode {

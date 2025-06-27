@@ -58,7 +58,10 @@ fn validate_task(task: &RequestTask) -> Result<()> {
                 }
             }
             (_, Some(_)) => {
-                // If content is specified, URL is ignored
+                // If content is specified, URL is ignored; it must be a file type
+                if input.ty != IoType::File {
+                    bail!("input specifies content but is not a file")
+                }
             }
         }
 

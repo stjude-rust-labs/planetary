@@ -71,7 +71,7 @@ pub struct Args {
     #[clap(long)]
     storage: Option<Vec<String>>,
 
-    /// The verbosity flags.
+    /// The verbosity level.
     #[command(flatten)]
     verbose: Verbosity<WarnLevel>,
 

@@ -567,10 +567,11 @@ impl TaskOrchestrator {
             spec: Some(PodSpec {
                 containers: vec![Container {
                     name: "inputs".to_string(),
-                    image: Some(DEFAULT_TRANSPORTER_IMAGE.into()), /* TODO: make this
-                                                                    * configurable */
+                    // TODO: make this configurable
+                    image: Some(DEFAULT_TRANSPORTER_IMAGE.into()),
                     image_pull_policy: Some("IfNotPresent".into()),
                     args: Some(vec![
+                        "-v".into(),
                         "--database-url".into(),
                         self.database.url().expose_secret().to_string(),
                         "--mode".into(),
@@ -861,10 +862,11 @@ impl TaskOrchestrator {
             spec: Some(PodSpec {
                 containers: vec![Container {
                     name: "outputs".to_string(),
-                    image: Some(DEFAULT_TRANSPORTER_IMAGE.into()), /* TODO: make this
-                                                                    * configurable */
+                    // TODO: make this configurable
+                    image: Some(DEFAULT_TRANSPORTER_IMAGE.into()),
                     image_pull_policy: Some("IfNotPresent".into()),
                     args: Some(vec![
+                        "-v".into(),
                         "--database-url".into(),
                         self.database.url().expose_secret().to_string(),
                         "--mode".into(),
