@@ -20,17 +20,17 @@ const USER_AGENT: &str = concat!("cloud-copy v", env!("CARGO_PKG_VERSION"));
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Location<'a> {
     /// The location is a local path.
-    Local(&'a Path),
-    /// The location is a remote URL.
-    Remote(Url),
+    Path(&'a Path),
+    /// The location is a URL.
+    Url(Url),
 }
 
 impl<'a> Location<'a> {
     /// Constructs a new location.
     pub fn new(s: &'a str) -> Self {
         match s.parse::<Url>() {
-            Ok(url) => Self::Remote(url),
-            Err(_) => Self::Local(Path::new(s)),
+            Ok(url) => Self::Url(url),
+            Err(_) => Self::Path(Path::new(s)),
         }
     }
 }
@@ -38,8 +38,8 @@ impl<'a> Location<'a> {
 impl fmt::Display for Location<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Local(path) => write!(f, "{path}", path = path.display()),
-            Self::Remote(url) => write!(f, "{url}", url = url.display()),
+            Self::Path(path) => write!(f, "{path}", path = path.display()),
+            Self::Url(url) => write!(f, "{url}", url = url.display()),
         }
     }
 }
@@ -58,19 +58,19 @@ impl<'a> From<&'a String> for Location<'a> {
 
 impl<'a> From<&'a Path> for Location<'a> {
     fn from(value: &'a Path) -> Self {
-        Self::Local(value)
+        Self::Path(value)
     }
 }
 
 impl<'a> From<&'a PathBuf> for Location<'a> {
     fn from(value: &'a PathBuf) -> Self {
-        Self::Local(value.as_path())
+        Self::Path(value.as_path())
     }
 }
 
 impl From<Url> for Location<'_> {
     fn from(value: Url) -> Self {
-        Self::Remote(value)
+        Self::Url(value)
     }
 }
 
@@ -105,7 +105,7 @@ impl UrlExt for Url {
 
         self.to_file_path()
             .map(Some)
-            .map_err(|_| CopyError::InvalidFileUrl)
+            .map_err(|_| CopyError::InvalidFileUrl(self.clone()))
     }
 
     fn is_azure_storage(&self) -> bool {
@@ -150,20 +150,28 @@ pub enum CopyError {
     #[error("copying between remote locations is not supported")]
     RemoteCopyNotSupported,
     /// A remote URL has an unsupported URL scheme.
-    #[error("remote URL has an unsupported URL scheme")]
-    UnsupportedUrlScheme,
+    #[error("remote URL has an unsupported URL scheme `{0}`")]
+    UnsupportedUrlScheme(String),
     /// Unsupported remote URL.
-    #[error("remote URL is not for a supported cloud service")]
-    UnsupportedUrl,
+    #[error("URL `{url}` is not for a supported cloud service", url = .0.display())]
+    UnsupportedUrl(Url),
     /// Invalid URl with a `file` scheme.
-    #[error("invalid URL with `file` scheme: the URL cannot be represented as a local path")]
-    InvalidFileUrl,
+    #[error("file URL `{url}` cannot be represented as a local path", url = .0.display())]
+    InvalidFileUrl(Url),
     /// The specified path is invalid.
     #[error("the specified path cannot be a root directory or empty")]
     InvalidPath,
+    /// Failed to create a directory.
+    #[error("failed to create directory `{path}`: {error}", path = .path.display())]
+    DirectoryCreationFailed {
+        /// The path to the directory that failed to be created.
+        path: PathBuf,
+        /// The error that occurred creating the directory.
+        error: std::io::Error,
+    },
     /// The destination path already exists.
-    #[error("the destination path already exists")]
-    DestinationExists,
+    #[error("the destination path `{path}` already exists", path = .0.display())]
+    DestinationExists(PathBuf),
     /// An Azure copy error occurred.
     #[error(transparent)]
     Azure(#[from] azure::AzureCopyError),
@@ -213,7 +221,7 @@ fn rewrite_url(url: Url) -> Result<Url> {
     match url.scheme() {
         "file" | "https" => Ok(url),
         "az" => Ok(azure::rewrite_url(&url)?),
-        _ => Err(CopyError::UnsupportedUrlScheme),
+        scheme => Err(CopyError::UnsupportedUrlScheme(scheme.to_string())),
     }
 }
 
@@ -276,14 +284,14 @@ pub async fn copy(
     let destination = destination.into();
 
     match (source, destination) {
-        (Location::Local(source), Location::Local(destination)) => {
+        (Location::Path(source), Location::Path(destination)) => {
             // Two local locations, just perform a copy
             tokio::fs::copy(source, destination)
                 .await
                 .map(|_| ())
                 .map_err(Into::into)
         }
-        (Location::Local(source), Location::Remote(destination)) => {
+        (Location::Path(source), Location::Url(destination)) => {
             // Perform a copy if the the destination is a local path
             if let Some(destination) = destination.to_local_path()? {
                 return tokio::fs::copy(source, destination)
@@ -296,16 +304,16 @@ pub async fn copy(
             if destination.is_azure_storage() {
                 azure::copy(
                     config,
-                    Location::Local(source),
-                    Location::Remote(destination),
+                    Location::Path(source),
+                    Location::Url(destination),
                     events.clone(),
                 )
                 .await
             } else {
-                Err(CopyError::UnsupportedUrl)
+                Err(CopyError::UnsupportedUrl(destination))
             }
         }
-        (Location::Remote(source), Location::Local(destination)) => {
+        (Location::Url(source), Location::Path(destination)) => {
             // Perform a copy if the the source is a local path
             if let Some(source) = source.to_local_path()? {
                 return tokio::fs::copy(source, destination)
@@ -315,22 +323,34 @@ pub async fn copy(
             }
 
             if destination.exists() {
-                return Err(CopyError::DestinationExists);
+                return Err(CopyError::DestinationExists(destination.to_path_buf()));
             }
 
             let source = rewrite_url(source)?;
             if source.is_azure_storage() {
                 azure::copy(
                     config,
-                    Location::Remote(source),
-                    Location::Local(destination),
+                    Location::Url(source),
+                    Location::Path(destination),
                     events.clone(),
                 )
                 .await
             } else {
-                Err(CopyError::UnsupportedUrl)
+                Err(CopyError::UnsupportedUrl(source))
             }
         }
-        (Location::Remote(_), Location::Remote(_)) => Err(CopyError::RemoteCopyNotSupported),
+        (Location::Url(source), Location::Url(destination)) => {
+            if let (Some(source), Some(destination)) =
+                (source.to_local_path()?, destination.to_local_path()?)
+            {
+                // Two local locations, just perform a copy
+                return tokio::fs::copy(source, destination)
+                    .await
+                    .map(|_| ())
+                    .map_err(Into::into);
+            }
+
+            Err(CopyError::RemoteCopyNotSupported)
+        }
     }
 }

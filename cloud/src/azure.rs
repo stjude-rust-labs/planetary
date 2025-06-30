@@ -252,6 +252,10 @@ pub(crate) fn rewrite_url(url: &Url) -> Result<Url> {
 /// Remote URLs are expected to contain SAS tokens for authentication.
 ///
 /// Copying between two remote locations is not supported.
+///
+/// # Panics
+///
+/// Panics if the copy operation does not involve an Azure storage URL.
 pub(crate) async fn copy<'a, 'b>(
     config: CopyConfig,
     source: Location<'a>,
@@ -259,14 +263,7 @@ pub(crate) async fn copy<'a, 'b>(
     events: Option<broadcast::Sender<CopyEvent>>,
 ) -> Result<()> {
     match (source, destination) {
-        (Location::Local(source), Location::Local(destination)) => {
-            // Two local locations, just perform a copy
-            tokio::fs::copy(source, destination)
-                .await
-                .map(|_| ())
-                .map_err(Into::into)
-        }
-        (Location::Local(source), Location::Remote(destination)) => {
+        (Location::Path(source), Location::Url(destination)) => {
             // Perform a copy if the the destination is a local path
             if let Some(destination) = destination.to_local_path()? {
                 return tokio::fs::copy(source, destination)
@@ -277,7 +274,7 @@ pub(crate) async fn copy<'a, 'b>(
 
             upload::upload(config, source, destination, events).await
         }
-        (Location::Remote(source), Location::Local(destination)) => {
+        (Location::Url(source), Location::Path(destination)) => {
             // Perform a copy if the the source is a local path
             if let Some(source) = source.to_local_path()? {
                 return tokio::fs::copy(source, destination)
@@ -288,6 +285,6 @@ pub(crate) async fn copy<'a, 'b>(
 
             download::download(config, source, destination, events).await
         }
-        (Location::Remote(_), Location::Remote(_)) => Err(CopyError::RemoteCopyNotSupported),
+        _ => panic!("copy operation did not involve an Azure URL"),
     }
 }

@@ -249,8 +249,11 @@ impl BlockUploader {
 
         {
             // Append the operation and block id to the URL
+            // These parameters are documented here: https://learn.microsoft.com/en-us/rest/api/storageservices/put-block
             let mut pairs = destination.query_pairs_mut();
+            // The component being created (a block)
             pairs.append_pair("comp", "block");
+            // The id of the block being created
             pairs.append_pair("blockid", &block_id);
         }
 
@@ -335,7 +338,9 @@ async fn upload_block_list(client: &Client, mut destination: Url, ids: &[String]
 
     {
         // Append the operation to the URL
+        // These parameter are documented here: https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list
         let mut pairs = destination.query_pairs_mut();
+        // The component being created (a block list)
         pairs.append_pair("comp", "blocklist");
     }
 

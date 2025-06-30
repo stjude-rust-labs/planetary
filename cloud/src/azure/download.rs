@@ -209,9 +209,13 @@ async fn list_prefixed_blobs(client: &Client, source: &Url) -> Result<(String, V
 
     {
         // Append the operation and block id to the URL
+        // These parameters are documented here: https://learn.microsoft.com/en-us/rest/api/storageservices/list-blobs
         let mut pairs = container.query_pairs_mut();
+        // The resource operation is on the container
         pairs.append_pair("restype", "container");
+        // The operation is a list
         pairs.append_pair("comp", "list");
+        // The prefix to use for listing blobs in the container.
         pairs.append_pair("prefix", &prefix);
     }
 
@@ -220,6 +224,7 @@ async fn list_prefixed_blobs(client: &Client, source: &Url) -> Result<(String, V
     loop {
         let mut url = container.clone();
         if !next.is_empty() {
+            // The marker to start listing from, set from the previous querys
             url.query_pairs_mut().append_pair("marker", &next);
         }
 
@@ -270,7 +275,12 @@ async fn download_file(
 
     // Start by creating the destination's parent directory
     let parent = destination.parent().ok_or(CopyError::InvalidPath)?;
-    fs::create_dir_all(parent).await?;
+    fs::create_dir_all(parent)
+        .await
+        .map_err(|error| CopyError::DirectoryCreationFailed {
+            path: parent.to_path_buf(),
+            error,
+        })?;
 
     // Send the request for the file
     let response = client
