@@ -95,7 +95,7 @@ struct Block {
 }
 
 impl Block {
-    /// Constructs a new block with he given index and filled buffer.
+    /// Constructs a new block with the given index and filled buffer.
     fn new(index: usize, buffer: RcGuard<BufferAllocator, Vec<u8>>) -> Self {
         Self { index, buffer }
     }
