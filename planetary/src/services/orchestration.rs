@@ -110,7 +110,7 @@ const PLANETARY_AFTER_INPUTS_ANNOTATION: &str = "planetary/after-inputs";
 const PLANETARY_DELETED_ANNOTATION: &str = "planetary/deleted";
 
 /// The maximum number of lines to tail for an executor pod's logs.
-const MAX_EXECUTOR_LOG_LINES: i64 = 10;
+const MAX_EXECUTOR_LOG_LINES: i64 = 15;
 
 /// Formats a pod name given the TES task id, pod kind, and executor index.
 ///
