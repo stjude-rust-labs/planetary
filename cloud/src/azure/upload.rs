@@ -528,7 +528,7 @@ pub async fn upload(
                 )
                 .await
             })
-            .map(|r| r.expect("task panicked"))
+            .map(|r| r.expect("upload task panicked"))
         })
         .buffer_unordered(config.azure().parallelism());
 
