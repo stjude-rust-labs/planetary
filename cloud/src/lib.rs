@@ -265,7 +265,7 @@ pub enum CopyEvent {
 ///
 /// # Google Cloud Storage
 ///
-/// Support coming Soon.
+/// Support coming soon.
 pub async fn copy(
     config: CopyConfig,
     source: impl Into<Location<'_>>,
