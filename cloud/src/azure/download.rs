@@ -51,7 +51,7 @@ struct Blob {
 /// Represents a list of blobs.
 #[derive(Default, Debug, Deserialize)]
 struct Blobs {
-    /// The blob name
+    /// The blob names.
     #[serde(default, rename = "Blob")]
     items: Vec<Blob>,
 }
