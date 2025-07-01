@@ -33,20 +33,208 @@ src="./assets/repo-header.png" />
   </p>
 </p>
 
-## 🖥️ Development
+## 📚 About Planetary
 
-To bootstrap a development environment, please use the following commands.
+Planetary is an implementation of the [GA4GH Task Execution Service (TES) API](https://github.com/ga4gh/task-execution-schemas)
+that executes tasks in a [Kubernetes](https://kubernetes.io/) cluster.
+
+### Architecture
+
+Planetary is made up of four components:
+
+* _TES API Service_ - this component is responsible for handling requests from
+  TES API clients; it interacts with the _Task Orchestration Service_ and the
+  _Planetary Database_.
+
+* _Task Orchestration Service_ - this component is responsible for creating and
+  managing the Kubernetes resources used to execute tasks; it interacts with
+  the _Kubernetes API Server_ and the _Planetary Database_.
+
+* _Planetary Database_ - this component stores the state of the TES tasks and
+  the Kubernetes pods used to execute tasks; [PostgreSQL](https://www.postgresql.org)
+  is currently the only supported database.
+
+* _Planetary Transporter_ - this component is a responsible for downloading
+  task inputs  from cloud storage to the Kubernetes storage before a task
+  starts and also  for uploading task outputs from Kubernetes storage to cloud
+  storage after a  task has completed; [Azure Blob Storage](https://azure.microsoft.com/en-us/products/storage/blobs/)
+  is currently the only supported cloud storage.
+
+_Note: currently the TES API Service and the Task Orchestration Service are
+co-located in the same executable; in the future, they will be split apart so
+that they can be scaled independently of one another._
+
+There are currently two images created for use with Planetary:
+
+* `ghcr.io/stjude-rust-labs/planetary` - implements the _TES API Service_ and
+  the _Task Orchestration Service_; this image is used by pods implementing the 
+  Planetary service.
+
+* `ghcr.io/stjude-rust-labs/planetary-transporter` - implements the _Planetary 
+  Transporter_; this image is used on pods scheduled to run before and after a 
+  task.
+
+## 🚀 Getting Started
+
+### Cloning the Repository
+
+To clone the repository, please use the following command:
 
 ```bash
-# Clone the repository
 git clone git@github.com:stjude-rust-labs/planetary.git
 cd planetary
-
-# Build the crate in release mode
-cargo build --release
 ```
 
-## 🚧️ Tests
+### Installing Docker
+
+Local container tooling is required for building the images that can be 
+deployed to the Kubernetes cluster.
+
+This guide assumes [Docker](https://www.docker.com/) is installed locally for 
+building container images.
+
+### Installing `kind`
+
+This guide uses [`kind`](https://kind.sigs.k8s.io/) for running a local
+Kubernetes cluster for testing Planetary.
+
+To install `kind`, please consult the [installation instructions](https://kind.sigs.k8s.io/docs/user/quick-start#installation) for your operating system.
+
+### Installing `kubectl`
+
+The `kubectl` tool is used to manage a Kubernetes cluster.
+
+To install `kubectl`, please consult the [installation instructions](https://kubernetes.io/docs/tasks/tools/#kubectl) for your operating system.
+
+### Installing `helm`
+
+This guide uses [`helm`](https://helm.sh/) for installing Kubernetes packages 
+(called _charts_).
+
+To install `helm`, please consult the [installation instructions](https://helm.sh/docs/intro/install/) for your operating system.
+
+### Creating the Kubernetes Cluster
+
+To crate a local Kubernetes cluster using `kind`, run the following command:
+
+```bash
+kind create cluster --config kind-config.yml
+```
+
+### Installing PostgreSQL
+
+For local development, it is best to install a small PostgreSQL server into the 
+test cluster.
+
+To install PostgreSQL into your local cluster, run the following command:
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
+helm install planetary-database bitnami/postgresql
+```
+
+If you wish to interact with the database from outside of the cluster, forward the PostgreSQL port:
+
+```bash
+kubectl port-forward svc/planetary-database-postgresql 5432:543
+```
+
+The database password is available as a secret (assumes the `jq` tool is 
+installed):
+
+```bash
+kubectl get secret planetary-database-postgresql -o json | jq -r '.data."postgres-password"' | base64 --decode && echo
+```
+
+### Installing `diesel`
+
+[`diesel`](https://diesel.rs) is a ORM used by Planetary for storing and retrieving data from PostgreSQL.
+
+It has commands for setting up a database and performing migrations.
+
+To install `diesel`, please consult the [installation instructions](https://diesel.rs/guides/getting-started#installing-diesel-cli) for your operating system.
+
+### Setting Up the Planetary Database
+
+To create the Planetary database, run the following command, replacing `$PASSWORD` with the database server password retrieved from the secret above:
+
+```bash
+DATABASE_URL=postgres://postgres:$PASSWORD@localhost/planetary diesel setup
+```
+
+## 🏗️ Building Planetary
+
+### Building the Container Images
+
+To build the `ghcr.io/stjude-rust-labs/planetary` container image, run the 
+following command:
+
+```bash
+docker build . --target planetary --tag ghcr.io/stjude-rust-labs/planetary:latest
+```
+
+To build the `ghcr.io/stjude-rust-labs/planetary-transporter` container image, 
+run the following command:
+
+```bash
+docker build . --target transporter --tag ghcr.io/stjude-rust-labs/planetary-transporter:latest
+```
+
+### Loading the Container Images
+
+As `kind` cluster nodes run isolated from the host system, local container images must be explicitly loaded onto the nodes. To load the images, run the following command:
+
+```bash
+kind load docker-image -n planetary ghcr.io/stjude-rust-labs/planetary ghcr.io/stjude-rust-labs/planetary-transporter
+```
+
+## ✨ Deploying Planetary
+
+To deploy Planetary into a local Kubernetes cluster, run the following command:
+
+```bash
+cd chart
+helm install planetary .
+```
+
+Check the status of the planetary pod to see if it is `Running`:
+
+```bash
+kubectl get pods
+```
+
+Once the Planetary service is running, you may forward the service port for 
+accessing the TES API locally:
+
+```bash
+kubectl port-forward service/planetary 6492:6492
+```
+
+Send a test request for getting the service information:
+
+```bash
+curl -v http://localhost:6492/v1/service-info
+```
+
+Congratulations, Planetary is now ready to receive requests 🎉!
+
+### Deploying Development Changes
+
+To deploy development changes, rebuild and load the container images from the 
+[Building the Container Images](#building-the-container-images) and [Loading the Container Images](#loading-the-container-images)
+sections above.
+
+Restart the Planetary deployment with the following command:
+
+```
+kubectl rollout restart deployments/planetary
+```
+
+## 🧠 Running Automated Tests
+
+This section coming soon!
+
+## ✅ Submitting Pull Requests
 
 Before submitting any pull requests, please make sure the code passes the
 following checks (from the root directory).
