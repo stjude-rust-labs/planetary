@@ -410,7 +410,6 @@ async fn upload_directory(
             .with_context(|| format!("failed to read directory `{path}`", path = output.path))?;
 
         let relative_path = entry.path().strip_prefix(path).expect("should be relative");
-
         let container_path = container_base_path.join(relative_path);
         let container_path = container_path.to_str().with_context(|| {
             format!(
@@ -459,15 +458,19 @@ async fn upload_directory(
         }
 
         // Perform the copy
-        cloud::copy(Default::default(), path, url.clone(), Some(events.clone()))
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to upload output `{path}` to `{url}`",
-                    path = output.path,
-                    url = url.display(),
-                )
-            })?;
+        cloud::copy(
+            Default::default(),
+            entry.path(),
+            url.clone(),
+            Some(events.clone()),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to upload output `{container_path}` to `{url}`",
+                url = url.display(),
+            )
+        })?;
 
         // Clear the query and fragment before saving the output
         url.set_query(None);
