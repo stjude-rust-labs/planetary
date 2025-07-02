@@ -1,23 +1,44 @@
+# Default deny ingress and egress for executor pods
 kind: NetworkPolicy
 apiVersion: networking.k8s.io/v1
 metadata:
   name: default-deny-all
   namespace: planetary
 spec:
+  podSelector:
+    matchLabels:
+      planetary/pod-kind: executor
   policyTypes:
     - Ingress
     - Egress
 ---
+# Allow egress traffic to the public Internet from executor pods
 kind: NetworkPolicy
 apiVersion: networking.k8s.io/v1
 metadata:
   name: allow-internet-only
   namespace: planetary
 spec:
+  podSelector:
+    matchLabels:
+      planetary/pod-kind: executor
   policyTypes:
   - Egress
   egress:
-  # TODO: DNS?
+  # Allow DNS to kube-dns
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+      - port: 53
+        protocol: UDP
+      - port: 53
+        protocol: TCP
+  # Allow public Internet traffic
   - to:
     - ipBlock:
         cidr: 0.0.0.0/0
