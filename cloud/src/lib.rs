@@ -1,13 +1,34 @@
 //! Cloud storage copy utility.
 
 use std::fmt;
+use std::future::Future;
 use std::path::Path;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::task::Poll;
+use std::time::Duration;
+use std::time::SystemTime;
 
+use bytes::Bytes;
+use chrono::Utc;
+use futures::Stream;
+use futures::TryStreamExt;
+use pin_project_lite::pin_project;
+use reqwest::Client;
+use reqwest::Response;
+use reqwest::header;
+use tempfile::NamedTempFile;
+use tokio::fs;
+use tokio::io::BufWriter;
 use tokio::sync::broadcast;
+use tokio_util::io::StreamReader;
+use tracing::info;
 use url::Host;
 use url::Url;
+
+use crate::generator::Alphanumeric;
 
 mod azure;
 mod generator;
@@ -15,6 +36,173 @@ mod os;
 
 /// The utility user agent.
 const USER_AGENT: &str = concat!("cloud-copy v", env!("CARGO_PKG_VERSION"));
+
+pin_project! {
+    /// A wrapper around a byte stream that sends progress events.
+    struct TransferStream<S> {
+        #[pin]
+        stream: S,
+        id: Arc<String>,
+        last: Option<SystemTime>,
+        events: Option<broadcast::Sender<CopyEvent>>,
+        finished: bool,
+    }
+}
+
+impl<S> TransferStream<S> {
+    /// Constructs a new hash stream.
+    fn new(stream: S, id: Arc<String>, events: Option<broadcast::Sender<CopyEvent>>) -> Self
+    where
+        S: Stream<Item = std::io::Result<Bytes>>,
+    {
+        Self {
+            stream,
+            id,
+            last: None,
+            events,
+            finished: false,
+        }
+    }
+}
+
+impl<S> Stream for TransferStream<S>
+where
+    S: Stream<Item = std::io::Result<Bytes>>,
+{
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        const UPDATE_INTERVAL: Duration = Duration::from_millis(50);
+
+        if self.finished {
+            return Poll::Ready(None);
+        }
+
+        let this = self.project();
+        match this.stream.poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                let now = SystemTime::now();
+                let update = this
+                    .last
+                    .and_then(|last| now.duration_since(last).ok().map(|d| d >= UPDATE_INTERVAL))
+                    .unwrap_or(true);
+
+                if update {
+                    if let Some(events) = &this.events {
+                        events
+                            .send(CopyEvent::TransferProgress {
+                                id: this.id.clone(),
+                                transferred: bytes.len().try_into().unwrap(),
+                            })
+                            .ok();
+                    }
+                }
+
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                *this.finished = true;
+                Poll::Ready(Some(Err(e)))
+            }
+            Poll::Ready(None) => {
+                *this.finished = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Downloads a file from a given URL.
+///
+/// This function issues a GET request with the given additional headers.
+///
+/// If the request does not have a successful response, the `on_error` callback
+/// is called to get an error to return to the caller.
+async fn download_file<F>(
+    client: &Client,
+    source: Url,
+    headers: impl IntoIterator<Item = (&str, &str)>,
+    destination: &Path,
+    events: Option<broadcast::Sender<CopyEvent>>,
+    on_error: impl FnOnce(Response) -> F,
+) -> Result<()>
+where
+    F: Future<Output = CopyError>,
+{
+    info!(
+        "downloading `{source}` to `{destination}`",
+        source = source.display(),
+        destination = destination.display(),
+    );
+
+    // Start by creating the destination's parent directory
+    let parent = destination.parent().ok_or(CopyError::InvalidPath)?;
+    fs::create_dir_all(parent)
+        .await
+        .map_err(|error| CopyError::DirectoryCreationFailed {
+            path: parent.to_path_buf(),
+            error,
+        })?;
+
+    // Send the request for the file
+    let mut builder = client
+        .get(source)
+        .header(header::USER_AGENT, USER_AGENT)
+        .header(header::DATE, Utc::now().to_rfc2822());
+
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+
+    let response = builder.send().await?;
+    if !response.status().is_success() {
+        return Err(on_error(response).await);
+    }
+
+    let size = response
+        .content_length()
+        .ok_or(CopyError::ContentLengthMissing)?;
+
+    let id = Arc::new(format!("{random}", random = Alphanumeric::new(16)));
+
+    // Send the transfer started event
+    if let Some(events) = &events {
+        events
+            .send(CopyEvent::TransferStarted {
+                id: id.clone(),
+                path: destination.to_path_buf(),
+                size,
+            })
+            .ok();
+    }
+
+    // Use a temp file that will be atomically renamed when the download completes
+    let temp = NamedTempFile::with_prefix_in(".", parent)?;
+
+    let mut reader = StreamReader::new(TransferStream::new(
+        response.bytes_stream().map_err(std::io::Error::other),
+        id.clone(),
+        events.clone(),
+    ));
+
+    let mut writer = BufWriter::new(fs::File::create(temp.path()).await?);
+
+    // Copy the response stream to the temp file
+    tokio::io::copy(&mut reader, &mut writer).await?;
+
+    drop(reader);
+    drop(writer);
+
+    // Persist the temp file to the destination
+    temp.persist(destination)?;
+
+    if let Some(events) = &events {
+        events.send(CopyEvent::TransferComplete { id }).ok();
+    }
+
+    Ok(())
+}
 
 /// Represents either a local or remote location.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -172,6 +360,17 @@ pub enum CopyError {
     /// The destination path already exists.
     #[error("the destination path `{path}` already exists", path = .0.display())]
     DestinationExists(PathBuf),
+    /// The server returned a response without a content length.
+    #[error("the server returned a response without a content length")]
+    ContentLengthMissing,
+    /// The server returned an error.
+    #[error("server return status {status}: {text}", status = .status.as_u16())]
+    ServerError {
+        /// The response status code.
+        status: reqwest::StatusCode,
+        /// The response text.
+        text: String,
+    },
     /// An Azure copy error occurred.
     #[error(transparent)]
     Azure(#[from] azure::AzureCopyError),
@@ -336,7 +535,24 @@ pub async fn copy(
                 )
                 .await
             } else {
-                Err(CopyError::UnsupportedUrl(source))
+                // Not a known cloud URL, just download a file
+                let client = Client::new();
+                download_file(
+                    &client,
+                    source,
+                    [],
+                    destination,
+                    events,
+                    |response| async move {
+                        let status = response.status();
+                        match response.text().await {
+                            Ok(text) => CopyError::ServerError { status, text },
+                            Err(e) => CopyError::Reqwest(e),
+                        }
+                    },
+                )
+                .await?;
+                Ok(())
             }
         }
         (Location::Url(source), Location::Url(destination)) => {
