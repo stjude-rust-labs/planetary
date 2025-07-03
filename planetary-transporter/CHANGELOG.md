@@ -10,3 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Added
 
 * Initial implementation of inputs and outputs using `cloud::copy` ([#4](https://github.com/stjude-rust-labs/planetary/pull/4)).
+
+#### Fixed
+
+* Fixed incorrect upload URLs when uploading an output directory ([#8](https://github.com/stjude-rust-labs/planetary/pull/8)).
