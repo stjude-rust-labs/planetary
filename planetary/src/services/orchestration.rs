@@ -75,7 +75,7 @@ const K8S_KEY_MEMORY: &str = "memory";
 const K8S_KEY_STORAGE: &str = "storage";
 
 /// The default transporter image to use for inputs and outputs pods.
-const DEFAULT_TRANSPORTER_IMAGE: &str = "ghcr.io/stjude-rust-labs/planetary-transporter";
+const DEFAULT_TRANSPORTER_IMAGE: &str = "stjude-rust-labs/planetary-transporter:latest";
 
 /// The K8S namespace for planetary.
 const PLANETARY_K8S_NAMESPACE: &str = "planetary";
@@ -340,17 +340,25 @@ struct TaskOrchestrator {
     pvc: Arc<Api<PersistentVolumeClaim>>,
     /// The storage class name to use for persistent volume claims.
     storage_class: Option<String>,
+    /// The transporter image name to use.
+    transporter_image: Option<String>,
 }
 
 impl TaskOrchestrator {
     /// Constructs a new task orchestrator.
-    fn new(database: Arc<dyn Database>, client: Client, storage_class: Option<String>) -> Self {
+    fn new(
+        database: Arc<dyn Database>,
+        client: Client,
+        storage_class: Option<String>,
+        transporter_image: Option<String>,
+    ) -> Self {
         Self {
             id: format!("orchestrator-{random}", random = Alphanumeric::new(20)),
             database,
             pods: Arc::new(Api::namespaced(client.clone(), PLANETARY_K8S_NAMESPACE)),
             pvc: Arc::new(Api::namespaced(client.clone(), PLANETARY_K8S_NAMESPACE)),
             storage_class,
+            transporter_image,
         }
     }
 
@@ -567,9 +575,13 @@ impl TaskOrchestrator {
             spec: Some(PodSpec {
                 containers: vec![Container {
                     name: "inputs".to_string(),
-                    // TODO: make this configurable
-                    image: Some(DEFAULT_TRANSPORTER_IMAGE.into()),
-                    image_pull_policy: Some("IfNotPresent".into()),
+                    image: Some(
+                        self.transporter_image
+                            .as_deref()
+                            .unwrap_or(DEFAULT_TRANSPORTER_IMAGE)
+                            .into(),
+                    ),
+                    image_pull_policy: Some("Always".into()),
                     args: Some(vec![
                         "-v".into(),
                         "--database-url".into(),
@@ -862,9 +874,13 @@ impl TaskOrchestrator {
             spec: Some(PodSpec {
                 containers: vec![Container {
                     name: "outputs".to_string(),
-                    // TODO: make this configurable
-                    image: Some(DEFAULT_TRANSPORTER_IMAGE.into()),
-                    image_pull_policy: Some("IfNotPresent".into()),
+                    image: Some(
+                        self.transporter_image
+                            .as_deref()
+                            .unwrap_or(DEFAULT_TRANSPORTER_IMAGE)
+                            .into(),
+                    ),
+                    image_pull_policy: Some("Always".into()),
                     args: Some(vec![
                         "-v".into(),
                         "--database-url".into(),
@@ -1648,6 +1664,7 @@ impl TaskOrchestrationService {
         database: Arc<dyn Database>,
         client: Client,
         storage_class: Option<String>,
+        transporter_image: Option<String>,
     ) -> (Self, TaskOrchestrationSender) {
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -1659,6 +1676,7 @@ impl TaskOrchestrationService {
             database,
             client.clone(),
             storage_class,
+            transporter_image,
         ));
 
         let shutdown = CancellationToken::new();
@@ -1707,7 +1725,6 @@ impl TaskOrchestrationService {
                     match req {
                         Some(Request::StartTask(tes_id)) => {
                             let orchestrator = orchestrator.clone();
-
                             tokio::spawn(async move {
                                 if let Err(e) = orchestrator.start_task(&tes_id).await {
                                     error!("failed to start task `{tes_id}`: {e:#}");

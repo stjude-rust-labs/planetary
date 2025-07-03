@@ -1,44 +1,26 @@
 //! Implements blob downloading.
 
 use std::path::Path;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::Context;
-use std::task::Poll;
-use std::time::Duration;
-use std::time::SystemTime;
 
-use bytes::Bytes;
 use chrono::Utc;
 use futures::FutureExt;
-use futures::Stream;
 use futures::StreamExt;
-use futures::TryStreamExt;
 use futures::stream;
-use pin_project_lite::pin_project;
 use reqwest::Client;
 use reqwest::header;
 use serde::Deserialize;
-use tempfile::NamedTempFile;
-use tokio::fs;
-use tokio::fs::File;
-use tokio::io::BufWriter;
 use tokio::sync::broadcast;
-use tokio_util::io::StreamReader;
-use tracing::info;
 use url::Url;
 
 use super::AzureCopyError;
 use crate::CopyConfig;
-use crate::CopyError;
 use crate::CopyEvent;
 use crate::Result;
 use crate::USER_AGENT;
-use crate::UrlExt;
 use crate::azure::AZURE_STORAGE_VERSION;
 use crate::azure::AZURE_VERSION_HEADER;
 use crate::azure::error_response;
-use crate::generator::Alphanumeric;
+use crate::download_file;
 
 /// Represents information about a blob.
 #[derive(Debug, Deserialize)]
@@ -66,82 +48,6 @@ struct Results {
     /// The next marker to use to query for more blobs.
     #[serde(rename = "NextMarker", default)]
     next: Option<String>,
-}
-
-pin_project! {
-    /// A wrapper around a byte stream that sends progress events.
-    struct TransferStream<S> {
-        #[pin]
-        stream: S,
-        id: Arc<String>,
-        last: Option<SystemTime>,
-        events: Option<broadcast::Sender<CopyEvent>>,
-        finished: bool,
-    }
-}
-
-impl<S> TransferStream<S> {
-    /// Constructs a new hash stream.
-    fn new(stream: S, id: Arc<String>, events: Option<broadcast::Sender<CopyEvent>>) -> Self
-    where
-        S: Stream<Item = std::io::Result<Bytes>>,
-    {
-        Self {
-            stream,
-            id,
-            last: None,
-            events,
-            finished: false,
-        }
-    }
-}
-
-impl<S> Stream for TransferStream<S>
-where
-    S: Stream<Item = std::io::Result<Bytes>>,
-{
-    type Item = std::io::Result<Bytes>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        const UPDATE_INTERVAL: Duration = Duration::from_millis(50);
-
-        if self.finished {
-            return Poll::Ready(None);
-        }
-
-        let this = self.project();
-        match this.stream.poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                let now = SystemTime::now();
-                let update = this
-                    .last
-                    .and_then(|last| now.duration_since(last).ok().map(|d| d >= UPDATE_INTERVAL))
-                    .unwrap_or(true);
-
-                if update {
-                    if let Some(events) = &this.events {
-                        events
-                            .send(CopyEvent::TransferProgress {
-                                id: this.id.clone(),
-                                transferred: bytes.len().try_into().unwrap(),
-                            })
-                            .ok();
-                    }
-                }
-
-                Poll::Ready(Some(Ok(bytes)))
-            }
-            Poll::Ready(Some(Err(e))) => {
-                *this.finished = true;
-                Poll::Ready(Some(Err(e)))
-            }
-            Poll::Ready(None) => {
-                *this.finished = true;
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
 }
 
 /// Gets a list of blobs that may be prefixed with a path.
@@ -224,7 +130,7 @@ async fn list_prefixed_blobs(client: &Client, source: &Url) -> Result<(String, V
     loop {
         let mut url = container.clone();
         if !next.is_empty() {
-            // The marker to start listing from, set from the previous querys
+            // The marker to start listing from, returned by the previous query
             url.query_pairs_mut().append_pair("marker", &next);
         }
 
@@ -258,86 +164,6 @@ async fn list_prefixed_blobs(client: &Client, source: &Url) -> Result<(String, V
     }
 
     Ok((prefix, blobs))
-}
-
-/// Downloads a file from Azure blob storage.
-async fn download_file(
-    client: &Client,
-    source: Url,
-    destination: &Path,
-    events: Option<broadcast::Sender<CopyEvent>>,
-) -> Result<()> {
-    info!(
-        "downloading `{source}` to `{destination}`",
-        source = source.display(),
-        destination = destination.display(),
-    );
-
-    // Start by creating the destination's parent directory
-    let parent = destination.parent().ok_or(CopyError::InvalidPath)?;
-    fs::create_dir_all(parent)
-        .await
-        .map_err(|error| CopyError::DirectoryCreationFailed {
-            path: parent.to_path_buf(),
-            error,
-        })?;
-
-    // Send the request for the file
-    let response = client
-        .get(source)
-        .header(header::USER_AGENT, USER_AGENT)
-        .header(header::DATE, Utc::now().to_rfc2822())
-        .header(AZURE_VERSION_HEADER, AZURE_STORAGE_VERSION)
-        .send()
-        .await?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(error_response(response).await);
-    }
-
-    let size = response
-        .content_length()
-        .ok_or(AzureCopyError::ContentLengthMissing)?;
-
-    let id = Arc::new(format!("{random}", random = Alphanumeric::new(16)));
-
-    // Send the transfer started event
-    if let Some(events) = &events {
-        events
-            .send(CopyEvent::TransferStarted {
-                id: id.clone(),
-                path: destination.to_path_buf(),
-                size,
-            })
-            .ok();
-    }
-
-    // Use a temp file that will be atomically renamed when the download completes
-    let temp = NamedTempFile::with_prefix_in(".", parent)?;
-
-    let mut reader = StreamReader::new(TransferStream::new(
-        response.bytes_stream().map_err(std::io::Error::other),
-        id.clone(),
-        events.clone(),
-    ));
-
-    let mut writer = BufWriter::new(File::create(temp.path()).await?);
-
-    // Copy the response stream to the temp file
-    tokio::io::copy(&mut reader, &mut writer).await?;
-
-    drop(reader);
-    drop(writer);
-
-    // Persist the temp file to the destination
-    temp.persist(destination)?;
-
-    if let Some(events) = &events {
-        events.send(CopyEvent::TransferComplete { id }).ok();
-    }
-
-    Ok(())
 }
 
 /// Downloads a file or directory from Azure blob storage.
@@ -377,8 +203,18 @@ pub async fn download(
                 // Spawn the task to download the file
                 let client = client.clone();
                 let events = events.clone();
-                tokio::spawn(async move { download_file(&client, source, &path, events).await })
-                    .map(|r| r.expect("task panicked"))
+                tokio::spawn(async move {
+                    download_file(
+                        &client,
+                        source,
+                        [(AZURE_VERSION_HEADER, AZURE_STORAGE_VERSION)],
+                        &path,
+                        events,
+                        error_response,
+                    )
+                    .await
+                })
+                .map(|r| r.expect("task panicked"))
             })
             .buffer_unordered(config.azure().parallelism());
 
@@ -395,6 +231,14 @@ pub async fn download(
     }
 
     // The source is a file, do a single download
-    download_file(&client, source, destination, events).await?;
+    download_file(
+        &client,
+        source,
+        [(AZURE_VERSION_HEADER, AZURE_STORAGE_VERSION)],
+        destination,
+        events,
+        error_response,
+    )
+    .await?;
     Ok(())
 }

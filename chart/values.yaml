@@ -3,9 +3,14 @@ replicaCount: 1
 labels: {}
 
 image:
-  repository: ghcr.io/stjude-rust-labs/planetary
-  pullPolicy: IfNotPresent
-  tag: "latest"
+  name: stjude-rust-labs/planetary
+  pullPolicy: Always
+  tag: latest
+
+transporter:
+  image:
+    name: stjude-rust-labs/planetary-transporter
+    tag: latest
 
 database: {}
 
@@ -14,7 +19,7 @@ imagePullSecrets: []
 serviceAccount:
   create: true
   annotations: {}
-  name: "planetary-service-account"
+  name: planetary-service-account
 
 podAnnotations: {}
 podLabels: {}

@@ -84,12 +84,9 @@ pub enum AzureCopyError {
     ServerError {
         /// The response status code.
         status: reqwest::StatusCode,
-        /// The response message.s
+        /// The response message.
         message: String,
     },
-    /// The server returned a response without a content length.
-    #[error("the server returned a response without a content length")]
-    ContentLengthMissing,
     /// The blob name is missing in the URL.
     #[error("a blob name is missing from the provided URL")]
     BlobNameMissing,

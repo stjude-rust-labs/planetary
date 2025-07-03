@@ -264,6 +264,12 @@ pub struct Server {
     /// The Kubernetes storage class to use for tasks.
     #[builder(into)]
     storage_class: Option<String>,
+
+    /// The transporter image to use.
+    ///
+    /// Defaults to `stjude-rust-labs/planetary-transporter:latest`.
+    #[builder(into)]
+    transporter_image: Option<String>,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -301,6 +307,7 @@ impl Server {
             self.database.clone(),
             client.clone(),
             self.storage_class,
+            self.transporter_image,
         );
 
         // Hook up the axum middleware

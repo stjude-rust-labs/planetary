@@ -83,6 +83,12 @@ pub struct Args {
     #[clap(long, env)]
     storage_class: Option<String>,
 
+    /// The transporter image to use.
+    ///
+    /// Defaults to `stjude-rust-labs/planetary-transporter:latest`
+    #[clap(long, env)]
+    transporter_image: Option<String>,
+
     /// Disables running database migrations on server startup.
     #[cfg(feature = "postgres")]
     #[clap(long)]
@@ -196,11 +202,13 @@ pub async fn main() -> anyhow::Result<()> {
 
     let database = args.database().await?;
     let storage_class = args.storage_class.take();
+    let transporter_image = args.transporter_image.take();
     Server::builder()
         .address(&args.address)
         .port(args.port)
         .shared_database(database)
         .maybe_storage_class(storage_class)
+        .maybe_transporter_image(transporter_image)
         .info(build_info(args)?)
         .build()
         .run(terminate())

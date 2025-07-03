@@ -66,12 +66,12 @@ that they can be scaled independently of one another._
 
 There are currently two images created for use with Planetary:
 
-* `ghcr.io/stjude-rust-labs/planetary` - implements the _TES API Service_ and
-  the _Task Orchestration Service_; this image is used by pods implementing the 
+* `stjude-rust-labs/planetary` - implements the _TES API Service_ and
+  the _Task Orchestration Service_; this image is used by pods implementing the
   Planetary service.
 
-* `ghcr.io/stjude-rust-labs/planetary-transporter` - implements the _Planetary 
-  Transporter_; this image is used on pods scheduled to run before and after a 
+* `stjude-rust-labs/planetary-transporter` - implements the _Planetary
+  Transporter_; this image is used on pods scheduled to run before and after a
   task.
 
 ## 🚀 Getting Started
@@ -87,10 +87,10 @@ cd planetary
 
 ### Installing Docker
 
-Local container tooling is required for building the images that can be 
+Local container tooling is required for building the images that can be
 deployed to the Kubernetes cluster.
 
-This guide assumes [Docker](https://www.docker.com/) is installed locally for 
+This guide assumes [Docker](https://www.docker.com/) is installed locally for
 building container images.
 
 ### Installing `kind`
@@ -108,7 +108,7 @@ To install `kubectl`, please consult the [installation instructions](https://kub
 
 ### Installing `helm`
 
-This guide uses [`helm`](https://helm.sh/) for installing Kubernetes packages 
+This guide uses [`helm`](https://helm.sh/) for installing Kubernetes packages
 (called _charts_).
 
 To install `helm`, please consult the [installation instructions](https://helm.sh/docs/intro/install/) for your operating system.
@@ -123,7 +123,7 @@ kind create cluster --config kind-config.yml
 
 ### Installing PostgreSQL
 
-For local development, it is best to install a small PostgreSQL server into the 
+For local development, it is best to install a small PostgreSQL server into the
 test cluster.
 
 To install PostgreSQL into your local cluster, run the following command:
@@ -139,11 +139,10 @@ If you wish to interact with the database from outside of the cluster, forward t
 kubectl port-forward svc/planetary-database-postgresql 5432:543
 ```
 
-The database password is available as a secret (assumes the `jq` tool is 
-installed):
+The database password is available as a secret:
 
 ```bash
-kubectl get secret planetary-database-postgresql -o json | jq -r '.data."postgres-password"' | base64 --decode && echo
+kubectl get secret planetary-database-postgresql -o jsonpath="{.data.postgres-password}" | base64 --decode && echo
 ```
 
 ### Installing `diesel`
@@ -166,18 +165,18 @@ DATABASE_URL=postgres://postgres:$PASSWORD@localhost/planetary diesel setup
 
 ### Building the Container Images
 
-To build the `ghcr.io/stjude-rust-labs/planetary` container image, run the 
+To build the `stjude-rust-labs/planetary` container image, run the
 following command:
 
 ```bash
-docker build . --target planetary --tag ghcr.io/stjude-rust-labs/planetary:latest
+docker build . --target planetary --tag stjude-rust-labs/planetary:latest
 ```
 
-To build the `ghcr.io/stjude-rust-labs/planetary-transporter` container image, 
+To build the `stjude-rust-labs/planetary-transporter` container image,
 run the following command:
 
 ```bash
-docker build . --target transporter --tag ghcr.io/stjude-rust-labs/planetary-transporter:latest
+docker build . --target transporter --tag stjude-rust-labs/planetary-transporter:latest
 ```
 
 ### Loading the Container Images
@@ -185,7 +184,7 @@ docker build . --target transporter --tag ghcr.io/stjude-rust-labs/planetary-tra
 As `kind` cluster nodes run isolated from the host system, local container images must be explicitly loaded onto the nodes. To load the images, run the following command:
 
 ```bash
-kind load docker-image -n planetary ghcr.io/stjude-rust-labs/planetary ghcr.io/stjude-rust-labs/planetary-transporter
+kind load docker-image -n planetary stjude-rust-labs/planetary stjude-rust-labs/planetary-transporter
 ```
 
 ## ✨ Deploying Planetary
@@ -203,7 +202,7 @@ Check the status of the planetary pod to see if it is `Running`:
 kubectl get pods
 ```
 
-Once the Planetary service is running, you may forward the service port for 
+Once the Planetary service is running, you may forward the service port for
 accessing the TES API locally:
 
 ```bash
@@ -220,7 +219,7 @@ Congratulations, Planetary is now ready to receive requests 🎉!
 
 ### Deploying Development Changes
 
-To deploy development changes, rebuild and load the container images from the 
+To deploy development changes, rebuild and load the container images from the
 [Building the Container Images](#building-the-container-images) and [Loading the Container Images](#loading-the-container-images)
 sections above.
 
