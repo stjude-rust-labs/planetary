@@ -2,7 +2,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  namespace: planetary
+  namespace: planetary-tasks
   name: planetary-role
 rules:
 - apiGroups: [""]
@@ -31,7 +31,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: planetary-role-binding
-  namespace: planetary
+  namespace: planetary-tasks
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -39,5 +39,5 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: {{ include "chart.serviceAccountName" . | default "planetary-service-account" }}
-  namespace: default
+  namespace: planetary
 {{- end }}

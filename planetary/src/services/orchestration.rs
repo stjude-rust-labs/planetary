@@ -77,8 +77,8 @@ const K8S_KEY_STORAGE: &str = "storage";
 /// The default transporter image to use for inputs and outputs pods.
 const DEFAULT_TRANSPORTER_IMAGE: &str = "stjude-rust-labs/planetary-transporter:latest";
 
-/// The K8S namespace for planetary.
-const PLANETARY_K8S_NAMESPACE: &str = "planetary";
+/// The K8S namespace for planetary tasks.
+const PLANETARY_TASKS_NAMESPACE: &str = "planetary-tasks";
 
 /// The name of the orchestrator label.
 const PLANETARY_ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
@@ -355,8 +355,8 @@ impl TaskOrchestrator {
         Self {
             id: format!("orchestrator-{random}", random = Alphanumeric::new(20)),
             database,
-            pods: Arc::new(Api::namespaced(client.clone(), PLANETARY_K8S_NAMESPACE)),
-            pvc: Arc::new(Api::namespaced(client.clone(), PLANETARY_K8S_NAMESPACE)),
+            pods: Arc::new(Api::namespaced(client.clone(), PLANETARY_TASKS_NAMESPACE)),
+            pvc: Arc::new(Api::namespaced(client.clone(), PLANETARY_TASKS_NAMESPACE)),
             storage_class,
             transporter_image,
         }
@@ -441,7 +441,7 @@ impl TaskOrchestrator {
                 &PersistentVolumeClaim {
                     metadata: ObjectMeta {
                         name: Some(format_pvc_name(tes_id)),
-                        namespace: Some(PLANETARY_K8S_NAMESPACE.into()),
+                        namespace: Some(PLANETARY_TASKS_NAMESPACE.into()),
                         ..Default::default()
                     },
                     spec: Some(PersistentVolumeClaimSpec {
@@ -555,7 +555,7 @@ impl TaskOrchestrator {
 
         let pod = Pod {
             metadata: ObjectMeta {
-                namespace: Some(PLANETARY_K8S_NAMESPACE.into()),
+                namespace: Some(PLANETARY_TASKS_NAMESPACE.into()),
                 name: Some(name.to_string()),
                 labels: Some(
                     [
@@ -581,7 +581,6 @@ impl TaskOrchestrator {
                             .unwrap_or(DEFAULT_TRANSPORTER_IMAGE)
                             .into(),
                     ),
-                    image_pull_policy: Some("Always".into()),
                     args: Some(vec![
                         "-v".into(),
                         "--database-url".into(),
@@ -726,7 +725,7 @@ impl TaskOrchestrator {
 
         let pod = Pod {
             metadata: ObjectMeta {
-                namespace: Some(PLANETARY_K8S_NAMESPACE.into()),
+                namespace: Some(PLANETARY_TASKS_NAMESPACE.into()),
                 name: Some(name.to_string()),
                 labels: Some(
                     [
@@ -854,7 +853,7 @@ impl TaskOrchestrator {
 
         let pod = Pod {
             metadata: ObjectMeta {
-                namespace: Some(PLANETARY_K8S_NAMESPACE.into()),
+                namespace: Some(PLANETARY_TASKS_NAMESPACE.into()),
                 name: Some(name.to_string()),
                 labels: Some(
                     [
@@ -880,7 +879,6 @@ impl TaskOrchestrator {
                             .unwrap_or(DEFAULT_TRANSPORTER_IMAGE)
                             .into(),
                     ),
-                    image_pull_policy: Some("Always".into()),
                     args: Some(vec![
                         "-v".into(),
                         "--database-url".into(),
@@ -1774,7 +1772,7 @@ impl TaskOrchestrationService {
         info!("event processing has started");
 
         let stream = watcher(
-            Api::<Pod>::namespaced(client, PLANETARY_K8S_NAMESPACE),
+            Api::<Pod>::namespaced(client, PLANETARY_TASKS_NAMESPACE),
             watcher::Config {
                 label_selector: Some(format!(
                     "{PLANETARY_ORCHESTRATOR_LABEL}={id},{PLANETARY_POD_KIND_LABEL} in ({all})",

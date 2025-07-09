@@ -1,4 +1,5 @@
+# The namespace for tasks processed by planetary
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: planetary
+  name: planetary-tasks

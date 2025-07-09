@@ -4,7 +4,7 @@ labels: {}
 
 image:
   name: stjude-rust-labs/planetary
-  pullPolicy: Always
+  pullPolicy: null
   tag: latest
 
 transporter:

@@ -121,6 +121,12 @@ To crate a local Kubernetes cluster using `kind`, run the following command:
 kind create cluster --config kind-config.yml
 ```
 
+This guide will be installing Planetary and its database server into a 
+Kubernetes namespace named `planetary`.
+
+The installation of Planetary will also create a Kubernetes namespace named 
+`planetary-tasks` for managing resources relating to executing TES tasks.
+
 ### Installing PostgreSQL
 
 For local development, it is best to install a small PostgreSQL server into the
@@ -130,19 +136,19 @@ To install PostgreSQL into your local cluster, run the following command:
 
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami
-helm install planetary-database bitnami/postgresql
+helm install --create-namespace -n planetary planetary-database bitnami/postgresql
 ```
 
 If you wish to interact with the database from outside of the cluster, forward the PostgreSQL port:
 
 ```bash
-kubectl port-forward svc/planetary-database-postgresql 5432:543
+kubectl port-forward -n planetary svc/planetary-database-postgresql 5432:5432
 ```
 
 The database password is available as a secret:
 
 ```bash
-kubectl get secret planetary-database-postgresql -o jsonpath="{.data.postgres-password}" | base64 --decode && echo
+kubectl get secret -n planetary planetary-database-postgresql -o jsonpath="{.data.postgres-password}" | base64 --decode && echo
 ```
 
 ### Installing `diesel`
@@ -169,14 +175,14 @@ To build the `stjude-rust-labs/planetary` container image, run the
 following command:
 
 ```bash
-docker build . --target planetary --tag stjude-rust-labs/planetary:latest
+docker build . --target planetary --tag stjude-rust-labs/planetary:staging
 ```
 
 To build the `stjude-rust-labs/planetary-transporter` container image,
 run the following command:
 
 ```bash
-docker build . --target transporter --tag stjude-rust-labs/planetary-transporter:latest
+docker build . --target transporter --tag stjude-rust-labs/planetary-transporter:staging
 ```
 
 ### Loading the Container Images
@@ -184,7 +190,7 @@ docker build . --target transporter --tag stjude-rust-labs/planetary-transporter
 As `kind` cluster nodes run isolated from the host system, local container images must be explicitly loaded onto the nodes. To load the images, run the following command:
 
 ```bash
-kind load docker-image -n planetary stjude-rust-labs/planetary stjude-rust-labs/planetary-transporter
+kind load docker-image -n planetary stjude-rust-labs/planetary:staging stjude-rust-labs/planetary-transporter:staging
 ```
 
 ## ✨ Deploying Planetary
@@ -193,20 +199,20 @@ To deploy Planetary into a local Kubernetes cluster, run the following command:
 
 ```bash
 cd chart
-helm install planetary .
+helm install -n planetary planetary . --set image.tag=staging --set transporter.image.tag=staging
 ```
 
 Check the status of the planetary pod to see if it is `Running`:
 
 ```bash
-kubectl get pods
+kubectl get pods -n planetary
 ```
 
 Once the Planetary service is running, you may forward the service port for
 accessing the TES API locally:
 
 ```bash
-kubectl port-forward service/planetary 6492:6492
+kubectl port-forward -n planetary service/planetary 6492:6492
 ```
 
 Send a test request for getting the service information:

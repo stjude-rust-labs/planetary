@@ -62,7 +62,7 @@ spec:
                 name: {{ default "planetary-database-postgresql" .Values.database.passwordSecret }}
                 key: {{ default "postgres-password" .Values.database.passwordSecretKey }}
           - name: DATABASE_HOST
-            value: {{ default "planetary-database-postgresql.default.svc.cluster.local" .Values.database.host }}
+            value: {{ default "planetary-database-postgresql.planetary.svc.cluster.local" .Values.database.host }}
           - name: DATABASE_PORT
             value: "{{ default 5432 .Values.database.port }}"
           - name: DATABASE_NAME
