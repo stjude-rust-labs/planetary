@@ -2,15 +2,17 @@ replicaCount: 1
 
 labels: {}
 
+tasksNamespace: planetary-tasks
+
 image:
   name: stjude-rust-labs/planetary
   pullPolicy: null
-  tag: latest
+  tag: null
 
 transporter:
   image:
     name: stjude-rust-labs/planetary-transporter
-    tag: latest
+    tag: null
 
 database: {}
 
@@ -19,21 +21,14 @@ imagePullSecrets: []
 serviceAccount:
   create: true
   annotations: {}
-  name: planetary-service-account
+  name: orchestrator-service-account
 
 podAnnotations: {}
 podLabels: {}
 
 podSecurityContext: {}
-  # fsGroup: 2000
 
 securityContext: {}
-  # capabilities:
-  #   drop:
-  #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
-  # runAsUser: 1000
 
 service:
   type: ClusterIP
@@ -43,22 +38,10 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
-    # kubernetes.io/ingress.class: nginx
-    # kubernetes.io/tls-acme: "true"
   hosts:
-    - host: chart-example.local
-      paths:
-        - path: /
-          pathType: ImplementationSpecific
   tls: []
-  #  - secretName: chart-example-tls
-  #    hosts:
-  #      - chart-example.local
 
 resources:
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
   requests:
     cpu: 2000m
     memory: 2148Mi
@@ -68,4 +51,3 @@ volumeMounts: []
 nodeSelector: {}
 tolerations: []
 affinity: {}
-

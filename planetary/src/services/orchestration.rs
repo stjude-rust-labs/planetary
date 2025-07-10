@@ -2,11 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use axum::http::StatusCode;
+use futures::FutureExt;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Container;
 use k8s_openapi::api::core::v1::ContainerState;
@@ -26,6 +28,7 @@ use kube::Api;
 use kube::Client;
 use kube::ResourceExt;
 use kube::api::DeleteParams;
+use kube::api::ListParams;
 use kube::api::LogParams;
 use kube::api::ObjectMeta;
 use kube::api::Patch;
@@ -51,6 +54,7 @@ use tokio::pin;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio::time::interval;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -77,10 +81,10 @@ const K8S_KEY_STORAGE: &str = "storage";
 /// The default transporter image to use for inputs and outputs pods.
 const DEFAULT_TRANSPORTER_IMAGE: &str = "stjude-rust-labs/planetary-transporter:latest";
 
-/// The K8S namespace for planetary tasks.
+/// The default K8S namespace for planetary tasks.
 const PLANETARY_TASKS_NAMESPACE: &str = "planetary-tasks";
 
-/// The name of the orchestrator label.
+/// The id of the associated orchestrator label.
 const PLANETARY_ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
 
 /// The name of the pod kind label.
@@ -334,6 +338,8 @@ struct TaskOrchestrator {
     id: String,
     /// The planetary database used by the orchestrator.
     database: Arc<dyn Database>,
+    /// The namespace to use for K8S resources relating to tasks.
+    tasks_namespace: Option<String>,
     /// The K8S pods API.
     pods: Arc<Api<Pod>>,
     /// The K8S persistent volume claim API.
@@ -349,17 +355,107 @@ impl TaskOrchestrator {
     fn new(
         database: Arc<dyn Database>,
         client: Client,
+        tasks_namespace: Option<String>,
         storage_class: Option<String>,
         transporter_image: Option<String>,
     ) -> Self {
+        let ns = tasks_namespace
+            .as_deref()
+            .unwrap_or(PLANETARY_TASKS_NAMESPACE);
+        let pods = Arc::new(Api::namespaced(client.clone(), ns));
+        let pvc = Arc::new(Api::namespaced(client.clone(), ns));
+
         Self {
             id: format!("orchestrator-{random}", random = Alphanumeric::new(20)),
             database,
-            pods: Arc::new(Api::namespaced(client.clone(), PLANETARY_TASKS_NAMESPACE)),
-            pvc: Arc::new(Api::namespaced(client.clone(), PLANETARY_TASKS_NAMESPACE)),
+            tasks_namespace,
+            pods,
+            pvc,
             storage_class,
             transporter_image,
         }
+    }
+
+    /// Orphans any remaining task pods owned by this orchestrator.
+    async fn orphan_task_pods(&self) -> Result<()> {
+        debug!("orphaning remaining task pods");
+
+        // Get any remaining task pods owned by this orchestrator
+        let pods = self
+            .pods
+            .list(&ListParams {
+                label_selector: Some(format!("{PLANETARY_ORCHESTRATOR_LABEL}={id}", id = self.id)),
+                ..Default::default()
+            })
+            .await?;
+
+        // Set the orchestrator label to empty string for each pod
+        for pod in pods {
+            let Some(name) = pod.name() else { continue };
+
+            info!("orphaning task pod `{name}`");
+            self.pods
+                .patch(
+                    name.as_ref(),
+                    &PatchParams::default(),
+                    &Patch::Merge(Pod {
+                        metadata: ObjectMeta {
+                            labels: Some(BTreeMap::from_iter([(
+                                PLANETARY_ORCHESTRATOR_LABEL.to_string(),
+                                String::new(),
+                            )])),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Claims any orphaned task pods.
+    async fn claim_orphaned_task_pods(&self) -> Result<()> {
+        debug!("searching for orphaned task pods to claim");
+
+        // Search for orphaned pods
+        let pods = self
+            .pods
+            .list(&ListParams {
+                label_selector: Some(format!("{PLANETARY_ORCHESTRATOR_LABEL}=")),
+                ..Default::default()
+            })
+            .await?;
+
+        // Claim any orphaned pods
+        for pod in pods {
+            let Some(name) = pod.name() else {
+                continue;
+            };
+
+            info!("claiming orphaned task pod `{name}`");
+            self.pods
+                .patch(
+                    name.as_ref(),
+                    &PatchParams::default(),
+                    &Patch::Merge(Pod {
+                        metadata: ObjectMeta {
+                            labels: Some(BTreeMap::from_iter([(
+                                PLANETARY_ORCHESTRATOR_LABEL.to_string(),
+                                self.id.clone(),
+                            )])),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                )
+                .await?;
+
+            // self.update_task(tes_id, &pod).await?;
+        }
+
+        Ok(())
     }
 
     /// Starts a task.
@@ -441,7 +537,12 @@ impl TaskOrchestrator {
                 &PersistentVolumeClaim {
                     metadata: ObjectMeta {
                         name: Some(format_pvc_name(tes_id)),
-                        namespace: Some(PLANETARY_TASKS_NAMESPACE.into()),
+                        namespace: Some(
+                            self.tasks_namespace
+                                .as_deref()
+                                .unwrap_or(PLANETARY_TASKS_NAMESPACE)
+                                .into(),
+                        ),
                         ..Default::default()
                     },
                     spec: Some(PersistentVolumeClaimSpec {
@@ -555,7 +656,12 @@ impl TaskOrchestrator {
 
         let pod = Pod {
             metadata: ObjectMeta {
-                namespace: Some(PLANETARY_TASKS_NAMESPACE.into()),
+                namespace: Some(
+                    self.tasks_namespace
+                        .as_deref()
+                        .unwrap_or(PLANETARY_TASKS_NAMESPACE)
+                        .into(),
+                ),
                 name: Some(name.to_string()),
                 labels: Some(
                     [
@@ -725,7 +831,12 @@ impl TaskOrchestrator {
 
         let pod = Pod {
             metadata: ObjectMeta {
-                namespace: Some(PLANETARY_TASKS_NAMESPACE.into()),
+                namespace: Some(
+                    self.tasks_namespace
+                        .as_deref()
+                        .unwrap_or(PLANETARY_TASKS_NAMESPACE)
+                        .into(),
+                ),
                 name: Some(name.to_string()),
                 labels: Some(
                     [
@@ -853,7 +964,12 @@ impl TaskOrchestrator {
 
         let pod = Pod {
             metadata: ObjectMeta {
-                namespace: Some(PLANETARY_TASKS_NAMESPACE.into()),
+                namespace: Some(
+                    self.tasks_namespace
+                        .as_deref()
+                        .unwrap_or(PLANETARY_TASKS_NAMESPACE)
+                        .into(),
+                ),
                 name: Some(name.to_string()),
                 labels: Some(
                     [
@@ -1648,6 +1764,8 @@ pub struct TaskOrchestrationService {
     queue_handle: JoinHandle<()>,
     /// The handle to the events task.
     events_handle: JoinHandle<()>,
+    /// The handle to the orphan monitor task.
+    orphan_monitor_handle: JoinHandle<()>,
 }
 
 impl TaskOrchestrationService {
@@ -1661,18 +1779,16 @@ impl TaskOrchestrationService {
     pub fn spawn(
         database: Arc<dyn Database>,
         client: Client,
+        tasks_namespace: Option<String>,
         storage_class: Option<String>,
         transporter_image: Option<String>,
     ) -> (Self, TaskOrchestrationSender) {
         let (tx, rx) = mpsc::unbounded_channel();
 
-        // TODO: upon startup, the service should reconcile any tasks that haven't
-        // completed yet with the current K8S cluster state; if it cannot do so for a
-        // task, it should abort the task with a system error.
-
         let orchestrator = Arc::new(TaskOrchestrator::new(
             database,
             client.clone(),
+            tasks_namespace,
             storage_class,
             transporter_image,
         ));
@@ -1684,14 +1800,25 @@ impl TaskOrchestrationService {
             shutdown.clone(),
         ));
 
-        let events_handle =
-            tokio::spawn(Self::process_events(client, orchestrator, shutdown.clone()));
+        let events_handle = tokio::spawn(Self::process_events(
+            client,
+            orchestrator.clone(),
+            shutdown.clone(),
+        ));
+
+        // TODO: make the monitor duration configurable.
+        let orphan_monitor_handle = tokio::spawn(Self::monitor_orphaned_tasks(
+            shutdown.clone(),
+            Duration::from_secs(60),
+            orchestrator,
+        ));
 
         (
             Self {
                 shutdown,
                 queue_handle,
                 events_handle,
+                orphan_monitor_handle,
             },
             TaskOrchestrationSender(tx),
         )
@@ -1702,6 +1829,9 @@ impl TaskOrchestrationService {
         self.shutdown.cancel();
         self.queue_handle.await.expect("failed to join task");
         self.events_handle.await.expect("failed to join task");
+        self.orphan_monitor_handle
+            .await
+            .expect("failed to join task");
     }
 
     /// Runs the request queue for the service.
@@ -1772,12 +1902,17 @@ impl TaskOrchestrationService {
         info!("event processing has started");
 
         let stream = watcher(
-            Api::<Pod>::namespaced(client, PLANETARY_TASKS_NAMESPACE),
+            Api::<Pod>::namespaced(
+                client,
+                orchestrator
+                    .tasks_namespace
+                    .as_deref()
+                    .unwrap_or(PLANETARY_TASKS_NAMESPACE),
+            ),
             watcher::Config {
                 label_selector: Some(format!(
-                    "{PLANETARY_ORCHESTRATOR_LABEL}={id},{PLANETARY_POD_KIND_LABEL} in ({all})",
+                    "{PLANETARY_ORCHESTRATOR_LABEL}={id}",
                     id = orchestrator.id,
-                    all = PodKind::all()
                 )),
                 ..Default::default()
             },
@@ -1898,6 +2033,59 @@ impl TaskOrchestrationService {
             }
         }
 
+        // Orphan any outstanding task pods
+        if let Err(e) = orchestrator.orphan_task_pods().await {
+            error!("failed to orphan task pods: {e:#}");
+        }
+
         info!("event processing has shut down");
+    }
+
+    /// Responsible for monitoring orphaned tasks.
+    ///
+    /// An orphaned task is one that still exists in Kubernetes, but has no
+    /// orchestrator monitoring it.
+    async fn monitor_orphaned_tasks(
+        shutdown: CancellationToken,
+        duration: Duration,
+        orchestrator: Arc<TaskOrchestrator>,
+    ) {
+        // The database lock id for reclaiming pods; this value was randomly generated
+        const RECLAIM_LOCK_ID: i64 = 1511135038634261961;
+
+        info!("orphaned task monitor has started");
+
+        let mut interval = interval(duration);
+
+        loop {
+            select! {
+                biased;
+
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    let o = orchestrator.clone();
+                    match orchestrator
+                        .database
+                        .try_with_lock(RECLAIM_LOCK_ID, async move { o.claim_orphaned_task_pods().await }.boxed())
+                        .await
+                    {
+                        Ok(Ok(true)) => {
+                            // We attempted to reclaim pods
+                        }
+                        Ok(Ok(false)) => {
+                            // Some other orchestrator was reclaiming pods.
+                        }
+                        Ok(Err(e)) => {
+                            error!("failed to reclaim task pods: {e:#}");
+                        }
+                        Err(e) => {
+                            error!("database error while attempting to reclaim task pods: {e:#}");
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("orphaned task monitor has shut down");
     }
 }

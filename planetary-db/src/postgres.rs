@@ -1,9 +1,14 @@
 //! Implementation of a TES database using PostgreSQL.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use diesel::Connection;
+use diesel::sql_types::BigInt;
+use diesel::sql_types::Bool;
 use diesel_async::AsyncConnection;
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
@@ -159,6 +164,54 @@ impl PostgresDatabase {
 impl Database for PostgresDatabase {
     fn url(&self) -> &SecretString {
         &self.url
+    }
+
+    async fn try_with_lock(
+        &self,
+        lock_id: i64,
+        fut: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
+    ) -> DatabaseResult<Result<bool>> {
+        use diesel::*;
+        use diesel_async::RunQueryDsl;
+
+        // Helper for getting the result of the `pg_try_advisory_xact_lock` function
+        struct Acquired(bool);
+
+        impl<DB> QueryableByName<DB> for Acquired
+        where
+            DB: backend::Backend,
+            bool: deserialize::FromSql<Bool, DB>,
+        {
+            fn build<'a>(row: &impl row::NamedRow<'a, DB>) -> deserialize::Result<Self> {
+                let acquired = row::NamedRow::get::<Bool, _>(row, "acquired")?;
+                Ok(Self(acquired))
+            }
+        }
+
+        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
+        let transaction = conn.transaction(|conn| {
+            async move {
+                // Acquire a transaction advisory lock
+                let acquired: Acquired =
+                    sql_query("SELECT pg_try_advisory_xact_lock($1) AS acquired")
+                        .bind::<BigInt, _>(lock_id)
+                        .get_result(conn)
+                        .await
+                        .map_err(Error::Diesel)?;
+
+                if !acquired.0 {
+                    return Ok(false);
+                }
+
+                // Complete the future
+                fut.await?;
+                Ok(true)
+            }
+            .scope_boxed()
+        });
+
+        let result = transaction.await;
+        Ok(result)
     }
 
     async fn insert_task(&self, task: &TesTask) -> DatabaseResult<String> {

@@ -89,6 +89,13 @@ pub struct Args {
     #[clap(long, env)]
     transporter_image: Option<String>,
 
+    /// The Kubernetes namespace to use for TES tasks created by the Planetary
+    /// service.
+    ///
+    /// Defaults to `planetary-tasks`.
+    #[clap(long, env)]
+    tasks_namespace: Option<String>,
+
     /// Disables running database migrations on server startup.
     #[cfg(feature = "postgres")]
     #[clap(long)]
@@ -203,12 +210,14 @@ pub async fn main() -> anyhow::Result<()> {
     let database = args.database().await?;
     let storage_class = args.storage_class.take();
     let transporter_image = args.transporter_image.take();
+    let tasks_namespace = args.tasks_namespace.take();
     Server::builder()
         .address(&args.address)
         .port(args.port)
         .shared_database(database)
         .maybe_storage_class(storage_class)
         .maybe_transporter_image(transporter_image)
+        .maybe_tasks_namespace(tasks_namespace)
         .info(build_info(args)?)
         .build()
         .run(terminate())

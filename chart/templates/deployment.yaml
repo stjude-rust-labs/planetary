@@ -71,6 +71,8 @@ spec:
             value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)
           - name: TRANSPORTER_IMAGE
             value: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
+          - name: TASKS_NAMESPACE
+            value: {{ .Values.tasksNamespace }}
       {{- with .Values.volumes }}
       volumes:
         {{- toYaml . | nindent 8 }}

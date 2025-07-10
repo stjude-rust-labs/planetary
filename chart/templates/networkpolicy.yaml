@@ -3,7 +3,7 @@ kind: NetworkPolicy
 apiVersion: networking.k8s.io/v1
 metadata:
   name: default-deny-all
-  namespace: planetary-tasks
+  namespace: {{ .Values.tasksNamespace }}
 spec:
   podSelector:
     matchLabels:
@@ -17,7 +17,7 @@ kind: NetworkPolicy
 apiVersion: networking.k8s.io/v1
 metadata:
   name: allow-internet-only
-  namespace: planetary-tasks
+  namespace: {{ .Values.tasksNamespace }}
 spec:
   podSelector:
     matchLabels:

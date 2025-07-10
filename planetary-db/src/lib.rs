@@ -1,6 +1,8 @@
 //! Implementation of database support for Planetary.
 
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 
 use anyhow::Result;
@@ -62,32 +64,6 @@ pub enum PodKind {
     Executor,
     /// The pod is for uploading outputs to storage.
     Outputs,
-}
-
-impl PodKind {
-    /// Returns a display formatter for a comma-separated list of all of the pod
-    /// kinds.
-    pub fn all() -> impl fmt::Display {
-        struct Display;
-
-        impl fmt::Display for Display {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let all: [PodKind; 3] = [PodKind::Inputs, PodKind::Executor, PodKind::Outputs];
-
-                for (i, kind) in all.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ",")?;
-                    }
-
-                    write!(f, "{kind}")?;
-                }
-
-                Ok(())
-            }
-        }
-
-        Display
-    }
 }
 
 impl fmt::Display for PodKind {
@@ -169,6 +145,32 @@ pub struct FinishedPod<'a> {
 pub trait Database: Send + Sync + 'static {
     /// Gets the URL of the database.
     fn url(&self) -> &SecretString;
+
+    /// Attempts to acquire an exclusive lock on the database.
+    ///
+    /// If the exclusive lock is acquired, the provided future is awaited.
+    ///
+    /// If the exclusive lock is already held, this method immediately returns
+    /// `Ok(Ok(false))` to indicate the lock was not acquired and the provided
+    /// future was canceled (dropped).
+    ///
+    /// Upon successfully acquiring the lock, this method will await the future;
+    /// if the future returns an error, this function will return
+    /// `Ok(Err(error))`, otherwise it will return `Ok(Ok(true))` to indicate
+    /// the lock was acquired and the future returned `Ok(())`.
+    ///
+    /// Returns `Err(_)` if the lock could not be acquired due to a database
+    /// error.
+    ///
+    /// The lock acquired by this method must be visible to every process
+    /// communicating with the database.
+    ///
+    /// The future may be executed within the context of a transaction.
+    async fn try_with_lock(
+        &self,
+        lock_id: i64,
+        fut: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
+    ) -> DatabaseResult<Result<bool>>;
 
     /// Inserts a task into the database.
     ///

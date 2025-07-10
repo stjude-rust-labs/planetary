@@ -270,6 +270,12 @@ pub struct Server {
     /// Defaults to `stjude-rust-labs/planetary-transporter:latest`.
     #[builder(into)]
     transporter_image: Option<String>,
+
+    /// The Kubernetes namespace to use for TES task resources.
+    ///
+    /// Defaults to `planetary-tasks`.
+    #[builder(into)]
+    tasks_namespace: Option<String>,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -306,6 +312,7 @@ impl Server {
         let (orchestration, sender) = TaskOrchestrationService::spawn(
             self.database.clone(),
             client.clone(),
+            self.tasks_namespace,
             self.storage_class,
             self.transporter_image,
         );

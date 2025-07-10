@@ -1,9 +1,10 @@
 {{- if .Values.serviceAccount.create -}}
+# Role for cluster access for the orchestrator
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  namespace: planetary-tasks
-  name: planetary-role
+  namespace: {{ default "planetary-tasks" .Values.tasksNamespace }}
+  name: orchestrator-role
 rules:
 - apiGroups: [""]
   resources: ["pods"]
@@ -15,10 +16,11 @@ rules:
   resources: ["persistentvolumeclaims"]
   verbs: ["create", "delete"]
 ---
+# Service account for the orchestrator
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "chart.serviceAccountName" . | default "planetary-service-account" }}
+  name: {{ include "chart.serviceAccountName" . | default "orchestrator-service-account" }}
   labels:
     {{- include "chart.labels" . | nindent 4 }}
   {{- with .Values.serviceAccount.annotations }}
@@ -27,17 +29,18 @@ metadata:
   {{- end }}
 automountServiceAccountToken: true
 ---
+# Role binding for the orchestrator
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: planetary-role-binding
-  namespace: planetary-tasks
+  name: orchestrator-role-binding
+  namespace: {{ .Values.tasksNamespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: planetary-role
+  name: orchestrator-role
 subjects:
 - kind: ServiceAccount
   name: {{ include "chart.serviceAccountName" . | default "planetary-service-account" }}
-  namespace: planetary
+  namespace: {{ .Release.Namespace }}
 {{- end }}
