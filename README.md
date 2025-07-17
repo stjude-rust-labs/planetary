@@ -40,39 +40,41 @@ that executes tasks in a [Kubernetes](https://kubernetes.io/) cluster.
 
 ### Architecture
 
-Planetary is made up of four components:
+Planetary is made up of five components:
 
 * _TES API Service_ - this component is responsible for handling requests from
-  TES API clients; it interacts with the _Task Orchestration Service_ and the
+  TES API clients; it interacts with the _Orchestrator Service_ and the
   _Planetary Database_.
 
-* _Task Orchestration Service_ - this component is responsible for creating and
+* _Orchestrator Service_ - this component is responsible for creating and
   managing the Kubernetes resources used to execute tasks; it interacts with
   the _Kubernetes API Server_ and the _Planetary Database_.
+
+* _Task Monitoring Service_ - this component is responsible for watching for
+  orphaned pods and requesting an orchestrator to adopt the pod; it interacts
+  with the _Orchestrator Service_ and the _Planetary Database_.
 
 * _Planetary Database_ - this component stores the state of the TES tasks and
   the Kubernetes pods used to execute tasks; [PostgreSQL](https://www.postgresql.org)
   is currently the only supported database.
 
-* _Planetary Transporter_ - this component is a responsible for downloading
-  task inputs  from cloud storage to the Kubernetes storage before a task
+* _Transporter_ - this component is a responsible for downloading
+  task inputs from cloud storage to the Kubernetes storage before a task
   starts and also  for uploading task outputs from Kubernetes storage to cloud
   storage after a  task has completed; [Azure Blob Storage](https://azure.microsoft.com/en-us/products/storage/blobs/)
   is currently the only supported cloud storage.
 
-_Note: currently the TES API Service and the Task Orchestration Service are
-co-located in the same executable; in the future, they will be split apart so
-that they can be scaled independently of one another._
+There are currently four images created for use with Planetary:
 
-There are currently two images created for use with Planetary:
+* `stjude-rust-labs/planetary-api` - implements the _TES API Service_.
 
-* `stjude-rust-labs/planetary` - implements the _TES API Service_ and
-  the _Task Orchestration Service_; this image is used by pods implementing the
-  Planetary service.
+* `stjude-rust-labs/planetary-orchestrator` - implements the _Orchestrator
+  Service_.
 
-* `stjude-rust-labs/planetary-transporter` - implements the _Planetary
-  Transporter_; this image is used on pods scheduled to run before and after a
-  task.
+* `stjude-rust-labs/planetary-monitor` - implements the _Task Monitor Service_.
+
+* `stjude-rust-labs/planetary-transporter` - implements the _Transporter_ used
+  for downloading task inputs and uploading task outputs.
 
 ## 🚀 Getting Started
 
@@ -121,10 +123,10 @@ To crate a local Kubernetes cluster using `kind`, run the following command:
 kind create cluster --config kind-config.yml
 ```
 
-This guide will be installing Planetary and its database server into a 
+This guide will be installing Planetary and its database server into a
 Kubernetes namespace named `planetary`.
 
-The installation of Planetary will also create a Kubernetes namespace named 
+The installation of Planetary will also create a Kubernetes namespace named
 `planetary-tasks` for managing resources relating to executing TES tasks.
 
 ### Installing PostgreSQL
@@ -171,18 +173,32 @@ DATABASE_URL=postgres://postgres:$PASSWORD@localhost/planetary diesel setup
 
 ### Building the Container Images
 
-To build the `stjude-rust-labs/planetary` container image, run the
+To build the `stjude-rust-labs/planetary-api` container image, run the
 following command:
 
 ```bash
-docker build . --target planetary --tag stjude-rust-labs/planetary:staging
+docker build . --target planetary-api --tag stjude-rust-labs/planetary-api:staging
+```
+
+To build the `stjude-rust-labs/planetary-orchestrator` container image, run the
+following command:
+
+```bash
+docker build . --target planetary-orchestrator --tag stjude-rust-labs/planetary-orchestrator:staging
+```
+
+To build the `stjude-rust-labs/planetary-orchestrator` container image, run the
+following command:
+
+```bash
+docker build . --target planetary-monitor --tag stjude-rust-labs/planetary-monitor:staging
 ```
 
 To build the `stjude-rust-labs/planetary-transporter` container image,
 run the following command:
 
 ```bash
-docker build . --target transporter --tag stjude-rust-labs/planetary-transporter:staging
+docker build . --target planetary-transporter --tag stjude-rust-labs/planetary-transporter:staging
 ```
 
 ### Loading the Container Images
@@ -190,7 +206,7 @@ docker build . --target transporter --tag stjude-rust-labs/planetary-transporter
 As `kind` cluster nodes run isolated from the host system, local container images must be explicitly loaded onto the nodes. To load the images, run the following command:
 
 ```bash
-kind load docker-image -n planetary stjude-rust-labs/planetary:staging stjude-rust-labs/planetary-transporter:staging
+kind load docker-image -n planetary stjude-rust-labs/planetary-api:staging stjude-rust-labs/planetary-orchestrator:staging stjude-rust-labs/planetary-monitor:staging stjude-rust-labs/planetary-transporter:staging
 ```
 
 ## ✨ Deploying Planetary
@@ -199,10 +215,10 @@ To deploy Planetary into a local Kubernetes cluster, run the following command:
 
 ```bash
 cd chart
-helm install -n planetary planetary . --set image.tag=staging --set transporter.image.tag=staging
+helm install -n planetary planetary . --set api.image.tag=staging --set orchestrator.image.tag=staging --set monitor.image.tag=staging --set transporter.image.tag=staging
 ```
 
-Check the status of the planetary pod to see if it is `Running`:
+Check the status of a `planetary-api` pod to see if it is `Running`:
 
 ```bash
 kubectl get pods -n planetary
@@ -212,13 +228,13 @@ Once the Planetary service is running, you may forward the service port for
 accessing the TES API locally:
 
 ```bash
-kubectl port-forward -n planetary service/planetary 6492:6492
+kubectl port-forward -n planetary service/planetary-api 8080:8080
 ```
 
 Send a test request for getting the service information:
 
 ```bash
-curl -v http://localhost:6492/v1/service-info
+curl -v http://localhost:8080/v1/service-info
 ```
 
 Congratulations, Planetary is now ready to receive requests 🎉!
@@ -229,10 +245,12 @@ To deploy development changes, rebuild and load the container images from the
 [Building the Container Images](#building-the-container-images) and [Loading the Container Images](#loading-the-container-images)
 sections above.
 
-Restart the Planetary deployment with the following command:
+Restart the Planetary deployment with the following commands:
 
 ```
-kubectl rollout restart deployments/planetary
+kubectl rollout restart -n planetary deployments/planetary-api
+kubectl rollout restart -n planetary deployments/planetary-orchestrator
+kubectl rollout restart -n planetary deployments/planetary-monitor
 ```
 
 ## 🧠 Running Automated Tests

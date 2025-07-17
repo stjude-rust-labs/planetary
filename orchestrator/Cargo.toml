@@ -1,0 +1,50 @@
+[package]
+name = "planetary-orchestrator"
+version = "0.1.0"
+description = "The Planetary task orchestrator service"
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+planetary-db = { version = "0.1.0", path = "../db" }
+planetary-server = { version = "0.1.0", path = "../server" }
+anyhow.workspace = true
+axum.workspace = true
+bon.workspace = true
+cfg-if = { workspace = true, optional = true }
+chrono.workspace = true
+clap = { workspace = true, optional = true }
+clap-verbosity-flag = { workspace = true, optional = true }
+futures.workspace = true
+k8s-openapi.workspace = true
+kube.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+shlex.workspace = true
+tes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tracing-log = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+tracing.workspace = true
+tower-http.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["cli", "postgres"]
+cli = ["dep:cfg-if", "dep:clap", "dep:clap-verbosity-flag", "dep:tracing-log", "dep:tracing-subscriber"]
+postgres = ["planetary-db/postgres"]
+
+[[bin]]
+name = "planetary-orchestrator"
+path = "src/main.rs"
+required-features = ["cli"]

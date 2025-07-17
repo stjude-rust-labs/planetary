@@ -1,0 +1,49 @@
+[package]
+name = "planetary-api"
+version = "0.1.0"
+description = "The Planetary TES API service"
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+planetary-db = { version = "0.1.0", path = "../db" }
+planetary-server = { version = "0.1.0", path = "../server" }
+anyhow.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+bon.workspace = true
+cfg-if = { workspace = true, optional = true }
+chrono.workspace = true
+clap = { workspace = true, optional = true }
+clap-verbosity-flag = { workspace = true, optional = true }
+glob.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tes.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tower.workspace = true
+tracing-log = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+tracing.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["cli", "postgres"]
+cli = ["dep:cfg-if", "dep:clap", "dep:clap-verbosity-flag", "dep:tracing-log", "dep:tracing-subscriber"]
+postgres = ["planetary-db/postgres"]
+
+[[bin]]
+name = "planetary-api"
+path = "src/main.rs"
+required-features = ["cli"]
+

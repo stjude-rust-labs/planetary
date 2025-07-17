@@ -1,53 +1,65 @@
-replicaCount: 1
+imagePullSecrets: []
 
-labels: {}
+tasks:
+  namespace: planetary-tasks
 
-tasksNamespace: planetary-tasks
+database:
+  host: planetary-database-postgresql.planetary
+  port: 5432
+  user: postgres
+  name: planetary
+  passwordSecret: planetary-database-postgresql
+  passwordSecretKey: postgres-password 
 
-image:
-  name: stjude-rust-labs/planetary
-  pullPolicy: null
-  tag: null
+api:
+  replicas: 2
+  image:
+    name: stjude-rust-labs/planetary-api
+    tag: null
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 2Gi
+  log: info
+
+orchestrator:
+  replicas: 2
+  image:
+    name: stjude-rust-labs/planetary-orchestrator
+    tag: null
+  account:
+    create: true
+    name: orchestrator-service-account
+  service:
+    type: ClusterIP
+    port: 8080
+  storageClass: null # use default storage class
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 2Gi
+  log: info
+
+monitor:
+  image:
+    name: stjude-rust-labs/planetary-monitor
+    tag: null
+  account:
+    create: true
+    name: monitor-service-account
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 2Gi
+  log: info
 
 transporter:
   image:
     name: stjude-rust-labs/planetary-transporter
     tag: null
-
-database: {}
-
-imagePullSecrets: []
-
-serviceAccount:
-  create: true
-  annotations: {}
-  name: orchestrator-service-account
-
-podAnnotations: {}
-podLabels: {}
-
-podSecurityContext: {}
-
-securityContext: {}
-
-service:
-  type: ClusterIP
-  port: 6492
-
-ingress:
-  enabled: false
-  className: ""
-  annotations: {}
-  hosts:
-  tls: []
-
-resources:
-  requests:
-    cpu: 2000m
-    memory: 2148Mi
-
-volumes: []
-volumeMounts: []
-nodeSelector: {}
-tolerations: []
-affinity: {}
