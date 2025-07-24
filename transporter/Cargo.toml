@@ -10,12 +10,13 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-cloud = { version = "0.1.0", path = "../cloud" }
+cloud = { version = "0.1.0", path = "../cloud", features = ["cli"] }
 planetary-db = { version = "0.1.0", path = "../db" }
 anyhow.workspace = true
 cfg-if.workspace = true
 clap.workspace = true
 clap-verbosity-flag.workspace = true
+colored.workspace = true
 futures.workspace = true
 glob.workspace = true
 reqwest.workspace = true

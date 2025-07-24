@@ -1,207 +1,44 @@
 //! Cloud storage copy utility.
 
 use std::fmt;
-use std::future::Future;
+use std::num::NonZero;
 use std::path::Path;
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::Context;
-use std::task::Poll;
+use std::thread::available_parallelism;
 use std::time::Duration;
-use std::time::SystemTime;
 
-use bytes::Bytes;
-use chrono::Utc;
-use futures::Stream;
-use futures::TryStreamExt;
-use pin_project_lite::pin_project;
-use reqwest::Client;
-use reqwest::Response;
-use reqwest::header;
-use tempfile::NamedTempFile;
-use tokio::fs;
-use tokio::io::BufWriter;
 use tokio::sync::broadcast;
-use tokio_util::io::StreamReader;
-use tracing::info;
+use tokio_retry2::RetryError;
+use tokio_retry2::strategy::ExponentialFactorBackoff;
+use tokio_retry2::strategy::MaxInterval;
+use tracing::warn;
 use url::Host;
 use url::Url;
 
-use crate::generator::Alphanumeric;
+use crate::backend::azure::AzureBlobStorageBackend;
+use crate::backend::azure::AzureCopyError;
+use crate::backend::generic::GenericStorageBackend;
+use crate::transfer::FileTransfer;
 
-mod azure;
+mod backend;
 mod generator;
 mod os;
+mod pool;
+mod streams;
+mod transfer;
 
 /// The utility user agent.
 const USER_AGENT: &str = concat!("cloud-copy v", env!("CARGO_PKG_VERSION"));
 
-pin_project! {
-    /// A wrapper around a byte stream that sends progress events.
-    struct TransferStream<S> {
-        #[pin]
-        stream: S,
-        id: Arc<String>,
-        last: Option<SystemTime>,
-        events: Option<broadcast::Sender<CopyEvent>>,
-        finished: bool,
-    }
-}
+/// The default number of retries for network operations.
+const DEFAULT_RETRIES: usize = 5;
 
-impl<S> TransferStream<S> {
-    /// Constructs a new hash stream.
-    fn new(stream: S, id: Arc<String>, events: Option<broadcast::Sender<CopyEvent>>) -> Self
-    where
-        S: Stream<Item = std::io::Result<Bytes>>,
-    {
-        Self {
-            stream,
-            id,
-            last: None,
-            events,
-            finished: false,
-        }
-    }
-}
-
-impl<S> Stream for TransferStream<S>
-where
-    S: Stream<Item = std::io::Result<Bytes>>,
-{
-    type Item = std::io::Result<Bytes>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        const UPDATE_INTERVAL: Duration = Duration::from_millis(50);
-
-        if self.finished {
-            return Poll::Ready(None);
-        }
-
-        let this = self.project();
-        match this.stream.poll_next(cx) {
-            Poll::Ready(Some(Ok(bytes))) => {
-                let now = SystemTime::now();
-                let update = this
-                    .last
-                    .and_then(|last| now.duration_since(last).ok().map(|d| d >= UPDATE_INTERVAL))
-                    .unwrap_or(true);
-
-                if update {
-                    if let Some(events) = &this.events {
-                        events
-                            .send(CopyEvent::TransferProgress {
-                                id: this.id.clone(),
-                                transferred: bytes.len().try_into().unwrap(),
-                            })
-                            .ok();
-                    }
-                }
-
-                Poll::Ready(Some(Ok(bytes)))
-            }
-            Poll::Ready(Some(Err(e))) => {
-                *this.finished = true;
-                Poll::Ready(Some(Err(e)))
-            }
-            Poll::Ready(None) => {
-                *this.finished = true;
-                Poll::Ready(None)
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-/// Downloads a file from a given URL.
-///
-/// This function issues a GET request with the given additional headers.
-///
-/// If the request does not have a successful response, the `on_error` callback
-/// is called to get an error to return to the caller.
-async fn download_file<F>(
-    client: &Client,
-    source: Url,
-    headers: impl IntoIterator<Item = (&str, &str)>,
-    destination: &Path,
-    events: Option<broadcast::Sender<CopyEvent>>,
-    on_error: impl FnOnce(Response) -> F,
-) -> Result<()>
-where
-    F: Future<Output = CopyError>,
-{
-    info!(
-        "downloading `{source}` to `{destination}`",
-        source = source.display(),
-        destination = destination.display(),
+/// Helper for notifying that a network operation failed and will be retried.
+fn notify_retry(e: &CopyError, duration: Duration) {
+    warn!(
+        "network operation failed: {e} (retrying after {duration} seconds)",
+        duration = duration.as_secs()
     );
-
-    // Start by creating the destination's parent directory
-    let parent = destination.parent().ok_or(CopyError::InvalidPath)?;
-    fs::create_dir_all(parent)
-        .await
-        .map_err(|error| CopyError::DirectoryCreationFailed {
-            path: parent.to_path_buf(),
-            error,
-        })?;
-
-    // Send the request for the file
-    let mut builder = client
-        .get(source)
-        .header(header::USER_AGENT, USER_AGENT)
-        .header(header::DATE, Utc::now().to_rfc2822());
-
-    for (name, value) in headers {
-        builder = builder.header(name, value);
-    }
-
-    let response = builder.send().await?;
-    if !response.status().is_success() {
-        return Err(on_error(response).await);
-    }
-
-    let size = response
-        .content_length()
-        .ok_or(CopyError::ContentLengthMissing)?;
-
-    let id = Arc::new(format!("{random}", random = Alphanumeric::new(16)));
-
-    // Send the transfer started event
-    if let Some(events) = &events {
-        events
-            .send(CopyEvent::TransferStarted {
-                id: id.clone(),
-                path: destination.to_path_buf(),
-                size,
-            })
-            .ok();
-    }
-
-    // Use a temp file that will be atomically renamed when the download completes
-    let temp = NamedTempFile::with_prefix_in(".", parent)?;
-
-    let mut reader = StreamReader::new(TransferStream::new(
-        response.bytes_stream().map_err(std::io::Error::other),
-        id.clone(),
-        events.clone(),
-    ));
-
-    let mut writer = BufWriter::new(fs::File::create(temp.path()).await?);
-
-    // Copy the response stream to the temp file
-    tokio::io::copy(&mut reader, &mut writer).await?;
-
-    drop(reader);
-    drop(writer);
-
-    // Persist the temp file to the destination
-    temp.persist(destination)?;
-
-    if let Some(events) = &events {
-        events.send(CopyEvent::TransferComplete { id }).ok();
-    }
-
-    Ok(())
 }
 
 /// Represents either a local or remote location.
@@ -304,7 +141,7 @@ impl UrlExt for Url {
         self.host()
             .map(|host| match host {
                 Host::Domain(domain) => domain
-                    .strip_suffix(azure::AZURE_STORAGE_DOMAIN_SUFFIX)
+                    .strip_suffix(backend::azure::AZURE_STORAGE_DOMAIN_SUFFIX)
                     .is_some(),
                 _ => false,
             })
@@ -349,6 +186,9 @@ pub enum CopyError {
     /// The specified path is invalid.
     #[error("the specified path cannot be a root directory or empty")]
     InvalidPath,
+    /// The remote content was modified during a download.
+    #[error("the remote content was modified during the download")]
+    RemoteContentModified,
     /// Failed to create a directory.
     #[error("failed to create directory `{path}`: {error}", path = .path.display())]
     DirectoryCreationFailed {
@@ -357,23 +197,34 @@ pub enum CopyError {
         /// The error that occurred creating the directory.
         error: std::io::Error,
     },
+    /// Failed to create a temporary file.
+    #[error("failed to create temporary file: {error}")]
+    CreateTempFile {
+        /// The error that occurred creating the temporary file.
+        error: std::io::Error,
+    },
+    /// Failed to persist a temporary file.
+    #[error("failed to persist temporary file: {error}")]
+    PersistTempFile {
+        /// The error that occurred creating the temporary file.
+        error: std::io::Error,
+    },
     /// The destination path already exists.
     #[error("the destination path `{path}` already exists", path = .0.display())]
     DestinationExists(PathBuf),
-    /// The server returned a response without a content length.
-    #[error("the server returned a response without a content length")]
-    ContentLengthMissing,
     /// The server returned an error.
-    #[error("server return status {status}: {text}", status = .status.as_u16())]
+    #[error("server returned status {status}: {message}", status = .status.as_u16())]
     ServerError {
         /// The response status code.
         status: reqwest::StatusCode,
-        /// The response text.
-        text: String,
+        /// The response error message.
+        ///
+        /// This may be the contents of the entire response body.
+        message: String,
     },
     /// An Azure copy error occurred.
     #[error(transparent)]
-    Azure(#[from] azure::AzureCopyError),
+    Azure(#[from] backend::azure::AzureCopyError),
     /// An I/O error occurred.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -383,9 +234,25 @@ pub enum CopyError {
     /// A reqwest error occurred.
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
-    /// A temp file persistent error occurred.
+    /// A temp file persist error occurred.
     #[error(transparent)]
     Temp(#[from] tempfile::PersistError),
+}
+
+impl CopyError {
+    /// Converts the copy error into a retry error.
+    fn into_retry_error(self) -> RetryError<Self> {
+        match &self {
+            CopyError::ServerError { status, .. }
+            | CopyError::Azure(AzureCopyError::UnexpectedResponse { status, .. })
+                if status.is_server_error() =>
+            {
+                RetryError::transient(self)
+            }
+            CopyError::Io(_) | CopyError::Reqwest(_) => RetryError::transient(self),
+            _ => RetryError::permanent(self),
+        }
+    }
 }
 
 /// Represents a result for copy operations.
@@ -394,8 +261,18 @@ pub type Result<T> = std::result::Result<T, CopyError>;
 /// Used to configure a cloud copy operation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CopyConfig {
-    /// The Azure copy configuration.
-    azure: azure::AzureCopyConfig,
+    /// The block size to use for file transfers.
+    ///
+    /// The default block size depends on the cloud storage service.
+    block_size: Option<u64>,
+    /// The parallelism level for network operations.
+    ///
+    /// Defaults to the host's available parallelism.
+    parallelism: Option<usize>,
+    /// The number of retries to attempt for network operations.
+    ///
+    /// Defaults to `5`.
+    retries: Option<usize>,
 }
 
 impl CopyConfig {
@@ -404,49 +281,137 @@ impl CopyConfig {
         Self::default()
     }
 
-    /// Gets the Azure copy configuration.
-    pub fn azure(&self) -> &azure::AzureCopyConfig {
-        &self.azure
+    /// Sets the block size (in bytes) for file transfers.
+    ///
+    /// The default block size depends on the cloud storage service.
+    pub fn with_block_size(mut self, size: u64) -> Self {
+        self.block_size = Some(size);
+        self
     }
 
-    /// Gets a mutable Azure copy configuration.
-    pub fn azure_mut(&mut self) -> &mut azure::AzureCopyConfig {
-        &mut self.azure
+    /// Sets the parallelism count for copy operations.
+    ///
+    /// Defaults to the host's available parallelism.
+    pub fn with_parallelism(mut self, parallelism: usize) -> Self {
+        self.parallelism = Some(parallelism);
+        self
+    }
+
+    /// Sets the number of retries to use for network operations.
+    ///
+    /// The default number of retries is `5`.
+    ///
+    /// Retries use an exponential power of 2 backoff, starting at 1 second with
+    /// a maximum duration of 10 minutes.
+    pub fn with_retries(&mut self, retries: usize) -> &mut Self {
+        self.retries = Some(retries);
+        self
+    }
+
+    /// Gets the block size (in bytes) for file transfers.
+    ///
+    /// The default block size depends on the cloud storage service.
+    pub fn block_size(&self) -> Option<u64> {
+        self.block_size
+    }
+
+    /// Gets the parallelism supported for uploads and downloads.
+    ///
+    /// For uploads, this is the number of files and blocks that may be
+    /// concurrently transferred.
+    ///
+    /// For downloads, this is the number of files that may be concurrently
+    /// transferred.
+    ///
+    /// Defaults to the host's available parallelism.
+    pub fn parallelism(&self) -> usize {
+        self.parallelism
+            .unwrap_or_else(|| available_parallelism().map(NonZero::get).unwrap_or(1))
+    }
+
+    /// Gets the number of retries for network operations.
+    pub fn retries(&self) -> usize {
+        self.retries.unwrap_or(DEFAULT_RETRIES)
+    }
+
+    /// Gets an iterator over the retry durations for network operations.
+    ///
+    /// Retries use an exponential power of 2 backoff, starting at 1 second with
+    /// a maximum duration of 10 minutes.
+    pub fn retry_durations<'a>(&self) -> impl Iterator<Item = Duration> + use<'a> {
+        const INITIAL_DELAY_MILLIS: u64 = 1000;
+        const BASE_FACTOR: f64 = 2.0;
+        const MAX_DURATION: Duration = Duration::from_secs(600);
+
+        ExponentialFactorBackoff::from_millis(INITIAL_DELAY_MILLIS, BASE_FACTOR)
+            .max_duration(MAX_DURATION)
+            .take(self.retries.unwrap_or(DEFAULT_RETRIES))
     }
 }
 
 /// Rewrites a cloud storage URL.
 fn rewrite_url(url: Url) -> Result<Url> {
     match url.scheme() {
-        "file" | "https" => Ok(url),
-        "az" => Ok(azure::rewrite_url(&url)?),
+        "file" | "http" | "https" => Ok(url),
+        "az" => Ok(backend::azure::rewrite_url(&url)?),
         scheme => Err(CopyError::UnsupportedUrlScheme(scheme.to_string())),
     }
 }
 
-/// Represents an event that may occur during a copy operation.
+/// Represents an event that may occur during a file transfer.
 #[derive(Debug, Clone)]
-pub enum CopyEvent {
-    /// A transfer of a remote file has started.
+pub enum TransferEvent {
+    /// A transfer of a file has been started.
     TransferStarted {
-        /// The id of the remote file that has started.
-        id: Arc<String>,
-        /// The path of the local file.
+        /// The id of the file transfer.
+        ///
+        /// This is a monotonic counter that is increased every transfer.
+        id: u64,
+        /// The path of the file being transferred.
         path: PathBuf,
-        /// The size of the file, in bytes.
-        size: u64,
+        /// The number of blocks in the file.
+        blocks: u64,
+        /// The size of the file being transferred.
+        ///
+        /// This is `None` when downloading a file of unknown size.
+        size: Option<u64>,
+    },
+    /// A transfer of a block has started.
+    BlockStarted {
+        /// The id of the file transfer.
+        id: u64,
+        /// The block number being transferred.
+        block: u64,
+        /// The size of the block being transferred.
+        ///
+        /// This is `None` when downloading a file of unknown size (single
+        /// block).
+        size: Option<u64>,
     },
     /// A transfer of a remote file has made progress.
-    TransferProgress {
-        /// The id of the file that made progress.
-        id: Arc<String>,
+    BlockProgress {
+        /// The id of the transfer.
+        id: u64,
+        /// The block number being transferred.
+        block: u64,
         /// The number of bytes transferred in this update.
         transferred: u64,
     },
     /// A transfer of a remote file has completed.
-    TransferComplete {
-        /// The id of the file that has completed.
-        id: Arc<String>,
+    BlockCompleted {
+        /// The id of the transfer.
+        id: u64,
+        /// The block number being transferred.
+        block: u64,
+        /// Whether or not the transfer failed.
+        failed: bool,
+    },
+    /// A file transfer has completed.
+    TransferCompleted {
+        /// The id of the transfer.
+        id: u64,
+        /// Whether or not the transfer failed.
+        failed: bool,
     },
 }
 
@@ -477,7 +442,7 @@ pub async fn copy(
     config: CopyConfig,
     source: impl Into<Location<'_>>,
     destination: impl Into<Location<'_>>,
-    events: Option<broadcast::Sender<CopyEvent>>,
+    events: Option<broadcast::Sender<TransferEvent>>,
 ) -> Result<()> {
     let source = source.into();
     let destination = destination.into();
@@ -501,13 +466,8 @@ pub async fn copy(
 
             let destination = rewrite_url(destination)?;
             if destination.is_azure_storage() {
-                azure::copy(
-                    config,
-                    Location::Path(source),
-                    Location::Url(destination),
-                    events.clone(),
-                )
-                .await
+                let transfer = FileTransfer::new(AzureBlobStorageBackend::new(config, events));
+                transfer.upload(source, destination).await
             } else {
                 Err(CopyError::UnsupportedUrl(destination))
             }
@@ -527,32 +487,11 @@ pub async fn copy(
 
             let source = rewrite_url(source)?;
             if source.is_azure_storage() {
-                azure::copy(
-                    config,
-                    Location::Url(source),
-                    Location::Path(destination),
-                    events.clone(),
-                )
-                .await
+                let transfer = FileTransfer::new(AzureBlobStorageBackend::new(config, events));
+                transfer.download(source, destination).await
             } else {
-                // Not a known cloud URL, just download a file
-                let client = Client::new();
-                download_file(
-                    &client,
-                    source,
-                    [],
-                    destination,
-                    events,
-                    |response| async move {
-                        let status = response.status();
-                        match response.text().await {
-                            Ok(text) => CopyError::ServerError { status, text },
-                            Err(e) => CopyError::Reqwest(e),
-                        }
-                    },
-                )
-                .await?;
-                Ok(())
+                let transfer = FileTransfer::new(GenericStorageBackend::new(config, events));
+                transfer.download(source, destination).await
             }
         }
         (Location::Url(source), Location::Url(destination)) => {
@@ -567,6 +506,113 @@ pub async fn copy(
             }
 
             Err(CopyError::RemoteCopyNotSupported)
+        }
+    }
+}
+
+/// Handles events that may occur during the copy operation.
+///
+/// This is responsible for showing and updating progress bars for files
+/// being transferred.
+///
+/// Used from CLI implementations.
+#[cfg(feature = "cli")]
+pub async fn handle_events(
+    mut events: broadcast::Receiver<TransferEvent>,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
+) {
+    use std::collections::HashMap;
+
+    use tokio::sync::broadcast::error::RecvError;
+    use tracing::Span;
+    use tracing::warn_span;
+    use tracing_indicatif::span_ext::IndicatifSpanExt;
+    use tracing_indicatif::style::ProgressStyle;
+
+    struct BlockTransferState {
+        /// The size of the block being transferred.
+        size: Option<u64>,
+        /// The number of bytes that were transferred for the block.
+        transferred: u64,
+    }
+
+    struct TransferState {
+        /// The progress bar to display for a transfer.
+        bar: Span,
+        /// The total number of bytes transferred.
+        transferred: u64,
+        /// Block transfer state.
+        block_transfers: HashMap<u64, BlockTransferState>,
+    }
+
+    let mut transfers = HashMap::new();
+    let mut warned = false;
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            event = events.recv() => match event {
+                Ok(TransferEvent::TransferStarted { id, path, size, .. }) => {
+                    let bar = warn_span!("progress");
+
+                    let style = match size {
+                        Some(size) => {
+                            bar.pb_set_length(size);
+                            ProgressStyle::with_template(
+                                "[{elapsed_precise:.cyan/blue}] {bar:40.cyan/blue} {bytes:.cyan/blue} / {total_bytes:.cyan/blue} ({bytes_per_sec:.cyan/blue}) [ETA {eta_precise:.cyan/blue}]: {msg}",
+                            ).unwrap()
+                        }
+                        None => {
+                            ProgressStyle::with_template(
+                                "[{elapsed_precise:.cyan/blue}] {spinner:.cyan/blue} {bytes:.cyan/blue} ({bytes_per_sec:.cyan/blue}): {msg}",
+                            ).unwrap()
+                        }
+                    };
+
+                    bar.pb_set_style(&style);
+                    bar.pb_set_message(path.to_str().unwrap_or("<path not UTF-8>"));
+                    bar.pb_start();
+                    transfers.insert(id, TransferState { bar, transferred: 0, block_transfers: HashMap::new() });
+                }
+                Ok(TransferEvent::BlockStarted { id, block, size }) => {
+                    if let Some(state) = transfers.get_mut(&id) {
+                        state.block_transfers.insert(block, BlockTransferState { size, transferred: 0});
+                    }
+                }
+                Ok(TransferEvent::BlockProgress { id, block, transferred }) => {
+                    if let Some(state) = transfers.get_mut(&id) {
+                        state.transferred += transferred;
+
+                        if let Some(state) = state.block_transfers.get_mut(&block) {
+                            state.transferred += transferred;
+                        }
+
+                        state.bar.pb_set_position(state.transferred);
+                    }
+                }
+                Ok(TransferEvent::BlockCompleted { id, block, failed }) => {
+                    if let Some(state) = transfers.get_mut(&id) {
+                        let block = state.block_transfers.remove(&block).unwrap();
+                        state.transferred -= block.transferred;
+
+                        if !failed && let Some(size) = block.size {
+                            state.transferred += size;
+                        }
+
+                        state.bar.pb_set_position(state.transferred);
+                    }
+                }
+                Ok(TransferEvent::TransferCompleted { id, .. }) => {
+                    transfers.remove(&id);
+                }
+                Err(RecvError::Closed) => break,
+                Err(RecvError::Lagged(_)) => {
+                    if !warned {
+                        warn!("event stream is lagging: progress may be incorrect");
+                        warned = true;
+                    }
+                }
+            }
         }
     }
 }

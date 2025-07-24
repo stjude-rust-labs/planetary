@@ -23,7 +23,6 @@
 //! Likewise, if the `--outputs` option is used with `--targets /mnt/outputs`,
 //! it will access `/mnt/outputs/0`, `/mnt/outputs/1`, etc.
 
-use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::io::stderr;
 use std::num::NonZero;
@@ -41,8 +40,9 @@ use anyhow::bail;
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
-use cloud::CopyEvent;
+use cloud::TransferEvent;
 use cloud::UrlExt;
+use colored::Colorize;
 use glob::Pattern;
 use planetary_db::Database;
 use reqwest::Url;
@@ -51,18 +51,11 @@ use tes::v1::types::task::IoType;
 use tes::v1::types::task::Output;
 use tokio::fs::File;
 use tokio::fs::create_dir_all;
-use tokio::select;
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::Receiver;
-use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::oneshot;
 use tracing::error;
 use tracing::info;
-use tracing::warn;
-use tracing::warn_span;
 use tracing_indicatif::IndicatifLayer;
-use tracing_indicatif::span_ext::IndicatifSpanExt;
-use tracing_indicatif::style::ProgressStyle;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use walkdir::WalkDir;
@@ -128,53 +121,6 @@ impl Args {
     }
 }
 
-/// Handles events that may occur during the copy operation.
-///
-/// This is responsible for showing and updating progress bars for files
-/// being transferred.
-async fn handle_events(mut events: Receiver<CopyEvent>, mut shutdown: oneshot::Receiver<()>) {
-    let mut bars = HashMap::new();
-    let mut warned = false;
-
-    loop {
-        select! {
-            _ = &mut shutdown => break,
-            event = events.recv() => match event {
-                Ok(CopyEvent::TransferStarted { id, path, size }) => {
-                    let bar = warn_span!("progress");
-                    let style = ProgressStyle::with_template(
-                        "[{elapsed_precise:.cyan/blue}] {bar:40.cyan/blue} {bytes:.cyan/blue} / \
-                            {total_bytes:.cyan/blue} ({bytes_per_sec:.cyan/blue}) [ETA \
-                            {eta_precise:.cyan/blue}]: {msg}",
-                    )
-                    .unwrap();
-                    bar.pb_set_style(&style);
-                    bar.pb_set_length(size);
-                    bar.pb_set_message(path.to_str().unwrap_or("<unknown>"));
-                    bar.pb_start();
-                    bars.insert(id, (bar, 0u64));
-                }
-                Ok(CopyEvent::TransferProgress { id, transferred }) => {
-                    if let Some((bar, position)) = bars.get_mut(&id) {
-                        *position += transferred;
-                        bar.pb_set_position(*position);
-                    }
-                }
-                Ok(CopyEvent::TransferComplete { id }) => {
-                    bars.remove(&id);
-                }
-                Err(RecvError::Closed) => break,
-                Err(RecvError::Lagged(_)) => {
-                    if !warned {
-                        warn!("event stream is lagging: progress may be incorrect");
-                        warned = true;
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Downloads inputs into the inputs directory.
 ///
 /// This will also create empty files and directories for outputs in the outputs
@@ -209,68 +155,76 @@ async fn download_inputs(
     let (events_tx, events_rx) =
         broadcast::channel(16 * available_parallelism().map(NonZero::get).unwrap_or(1));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let handler = tokio::spawn(async move { handle_events(events_rx, shutdown_rx).await });
+    let handler = tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
 
-    for (index, input) in task_io.inputs.into_iter().enumerate() {
-        let path = inputs_dir.join(index.to_string());
+    let transfer = async move || {
+        for (index, input) in task_io.inputs.into_iter().enumerate() {
+            let path = inputs_dir.join(index.to_string());
 
-        // Write the contents if directly given
-        if let Some(contents) = &input.content {
-            assert_eq!(
-                input.ty,
-                IoType::File,
-                "cannot create content for a directory"
-            );
+            // Write the contents if directly given
+            if let Some(contents) = &input.content {
+                assert_eq!(
+                    input.ty,
+                    IoType::File,
+                    "cannot create content for a directory"
+                );
 
-            info!(
-                "creating input file `{path}` with specified contents",
-                path = input.path,
-            );
+                info!(
+                    "creating input file `{path}` with specified contents",
+                    path = input.path,
+                );
 
-            tokio::fs::write(&path, contents).await.with_context(|| {
-                format!("failed to create input file `{path}`", path = input.path)
-            })?;
-            continue;
-        }
+                tokio::fs::write(&path, contents).await.with_context(|| {
+                    format!("failed to create input file `{path}`", path = input.path)
+                })?;
+                continue;
+            }
 
-        let url = input
-            .url
-            .context("input is missing a URL")?
-            .parse::<Url>()
-            .context("input URL is invalid")?;
+            let url = input
+                .url
+                .context("input is missing a URL")?
+                .parse::<Url>()
+                .context("input URL is invalid")?;
 
-        // Perform the copy
-        cloud::copy(
-            Default::default(),
-            url.clone(),
-            &path,
-            Some(events_tx.clone()),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to download input `{url}` to `{path}`",
-                url = url.display(),
-                path = input.path
+            // Perform the copy
+            cloud::copy(
+                Default::default(),
+                url.clone(),
+                &path,
+                Some(events_tx.clone()),
             )
-        })?;
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to download input `{url}` to `{path}`",
+                    url = url.display(),
+                    path = input.path
+                )
+            })?;
 
-        // Check that the result matches the input type
-        match (path.is_file(), input.ty) {
-            (true, IoType::Directory) => bail!(
-                "input `{url}` was a file but the input type was `DIRECTORY`",
-                url = url.display()
-            ),
-            (false, IoType::File) => bail!(
-                "input `{url}` was a directory but the input type was `FILE`",
-                url = url.display()
-            ),
-            _ => {}
+            // Check that the result matches the input type
+            match (path.is_file(), input.ty) {
+                (true, IoType::Directory) => bail!(
+                    "input `{url}` was a file but the input type was `DIRECTORY`",
+                    url = url.display()
+                ),
+                (false, IoType::File) => bail!(
+                    "input `{url}` was a directory but the input type was `FILE`",
+                    url = url.display()
+                ),
+                _ => {}
+            }
         }
-    }
+
+        Ok(())
+    };
+
+    let result = transfer().await;
 
     shutdown_tx.send(()).ok();
     handler.await.expect("failed to join events handler");
+
+    result?;
 
     // We also need to create any file outputs so that Kubernetes will mount them as
     // files and not directories
@@ -303,42 +257,48 @@ async fn upload_outputs(
     let (events_tx, events_rx) =
         broadcast::channel(16 * available_parallelism().map(NonZero::get).unwrap_or(1));
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let handler = tokio::spawn(async move { handle_events(events_rx, shutdown_rx).await });
+    let handler = tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
 
-    let mut files = Vec::new();
-    for (index, output) in task_io.outputs.iter().enumerate() {
-        let url = output.url.parse::<Url>().context("output URL is invalid")?;
-        let path = outputs_dir.join(index.to_string());
-        let metadata = path.metadata().with_context(|| {
-            format!(
-                "failed to read metadata of output `{path}`",
-                path = output.path
-            )
-        })?;
+    let transfer = async move || {
+        let mut files = Vec::new();
+        for (index, output) in task_io.outputs.iter().enumerate() {
+            let url = output.url.parse::<Url>().context("output URL is invalid")?;
+            let path = outputs_dir.join(index.to_string());
+            let metadata = path.metadata().with_context(|| {
+                format!(
+                    "failed to read metadata of output `{path}`",
+                    path = output.path
+                )
+            })?;
 
-        let path = path
-            .to_str()
-            .with_context(|| format!("path `{path}` is not UTF-8", path = path.display()))?;
+            let path = path
+                .to_str()
+                .with_context(|| format!("path `{path}` is not UTF-8", path = path.display()))?;
 
-        if metadata.is_file() {
-            upload_file(
-                output,
-                url,
-                path,
-                metadata.len(),
-                events_tx.clone(),
-                &mut files,
-            )
-            .await?;
-        } else {
-            upload_directory(output, &url, path, events_tx.clone(), &mut files).await?;
+            if metadata.is_file() {
+                upload_file(
+                    output,
+                    url,
+                    path,
+                    metadata.len(),
+                    events_tx.clone(),
+                    &mut files,
+                )
+                .await?;
+            } else {
+                upload_directory(output, &url, path, events_tx.clone(), &mut files).await?;
+            }
         }
-    }
+
+        anyhow::Ok(files)
+    };
+
+    let result = transfer().await;
 
     shutdown_tx.send(()).ok();
     handler.await.expect("failed to join events handler");
 
-    database.update_task_output_files(tes_id, &files).await?;
+    database.update_task_output_files(tes_id, &result?).await?;
     Ok(())
 }
 
@@ -348,7 +308,7 @@ async fn upload_file(
     mut url: Url,
     path: &str,
     size: u64,
-    events: broadcast::Sender<CopyEvent>,
+    events: broadcast::Sender<TransferEvent>,
     files: &mut Vec<OutputFile>,
 ) -> Result<()> {
     if output.ty != IoType::File {
@@ -386,7 +346,7 @@ async fn upload_directory(
     output: &Output,
     url: &Url,
     path: &str,
-    events: broadcast::Sender<CopyEvent>,
+    events: broadcast::Sender<TransferEvent>,
     files: &mut Vec<OutputFile>,
 ) -> Result<()> {
     if output.ty != IoType::Directory {
@@ -486,9 +446,39 @@ async fn upload_directory(
     Ok(())
 }
 
-/// The main method.
-#[tokio::main]
-pub async fn main() -> Result<()> {
+#[cfg(unix)]
+/// An async function that waits for a termination signal.
+async fn terminate() {
+    use tokio::select;
+    use tokio::signal::unix::SignalKind;
+    use tokio::signal::unix::signal;
+    use tracing::info;
+
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to create SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to create SIGINT handler");
+
+    let signal = select! {
+        _ = sigterm.recv() => "SIGTERM",
+        _ = sigint.recv() => "SIGINT",
+    };
+
+    info!("received {signal} signal: initiating shutdown");
+}
+
+#[cfg(windows)]
+/// An async function that waits for a termination signal.
+async fn terminate() {
+    use tokio::signal::windows::ctrl_c;
+    use tracing::info;
+
+    let mut signal = ctrl_c().expect("failed to create ctrl-c handler");
+    signal.await;
+
+    info!("received Ctrl-C signal: initiating shutdown");
+}
+
+/// Runs the program.
+async fn run() -> Result<()> {
     let args = Args::parse();
 
     match std::env::var("RUST_LOG") {
@@ -529,5 +519,27 @@ pub async fn main() -> Result<()> {
             .await
         }
         Mode::Outputs => upload_outputs(args.database()?, &args.tes_id, &args.outputs_dir).await,
+    }
+}
+
+/// The main method.
+#[tokio::main]
+pub async fn main() {
+    tokio::select! {
+        _ = terminate() => return,
+        r = run() => {
+            if let Err(e) = r {
+                eprintln!(
+                    "{error}: {e:?}",
+                    error = if std::io::stderr().is_terminal() {
+                        "error".red().bold()
+                    } else {
+                        "error".normal()
+                    }
+                );
+
+                std::process::exit(1);
+            }
+        }
     }
 }

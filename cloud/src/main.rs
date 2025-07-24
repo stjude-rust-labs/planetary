@@ -1,6 +1,5 @@
 //! Cloud storage copy utility.
 
-use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::io::stderr;
 use std::num::NonZero;
@@ -13,19 +12,11 @@ use clap::Subcommand;
 use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
 use cloud::CopyConfig;
-use cloud::CopyEvent;
 use cloud::Location;
 use colored::Colorize;
-use tokio::select;
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::Receiver;
-use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::oneshot;
-use tracing::warn;
-use tracing::warn_span;
 use tracing_indicatif::IndicatifLayer;
-use tracing_indicatif::span_ext::IndicatifSpanExt;
-use tracing_indicatif::style::ProgressStyle;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -49,9 +40,9 @@ impl CopyCommand {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handler =
-            tokio::spawn(async move { Self::handle_events(events_rx, shutdown_rx).await });
+            tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
 
-        cloud::copy(
+        let result = cloud::copy(
             CopyConfig::default(),
             &self.source,
             &self.destination,
@@ -64,58 +55,11 @@ impl CopyCommand {
                 source = Location::new(&self.source),
                 destination = Location::new(&self.destination),
             )
-        })?;
+        });
 
         shutdown_tx.send(()).ok();
         handler.await.expect("failed to join events handler");
-        Ok(())
-    }
-
-    /// Handles events that may occur during the copy operation.
-    ///
-    /// This is responsible for showing and updating progress bars for files
-    /// being transferred.
-    async fn handle_events(mut events: Receiver<CopyEvent>, mut shutdown: oneshot::Receiver<()>) {
-        let mut bars = HashMap::new();
-        let mut warned = false;
-
-        loop {
-            select! {
-                _ = &mut shutdown => break,
-                event = events.recv() => match event {
-                    Ok(CopyEvent::TransferStarted { id, path, size }) => {
-                        let bar = warn_span!("progress");
-                        let style = ProgressStyle::with_template(
-                            "[{elapsed_precise:.cyan/blue}] {bar:40.cyan/blue} {bytes:.cyan/blue} / \
-                                {total_bytes:.cyan/blue} ({bytes_per_sec:.cyan/blue}) [ETA \
-                                {eta_precise:.cyan/blue}]: {msg}",
-                        )
-                        .unwrap();
-                        bar.pb_set_style(&style);
-                        bar.pb_set_length(size);
-                        bar.pb_set_message(path.to_str().unwrap_or("<unknown>"));
-                        bar.pb_start();
-                        bars.insert(id, (bar, 0u64));
-                    }
-                    Ok(CopyEvent::TransferProgress { id, transferred }) => {
-                        if let Some((bar, position)) = bars.get_mut(&id) {
-                            *position += transferred;
-                            bar.pb_set_position(*position);
-                        }
-                    }
-                    Ok(CopyEvent::TransferComplete { id }) => {
-                        bars.remove(&id);
-                    }
-                    Err(RecvError::Closed) => break,
-                    Err(RecvError::Lagged(_)) => {
-                        if !warned {
-                            warn!("event stream is lagging: progress may be incorrect");
-                            warned = true;
-                        }
-                    }
-                }
-            }
-        }
+        result
     }
 }
 
@@ -172,18 +116,54 @@ async fn run() -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+/// An async function that waits for a termination signal.
+async fn terminate() {
+    use tokio::select;
+    use tokio::signal::unix::SignalKind;
+    use tokio::signal::unix::signal;
+    use tracing::info;
+
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to create SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to create SIGINT handler");
+
+    let signal = select! {
+        _ = sigterm.recv() => "SIGTERM",
+        _ = sigint.recv() => "SIGINT",
+    };
+
+    info!("received {signal} signal: initiating shutdown");
+}
+
+#[cfg(windows)]
+/// An async function that waits for a termination signal.
+async fn terminate() {
+    use tokio::signal::windows::ctrl_c;
+    use tracing::info;
+
+    let mut signal = ctrl_c().expect("failed to create ctrl-c handler");
+    signal.await;
+
+    info!("received Ctrl-C signal: initiating shutdown");
+}
+
 #[tokio::main]
 async fn main() {
-    if let Err(e) = run().await {
-        eprintln!(
-            "{error}: {e:?}",
-            error = if std::io::stderr().is_terminal() {
-                "error".red().bold()
-            } else {
-                "error".normal()
-            }
-        );
+    tokio::select! {
+        _ = terminate() => return,
+        r = run() => {
+            if let Err(e) = r {
+                eprintln!(
+                    "{error}: {e:?}",
+                    error = if std::io::stderr().is_terminal() {
+                        "error".red().bold()
+                    } else {
+                        "error".normal()
+                    }
+                );
 
-        std::process::exit(1);
+                std::process::exit(1);
+            }
+        }
     }
 }
