@@ -144,7 +144,7 @@ trait IntoCopyError {
 impl IntoCopyError for Response {
     async fn into_copy_error(self) -> CopyError {
         /// Represents an error response.
-        #[derive(Deserialize)]
+        #[derive(Default, Deserialize)]
         #[serde(rename = "Error")]
         struct ErrorResponse {
             /// The error message.
@@ -158,17 +158,21 @@ impl IntoCopyError for Response {
             Err(e) => return e.into(),
         };
 
-        let response: ErrorResponse = match serde_xml_rs::from_str(&text) {
-            Ok(response) => response,
-            Err(e) => {
-                return AzureCopyError::UnexpectedResponse { status, error: e }.into();
+        let message = if !text.is_empty() {
+            match serde_xml_rs::from_str::<ErrorResponse>(&text) {
+                Ok(response) => response.message,
+                Err(e) => {
+                    return AzureCopyError::UnexpectedResponse { status, error: e }.into();
+                }
             }
+        } else {
+            status
+                .canonical_reason()
+                .unwrap_or("<unknown status code>")
+                .to_lowercase()
         };
 
-        CopyError::ServerError {
-            status,
-            message: response.message,
-        }
+        CopyError::ServerError { status, message }
     }
 }
 
