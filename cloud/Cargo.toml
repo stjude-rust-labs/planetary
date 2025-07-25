@@ -28,6 +28,7 @@ serde-xml-rs.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-retry2.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-indicatif.workspace = true

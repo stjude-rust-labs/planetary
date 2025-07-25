@@ -1,9 +1,10 @@
-{{- if .Values.serviceAccount.create -}}
+{{- if .Values.orchestrator.account.create -}}
+# Role for cluster access for the orchestrator
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  namespace: planetary
-  name: planetary-role
+  namespace: {{ .Values.tasks.namespace }}
+  name: orchestrator-role
 rules:
 - apiGroups: [""]
   resources: ["pods"]
@@ -15,29 +16,87 @@ rules:
   resources: ["persistentvolumeclaims"]
   verbs: ["create", "delete"]
 ---
+# Service account for the orchestrator
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "chart.serviceAccountName" . | default "planetary-service-account" }}
+  name: {{ .Values.orchestrator.account.name }}
   labels:
     {{- include "chart.labels" . | nindent 4 }}
-  {{- with .Values.serviceAccount.annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
 automountServiceAccountToken: true
 ---
+# Role binding for the orchestrator
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: planetary-role-binding
-  namespace: planetary
+  name: orchestrator-role-binding
+  namespace: {{ .Values.tasks.namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: planetary-role
+  name: orchestrator-role
 subjects:
 - kind: ServiceAccount
-  name: {{ include "chart.serviceAccountName" . | default "planetary-service-account" }}
-  namespace: default
+  name: {{ .Values.orchestrator.account.name }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+{{- if .Values.monitor.account.create -}}
+# Role for cluster access for the monitor (planetary namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: monitor-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+# Role for cluster access for the monitor (tasks namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: {{ .Values.tasks.namespace }}
+  name: monitor-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+# Service account for the monitor
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.monitor.account.name }}
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+automountServiceAccountToken: true
+---
+# Role binding for the monitor (planetary namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitor-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: monitor-role
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.monitor.account.name }}
+---
+# Role binding for the monitor (tasks namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitor-role-binding
+  namespace: {{ .Values.tasks.namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: monitor-role
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.monitor.account.name }}
+  namespace: {{ .Release.Namespace }}
 {{- end }}

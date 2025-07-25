@@ -1,71 +1,69 @@
-replicaCount: 1
+imagePullSecrets: []
 
-labels: {}
+tasks:
+  namespace: planetary-tasks
 
-image:
-  name: stjude-rust-labs/planetary
-  pullPolicy: Always
-  tag: latest
+database:
+  host: planetary-database-postgresql.planetary
+  port: 5432
+  user: postgres
+  name: planetary
+  # The name of the Kubernetes secret that stores the PostgreSQL database password
+  # The default value corresponds to the secret created by bitnami/postgresql Helm chart
+  passwordSecret: planetary-database-postgresql
+  # The key within the Kubernetes secret containing the PostgreSQL database password
+  # The default value corresponds to the secret created by bitnami/postgresql Helm chart
+  passwordSecretKey: postgres-password 
+
+api:
+  replicas: 2
+  image:
+    name: stjude-rust-labs/planetary-api
+    tag: null
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 2Gi
+  log: info
+
+orchestrator:
+  replicas: 2
+  image:
+    name: stjude-rust-labs/planetary-orchestrator
+    tag: null
+  account:
+    create: true
+    name: orchestrator-service-account
+  service:
+    type: ClusterIP
+    port: 8080
+  storageClass: null # use default storage class
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 2Gi
+  log: info
+
+monitor:
+  image:
+    name: stjude-rust-labs/planetary-monitor
+    tag: null
+  account:
+    create: true
+    name: monitor-service-account
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 2000m
+      memory: 2Gi
+  log: info
 
 transporter:
   image:
     name: stjude-rust-labs/planetary-transporter
-    tag: latest
-
-database: {}
-
-imagePullSecrets: []
-
-serviceAccount:
-  create: true
-  annotations: {}
-  name: planetary-service-account
-
-podAnnotations: {}
-podLabels: {}
-
-podSecurityContext: {}
-  # fsGroup: 2000
-
-securityContext: {}
-  # capabilities:
-  #   drop:
-  #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
-  # runAsUser: 1000
-
-service:
-  type: ClusterIP
-  port: 6492
-
-ingress:
-  enabled: false
-  className: ""
-  annotations: {}
-    # kubernetes.io/ingress.class: nginx
-    # kubernetes.io/tls-acme: "true"
-  hosts:
-    - host: chart-example.local
-      paths:
-        - path: /
-          pathType: ImplementationSpecific
-  tls: []
-  #  - secretName: chart-example-tls
-  #    hosts:
-  #      - chart-example.local
-
-resources:
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  requests:
-    cpu: 2000m
-    memory: 2148Mi
-
-volumes: []
-volumeMounts: []
-nodeSelector: {}
-tolerations: []
-affinity: {}
-
+    tag: null

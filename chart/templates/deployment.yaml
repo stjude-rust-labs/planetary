@@ -1,89 +1,202 @@
+# Deployment for the Planetary API service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "chart.fullname" . }}
+  name: planetary-api
   labels:
     {{- include "chart.labels" . | nindent 4 }}
 spec:
+  replicas: {{ .Values.api.replicas }}
   selector:
     matchLabels:
       {{- include "chart.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
-      annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       labels:
         {{- include "chart.labels" . | nindent 8 }}
-        {{- with .Values.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        app.kubernetes.io/component: api
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "chart.serviceAccountName" . }}
-      securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        - name: {{ .Chart.Name }}
-          securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.name }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+        - name: planetary-api
+          image: "{{ .Values.api.image.name }}:{{ .Values.api.image.tag | default .Chart.AppVersion }}"
           ports:
             - name: http
-              containerPort: {{ .Values.service.port }}
+              containerPort: 8080
               protocol: TCP
           livenessProbe:
             httpGet:
-              path: /v1/service-info
+              path: /ping
               port: http
           readinessProbe:
             httpGet:
-              path: /v1/service-info
+              path: /ping
               port: http
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
-          {{- with .Values.volumeMounts }}
-          volumeMounts:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- toYaml .Values.api.resources | nindent 12 }}
           env:
           - name: RUST_LOG
-            value: "info"
+            value: {{ .Values.api.log }}
           - name: DATABASE_USER
-            value: {{ default "postgres" .Values.database.user }}
+            value: {{ .Values.database.user }}
           - name: DATABASE_PASSWORD
             valueFrom:
               secretKeyRef:
-                name: {{ default "planetary-database-postgresql" .Values.database.passwordSecret }}
-                key: {{ default "postgres-password" .Values.database.passwordSecretKey }}
+                name: {{ .Values.database.passwordSecret }}
+                key: {{ .Values.database.passwordSecretKey }}
           - name: DATABASE_HOST
-            value: {{ default "planetary-database-postgresql.default.svc.cluster.local" .Values.database.host }}
+            value: {{ .Values.database.host }}
           - name: DATABASE_PORT
-            value: "{{ default 5432 .Values.database.port }}"
+            value: "{{ .Values.database.port }}"
           - name: DATABASE_NAME
-            value: {{ default "planetary" .Values.database.name }}
+            value: {{ .Values.database.name }}
+          - name: DATABASE_URL
+            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)
+          - name: ORCHESTRATOR_URL
+            value: "http://planetary-orchestrator:{{ .Values.orchestrator.service.port }}"
+---
+# Deployment for the Planetary orchestrator service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planetary-orchestrator
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.orchestrator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "chart.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: orchestrator
+  template:
+    metadata:
+      labels:
+        {{- include "chart.labels" . | nindent 8 }}
+        app.kubernetes.io/component: orchestrator
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ .Values.orchestrator.account.name }}
+      containers:
+        - name: planetary-orchestrator
+          image: "{{ .Values.orchestrator.image.name }}:{{ .Values.orchestrator.image.tag | default .Chart.AppVersion }}"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+          resources:
+            {{- toYaml .Values.orchestrator.resources | nindent 12 }}
+          env:
+          - name: RUST_LOG
+            value: {{ .Values.orchestrator.log }}
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: DATABASE_USER
+            value: {{ .Values.database.user }}
+          - name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.passwordSecret }}
+                key: {{ .Values.database.passwordSecretKey }}
+          - name: DATABASE_HOST
+            value: {{ .Values.database.host }}
+          - name: DATABASE_PORT
+            value: "{{ .Values.database.port }}"
+          - name: DATABASE_NAME
+            value: {{ .Values.database.name }}
           - name: DATABASE_URL
             value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)
           - name: TRANSPORTER_IMAGE
             value: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
-      {{- with .Values.volumes }}
-      volumes:
+          - name: TASKS_NAMESPACE
+            value: {{ .Values.tasks.namespace }}
+          {{- with .Values.orchestrator.storageClass }}
+          - name: STORAGE_CLASS
+            value: "{{- . }}"
+          {{- end }}
+---
+# Deployment for the Planetary task monitor
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planetary-monitor
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "chart.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: monitor
+  template:
+    metadata:
+      labels:
+        {{- include "chart.labels" . | nindent 8 }}
+        app.kubernetes.io/component: monitor
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.nodeSelector }}
-      nodeSelector:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.affinity }}
-      affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.tolerations }}
-      tolerations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+      serviceAccountName: {{ .Values.monitor.account.name }}
+      containers:
+        - name: planetary-monitor
+          image: "{{ .Values.monitor.image.name }}:{{ .Values.monitor.image.tag | default .Chart.AppVersion }}"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+          resources:
+            {{- toYaml .Values.monitor.resources | nindent 12 }}
+          env:
+          - name: RUST_LOG
+            value: {{ .Values.monitor.log }}
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: DATABASE_USER
+            value: {{ .Values.database.user }}
+          - name: DATABASE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Values.database.passwordSecret }}
+                key: {{ .Values.database.passwordSecretKey }}
+          - name: DATABASE_HOST
+            value: {{ .Values.database.host }}
+          - name: DATABASE_PORT
+            value: "{{ .Values.database.port }}"
+          - name: DATABASE_NAME
+            value: {{ .Values.database.name }}
+          - name: DATABASE_URL
+            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)
+          - name: PLANETARY_NAMESPACE
+            value: "{{ .Release.Namespace }}"
+          - name: TASKS_NAMESPACE
+            value: {{ .Values.tasks.namespace }}
+          - name: ORCHESTRATOR_URL
+            value: "http://planetary-orchestrator:{{ .Values.orchestrator.service.port }}"

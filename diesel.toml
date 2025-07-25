@@ -2,8 +2,8 @@
 # see https://diesel.rs/guides/configuring-diesel-cli
 
 [print_schema]
-file = "planetary-db/src/postgres/schema.rs"
+file = "db/src/postgres/schema.rs"
 custom_type_derives = ["diesel::query_builder::QueryId", "Clone"]
 
 [migrations_directory]
-dir = "planetary-db/src/postgres/migrations"
+dir = "db/src/postgres/migrations"
