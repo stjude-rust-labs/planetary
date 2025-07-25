@@ -216,7 +216,7 @@ pub struct AzureBlobUpload {
 impl AzureBlobUpload {
     /// Constructs a new blob upload.
     fn new(
-        client: reqwest::Client,
+        client: Client,
         url: url::Url,
         block_id: std::sync::Arc<String>,
         events: Option<broadcast::Sender<TransferEvent>>,
