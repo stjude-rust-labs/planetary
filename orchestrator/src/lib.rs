@@ -17,6 +17,7 @@ use planetary_server::ServerResponse;
 
 use crate::orchestrator::Monitor;
 use crate::orchestrator::TaskOrchestrator;
+use crate::orchestrator::TransporterInfo;
 
 mod orchestrator;
 
@@ -61,6 +62,18 @@ pub struct Server {
     /// Defaults to `planetary-tasks`.
     #[builder(into)]
     tasks_namespace: Option<String>,
+
+    /// The number of CPU cores to request for transporter pods.
+    ///
+    /// Defaults to `4` CPU cores.
+    #[builder(into)]
+    transporter_cpu: Option<i32>,
+
+    /// The amount of memory (in GiB) to request for transporter pods.
+    ///
+    /// Defaults to `2.0` GiB.
+    #[builder(into)]
+    transporter_memory: Option<f64>,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -102,7 +115,11 @@ impl Server {
                 self.pod_name,
                 self.tasks_namespace,
                 self.storage_class,
-                self.transporter_image,
+                TransporterInfo {
+                    image: self.transporter_image,
+                    cpu: self.transporter_cpu,
+                    memory: self.transporter_memory,
+                },
             )
             .await?,
         );

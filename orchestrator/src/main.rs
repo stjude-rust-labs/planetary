@@ -54,6 +54,18 @@ pub struct Args {
     /// Defaults to `planetary-tasks`.
     #[clap(long, env)]
     tasks_namespace: Option<String>,
+
+    /// The number of CPU cores to request for transporter pods.
+    ///
+    /// Defaults to `4` CPU cores.
+    #[clap(long, env)]
+    transporter_cpu: Option<i32>,
+
+    /// The amount of memory (in GiB) to request for transporter pods.
+    ///
+    /// Defaults to `2.0` GiB.
+    #[clap(long, env)]
+    transporter_memory: Option<f64>,
 }
 
 impl Args {
@@ -125,6 +137,8 @@ pub async fn main() -> anyhow::Result<()> {
         .maybe_transporter_image(args.transporter_image)
         .pod_name(args.pod_name)
         .maybe_tasks_namespace(args.tasks_namespace)
+        .maybe_transporter_cpu(args.transporter_cpu)
+        .maybe_transporter_memory(args.transporter_memory)
         .build()
         .run(terminate())
         .await

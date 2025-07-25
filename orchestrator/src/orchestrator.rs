@@ -114,6 +114,12 @@ const PLANETARY_DELETED_ANNOTATION: &str = "planetary/deleted";
 /// The maximum number of lines to tail for an executor pod's logs.
 const MAX_EXECUTOR_LOG_LINES: i64 = 15;
 
+/// The default cpu request (in cores) for transporter pods.
+const DEFAULT_TRANSPORTER_CPU: i32 = 4;
+
+/// The default memory request (in GiB) for transporter pods.
+const DEFAULT_TRANSPORTER_MEMORY: f64 = 2.0;
+
 /// Formats a pod name given the TES task id, pod kind, and executor index.
 ///
 /// The executor index must be specified when the pod is an executor.
@@ -337,6 +343,17 @@ impl From<Error> for planetary_server::Error {
 /// The result type of the orchestrator methods.
 pub type OrchestrationResult<T> = Result<T, Error>;
 
+/// Represents information about the transporter pod used by the orchestrator.
+#[derive(Clone)]
+pub struct TransporterInfo {
+    /// The image of the transporter to use.
+    pub image: Option<String>,
+    /// The number of cpu cores to request for the transporter pod.
+    pub cpu: Option<i32>,
+    /// The amount of memory (in GiB) to request for the transporter pod.
+    pub memory: Option<f64>,
+}
+
 /// Implements the task orchestrator.
 #[derive(Clone)]
 pub struct TaskOrchestrator {
@@ -352,8 +369,8 @@ pub struct TaskOrchestrator {
     pvc: Arc<Api<PersistentVolumeClaim>>,
     /// The storage class name to use for persistent volume claims.
     storage_class: Option<String>,
-    /// The transporter image name to use.
-    transporter_image: Option<String>,
+    /// Information about the transporter to use.
+    transporter: TransporterInfo,
 }
 
 impl TaskOrchestrator {
@@ -363,7 +380,7 @@ impl TaskOrchestrator {
         id: String,
         tasks_namespace: Option<String>,
         storage_class: Option<String>,
-        transporter_image: Option<String>,
+        transporter: TransporterInfo,
     ) -> Result<Self> {
         let ns = tasks_namespace
             .as_deref()
@@ -383,7 +400,7 @@ impl TaskOrchestrator {
             pods,
             pvc,
             storage_class,
-            transporter_image,
+            transporter,
         })
     }
 
@@ -636,7 +653,8 @@ impl TaskOrchestrator {
                 containers: vec![Container {
                     name: "inputs".to_string(),
                     image: Some(
-                        self.transporter_image
+                        self.transporter
+                            .image
                             .as_deref()
                             .unwrap_or(DEFAULT_TRANSPORTER_IMAGE)
                             .into(),
@@ -667,6 +685,15 @@ impl TaskOrchestrator {
                             ..Default::default()
                         },
                     ]),
+                    resources: Some(convert_resources(Resources {
+                        cpu_cores: Some(self.transporter.cpu.unwrap_or(DEFAULT_TRANSPORTER_CPU)),
+                        ram_gb: Some(
+                            self.transporter
+                                .memory
+                                .unwrap_or(DEFAULT_TRANSPORTER_MEMORY),
+                        ),
+                        ..Default::default()
+                    })),
                     ..Default::default()
                 }],
                 restart_policy: Some("Never".to_string()),
@@ -944,7 +971,8 @@ impl TaskOrchestrator {
                 containers: vec![Container {
                     name: "outputs".to_string(),
                     image: Some(
-                        self.transporter_image
+                        self.transporter
+                            .image
                             .as_deref()
                             .unwrap_or(DEFAULT_TRANSPORTER_IMAGE)
                             .into(),
@@ -965,6 +993,15 @@ impl TaskOrchestrator {
                         sub_path: Some("outputs".into()),
                         ..Default::default()
                     }]),
+                    resources: Some(convert_resources(Resources {
+                        cpu_cores: Some(self.transporter.cpu.unwrap_or(DEFAULT_TRANSPORTER_CPU)),
+                        ram_gb: Some(
+                            self.transporter
+                                .memory
+                                .unwrap_or(DEFAULT_TRANSPORTER_MEMORY),
+                        ),
+                        ..Default::default()
+                    })),
                     ..Default::default()
                 }],
                 restart_policy: Some("Never".to_string()),
