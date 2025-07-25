@@ -83,6 +83,12 @@ impl BufferPool {
             Err(_) => panic!("more reads than there were blocks"),
         };
 
+        assert_eq!(
+            offset % block_size,
+            0,
+            "expected offset to be a multiple of the block size"
+        );
+
         // Perform the read at the offset
         let block_num = offset / block_size;
         let buffer = spawn_blocking(move || -> Result<_> {

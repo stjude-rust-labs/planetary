@@ -24,6 +24,7 @@ use tokio::task::spawn_blocking;
 use tokio_retry2::Retry;
 use tokio_retry2::RetryError;
 use tokio_util::io::StreamReader;
+use tracing::debug;
 use tracing::info;
 use url::Url;
 use walkdir::WalkDir;
@@ -469,6 +470,12 @@ where
                 let block_size = self.0.backend.block_size(file_size)?;
                 let num_blocks = file_size.div_ceil(block_size);
 
+                debug!(
+                    "file `{source}` is {file_size} bytes and will be downloaded with \
+                     {num_blocks} block(s) of size {block_size}",
+                    source = source.display()
+                );
+
                 if let Some(events) = self.0.backend.events() {
                     events
                         .send(TransferEvent::TransferStarted {
@@ -505,6 +512,26 @@ where
                 .await
             }
             _ => {
+                if file_size.is_none() {
+                    debug!(
+                        "file `{source}` will be downloaded as a single request because its size \
+                         could not be determined",
+                        source = source.display()
+                    );
+                } else if accept_ranges.is_none() {
+                    debug!(
+                        "file `{source}` will be downloaded as a single request because the \
+                         server does not accept ranged requests",
+                        source = source.display()
+                    );
+                } else if etag.is_none() {
+                    debug!(
+                        "file `{source}` will be downloaded as a single request because the \
+                         server did not respond with an ETAG",
+                        source = source.display()
+                    );
+                }
+
                 // Download the file as a single block
                 if let Some(events) = self.0.backend.events() {
                     events
