@@ -323,7 +323,8 @@ impl CopyConfig {
     /// For downloads, this is the number of files that may be concurrently
     /// transferred.
     ///
-    /// Defaults to the host's available parallelism.
+    /// Defaults to the host's available parallelism. If the parallelism
+    /// cannot be detected, defaults to 1.
     pub fn parallelism(&self) -> usize {
         self.parallelism
             .unwrap_or_else(|| available_parallelism().map(NonZero::get).unwrap_or(1))
