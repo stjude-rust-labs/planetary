@@ -13,7 +13,7 @@ use crate::monitor::Monitor;
 
 mod monitor;
 
-/// The task orchestrator server.
+/// The task monitor server.
 #[derive(Clone, Builder)]
 pub struct Server {
     /// The address to bind the server to.
