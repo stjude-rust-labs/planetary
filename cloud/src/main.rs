@@ -2,8 +2,6 @@
 
 use std::io::IsTerminal;
 use std::io::stderr;
-use std::num::NonZero;
-use std::thread::available_parallelism;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -35,18 +33,22 @@ pub struct CopyCommand {
 impl CopyCommand {
     /// Runs the command.
     async fn run(self) -> Result<()> {
-        let (events_tx, events_rx) =
-            broadcast::channel(16 * available_parallelism().map(NonZero::get).unwrap_or(1));
-
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handler =
-            tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
+        // Only handle transfer events if for a terminal to display the progress
+        let (handler, events_tx) = if std::io::stderr().is_terminal() {
+            let (events_tx, events_rx) = broadcast::channel(1000);
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let handler =
+                tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
+            (Some((shutdown_tx, handler)), Some(events_tx))
+        } else {
+            (None, None)
+        };
 
         let result = cloud::copy(
             CopyConfig::default(),
             &self.source,
             &self.destination,
-            Some(events_tx),
+            events_tx,
         )
         .await
         .with_context(|| {
@@ -57,8 +59,11 @@ impl CopyCommand {
             )
         });
 
-        shutdown_tx.send(()).ok();
-        handler.await.expect("failed to join events handler");
+        if let Some((shutdown_tx, handler)) = handler {
+            shutdown_tx.send(()).ok();
+            handler.await.expect("failed to join events handler");
+        }
+
         result
     }
 }

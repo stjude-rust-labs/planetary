@@ -110,12 +110,7 @@ where
         destination: &Path,
         file_size: Option<u64>,
     ) -> Result<()> {
-        async fn transfer<B: StorageBackend>(
-            backend: &B,
-            id: u64,
-            source: Url,
-            destination: &Path,
-        ) -> Result<()> {
+        let transfer = async move || {
             // Start by creating the destination's parent directory
             let parent = destination.parent().ok_or(CopyError::InvalidPath)?;
             fs::create_dir_all(parent).await.map_err(|error| {
@@ -129,12 +124,12 @@ where
             let temp = NamedTempFile::with_prefix_in(".", parent)
                 .map_err(|error| CopyError::CreateTempFile { error })?;
 
-            let response = backend.get(source).await?;
+            let response = self.backend.get(source).await?;
             let mut reader = StreamReader::new(TransferStream::new(
                 response.bytes_stream().map_err(std::io::Error::other),
                 id,
                 1,
-                backend.events().clone(),
+                self.backend.events().clone(),
             ));
 
             let mut writer = BufWriter::new(
@@ -153,7 +148,7 @@ where
                 .map_err(|e| CopyError::PersistTempFile { error: e.error })?;
 
             Ok(())
-        }
+        };
 
         // Transfer as a single block
         if let Some(events) = self.backend.events() {
@@ -166,7 +161,7 @@ where
                 .ok();
         }
 
-        let result = transfer(&self.backend, id, source, destination).await;
+        let result = transfer().await;
 
         if let Some(events) = self.backend.events() {
             events

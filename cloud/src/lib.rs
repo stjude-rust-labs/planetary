@@ -575,31 +575,29 @@ pub async fn handle_events(
                     transfers.insert(id, TransferState { bar, transferred: 0, block_transfers: HashMap::new() });
                 }
                 Ok(TransferEvent::BlockStarted { id, block, size }) => {
-                    if let Some(state) = transfers.get_mut(&id) {
-                        state.block_transfers.insert(block, BlockTransferState { size, transferred: 0});
+                    if let Some(transfer) = transfers.get_mut(&id) {
+                        transfer.block_transfers.insert(block, BlockTransferState { size, transferred: 0});
                     }
                 }
                 Ok(TransferEvent::BlockProgress { id, block, transferred }) => {
-                    if let Some(state) = transfers.get_mut(&id) {
-                        state.transferred += transferred;
-
-                        if let Some(state) = state.block_transfers.get_mut(&block) {
-                            state.transferred += transferred;
+                    if let Some(transfer) = transfers.get_mut(&id) {
+                        if let Some(block) = transfer.block_transfers.get_mut(&block) {
+                            transfer.transferred += transferred;
+                            block.transferred += transferred;
+                            transfer.bar.pb_set_position(transfer.transferred);
                         }
-
-                        state.bar.pb_set_position(state.transferred);
                     }
                 }
                 Ok(TransferEvent::BlockCompleted { id, block, failed }) => {
-                    if let Some(state) = transfers.get_mut(&id) {
-                        let block = state.block_transfers.remove(&block).unwrap();
-                        state.transferred -= block.transferred;
+                    if let Some(transfer) = transfers.get_mut(&id) {
+                        if let Some(block) = transfer.block_transfers.get_mut(&block) {
+                            transfer.transferred -= block.transferred;
+                            if !failed && let Some(size) = block.size {
+                                transfer.transferred += size;
+                            }
 
-                        if !failed && let Some(size) = block.size {
-                            state.transferred += size;
+                            transfer.bar.pb_set_position(transfer.transferred);
                         }
-
-                        state.bar.pb_set_position(state.transferred);
                     }
                 }
                 Ok(TransferEvent::TransferCompleted { id, .. }) => {

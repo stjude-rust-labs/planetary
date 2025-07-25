@@ -25,13 +25,11 @@
 
 use std::io::IsTerminal;
 use std::io::stderr;
-use std::num::NonZero;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread::available_parallelism;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -152,8 +150,7 @@ async fn download_inputs(
         )
     })?;
 
-    let (events_tx, events_rx) =
-        broadcast::channel(16 * available_parallelism().map(NonZero::get).unwrap_or(1));
+    let (events_tx, events_rx) = broadcast::channel(1000);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let handler = tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
 
@@ -254,10 +251,16 @@ async fn upload_outputs(
         anyhow!("failed to retrieve information for task `{tes_id}`")
     })?;
 
-    let (events_tx, events_rx) =
-        broadcast::channel(16 * available_parallelism().map(NonZero::get).unwrap_or(1));
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let handler = tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
+    // Only handle transfer events if for a terminal to display the progress
+    let (handler, events_tx) = if std::io::stderr().is_terminal() {
+        let (events_tx, events_rx) = broadcast::channel(1000);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handler =
+            tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
+        (Some((shutdown_tx, handler)), Some(events_tx))
+    } else {
+        (None, None)
+    };
 
     let transfer = async move || {
         let mut files = Vec::new();
@@ -295,8 +298,10 @@ async fn upload_outputs(
 
     let result = transfer().await;
 
-    shutdown_tx.send(()).ok();
-    handler.await.expect("failed to join events handler");
+    if let Some((shutdown_tx, handler)) = handler {
+        shutdown_tx.send(()).ok();
+        handler.await.expect("failed to join events handler");
+    }
 
     database.update_task_output_files(tes_id, &result?).await?;
     Ok(())
@@ -308,7 +313,7 @@ async fn upload_file(
     mut url: Url,
     path: &str,
     size: u64,
-    events: broadcast::Sender<TransferEvent>,
+    events: Option<broadcast::Sender<TransferEvent>>,
     files: &mut Vec<OutputFile>,
 ) -> Result<()> {
     if output.ty != IoType::File {
@@ -319,7 +324,7 @@ async fn upload_file(
     }
 
     // Perform the copy
-    cloud::copy(Default::default(), path, url.clone(), Some(events))
+    cloud::copy(Default::default(), path, url.clone(), events)
         .await
         .with_context(|| {
             format!(
@@ -346,7 +351,7 @@ async fn upload_directory(
     output: &Output,
     url: &Url,
     path: &str,
-    events: broadcast::Sender<TransferEvent>,
+    events: Option<broadcast::Sender<TransferEvent>>,
     files: &mut Vec<OutputFile>,
 ) -> Result<()> {
     if output.ty != IoType::Directory {
@@ -422,7 +427,7 @@ async fn upload_directory(
             Default::default(),
             entry.path(),
             url.clone(),
-            Some(events.clone()),
+            events.clone(),
         )
         .await
         .with_context(|| {
