@@ -8,7 +8,11 @@ database:
   port: 5432
   user: postgres
   name: planetary
+  # The name of the Kubernetes secret that stores the PostgreSQL database password
+  # The default value corresponds to the secret created by bitnami/postgresql Helm chart
   passwordSecret: planetary-database-postgresql
+  # The key within the Kubernetes secret containing the PostgreSQL database password
+  # The default value corresponds to the secret created by bitnami/postgresql Helm chart
   passwordSecretKey: postgres-password 
 
 api:
