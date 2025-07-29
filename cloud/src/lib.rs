@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::thread::available_parallelism;
 use std::time::Duration;
 
+use reqwest::Client;
+use reqwest::StatusCode;
 use tokio::sync::broadcast;
 use tokio_retry2::RetryError;
 use tokio_retry2::strategy::ExponentialFactorBackoff;
@@ -168,6 +170,48 @@ impl UrlExt for Url {
     }
 }
 
+/// Constructs a new HTTP client with default options.
+fn new_http_client() -> Client {
+    /// The timeout for the connecting phase of the client.
+    const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+    /// The timeout for a read of the client.
+    const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+    Client::builder()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .read_timeout(DEFAULT_READ_TIMEOUT)
+        .build()
+        .expect("failed to build HTTP client")
+}
+
+/// Helper for displaying a message in `CopyError`.
+struct DisplayMessage<'a> {
+    /// The status code of the error.
+    status: StatusCode,
+    /// The message to display.
+    ///
+    /// If empty, the status code's canonical reason will be used.
+    message: &'a str,
+}
+
+impl fmt::Display for DisplayMessage<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.message.is_empty() {
+            write!(
+                f,
+                " ({reason})",
+                reason = self
+                    .status
+                    .canonical_reason()
+                    .unwrap_or("<unknown status code>")
+                    .to_lowercase()
+            )
+        } else {
+            write!(f, ": {message}", message = self.message)
+        }
+    }
+}
+
 /// Represents a copy operation error.
 #[derive(Debug, thiserror::Error)]
 pub enum CopyError {
@@ -213,8 +257,12 @@ pub enum CopyError {
     #[error("the destination path `{path}` already exists", path = .0.display())]
     DestinationExists(PathBuf),
     /// The server returned an error.
-    #[error("server returned status {status}: {message}", status = .status.as_u16())]
-    ServerError {
+    #[error(
+        "server returned status {status}{message}",
+        status = .status.as_u16(),
+        message = DisplayMessage { status: *.status, message }
+    )]
+    Server {
         /// The response status code.
         status: reqwest::StatusCode,
         /// The response error message.
@@ -243,7 +291,7 @@ impl CopyError {
     /// Converts the copy error into a retry error.
     fn into_retry_error(self) -> RetryError<Self> {
         match &self {
-            CopyError::ServerError { status, .. }
+            CopyError::Server { status, .. }
             | CopyError::Azure(AzureCopyError::UnexpectedResponse { status, .. })
                 if status.is_server_error() =>
             {

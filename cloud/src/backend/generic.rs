@@ -22,6 +22,7 @@ use crate::USER_AGENT;
 use crate::UrlExt;
 use crate::backend::StorageBackend;
 use crate::backend::Upload;
+use crate::new_http_client;
 
 /// Helper trait for converting responses into `CopyError`.
 trait IntoCopyError {
@@ -37,7 +38,7 @@ impl IntoCopyError for Response {
             Err(e) => return e.into(),
         };
 
-        CopyError::ServerError {
+        CopyError::Server {
             status,
             message: text,
         }
@@ -80,7 +81,7 @@ impl GenericStorageBackend {
     pub fn new(config: CopyConfig, events: Option<broadcast::Sender<TransferEvent>>) -> Self {
         Self {
             config,
-            client: Client::new(),
+            client: new_http_client(),
             events,
         }
     }

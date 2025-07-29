@@ -27,6 +27,7 @@ use crate::UrlExt;
 use crate::backend::StorageBackend;
 use crate::backend::Upload;
 use crate::generator::Alphanumeric;
+use crate::new_http_client;
 use crate::streams::ByteStream;
 use crate::streams::TransferStream;
 
@@ -158,21 +159,14 @@ impl IntoCopyError for Response {
             Err(e) => return e.into(),
         };
 
-        let message = if !text.is_empty() {
-            match serde_xml_rs::from_str::<ErrorResponse>(&text) {
-                Ok(response) => response.message,
-                Err(e) => {
-                    return AzureCopyError::UnexpectedResponse { status, error: e }.into();
-                }
+        let message = match serde_xml_rs::from_str::<ErrorResponse>(&text) {
+            Ok(response) => response.message,
+            Err(e) => {
+                return AzureCopyError::UnexpectedResponse { status, error: e }.into();
             }
-        } else {
-            status
-                .canonical_reason()
-                .unwrap_or("<unknown status code>")
-                .to_lowercase()
         };
 
-        CopyError::ServerError { status, message }
+        CopyError::Server { status, message }
     }
 }
 
@@ -339,7 +333,7 @@ impl AzureBlobStorageBackend {
     pub fn new(config: CopyConfig, events: Option<broadcast::Sender<TransferEvent>>) -> Self {
         Self {
             config,
-            client: Client::new(),
+            client: new_http_client(),
             events,
         }
     }
