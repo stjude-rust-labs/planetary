@@ -14,7 +14,6 @@ use futures::StreamExt;
 use futures::TryFutureExt;
 use futures::TryStreamExt;
 use futures::stream;
-use reqwest::IntoUrl;
 use reqwest::header;
 use tempfile::NamedTempFile;
 use tokio::fs;
@@ -29,7 +28,7 @@ use tracing::info;
 use url::Url;
 use walkdir::WalkDir;
 
-use crate::CopyError;
+use crate::Error;
 use crate::Result;
 use crate::TransferEvent;
 use crate::UrlExt;
@@ -113,17 +112,17 @@ where
     ) -> Result<()> {
         let transfer = async move || {
             // Start by creating the destination's parent directory
-            let parent = destination.parent().ok_or(CopyError::InvalidPath)?;
-            fs::create_dir_all(parent).await.map_err(|error| {
-                CopyError::DirectoryCreationFailed {
+            let parent = destination.parent().ok_or(Error::InvalidPath)?;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|error| Error::DirectoryCreationFailed {
                     path: parent.to_path_buf(),
                     error,
-                }
-            })?;
+                })?;
 
             // Use a temp file that will be atomically renamed when the download completes
             let temp = NamedTempFile::with_prefix_in(".", parent)
-                .map_err(|error| CopyError::CreateTempFile { error })?;
+                .map_err(|error| Error::CreateTempFile { error })?;
 
             let response = self.backend.get(source).await?;
             let mut reader = StreamReader::new(TransferStream::new(
@@ -136,17 +135,17 @@ where
             let mut writer = BufWriter::new(
                 fs::File::create(temp.path())
                     .await
-                    .map_err(|error| CopyError::CreateTempFile { error })?,
+                    .map_err(|error| Error::CreateTempFile { error })?,
             );
 
             // Copy the response stream to the temp file
             tokio::io::copy(&mut reader, &mut writer)
                 .await
-                .map_err(CopyError::from)?;
+                .map_err(Error::from)?;
 
             // Persist the temp file to the destination
             temp.persist(destination)
-                .map_err(|e| CopyError::PersistTempFile { error: e.error })?;
+                .map_err(|e| Error::PersistTempFile { error: e.error })?;
 
             Ok(())
         };
@@ -200,13 +199,13 @@ where
             // Read the block into the provided buffer
             reader
                 .read_exact(&mut info.buffer[0..block_size as usize])
-                .map_err(CopyError::from)
+                .map_err(Error::from)
                 .await?;
 
             // Write the block to the file
             spawn_blocking(move || -> Result<_> {
                 crate::os::write_at(&info.file, &info.buffer[0..block_size as usize], start)
-                    .map_err(CopyError::from)
+                    .map_err(Error::from)
             })
             .await
             .expect("failed to join blocking task")?;
@@ -253,7 +252,7 @@ where
                 || {
                     self.backend
                         .new_upload(destination.clone())
-                        .map_err(CopyError::into_retry_error)
+                        .map_err(Error::into_retry_error)
                 },
                 notify_retry,
             )
@@ -287,7 +286,7 @@ where
                             inner
                                 .upload_block(info.id, block_num, bytes.clone(), upload.as_ref())
                                 .map_ok(|p| (block_num, p))
-                                .map_err(CopyError::into_retry_error)
+                                .map_err(Error::into_retry_error)
                         },
                         notify_retry,
                     )
@@ -316,7 +315,7 @@ where
         // Spawn a retryable operation to finalize the upload
         Retry::spawn_notify(
             self.backend.config().retry_durations(),
-            || upload.finalize(&parts).map_err(CopyError::into_retry_error),
+            || upload.finalize(&parts).map_err(Error::into_retry_error),
             notify_retry,
         )
         .await
@@ -378,12 +377,7 @@ where
     ///
     /// If the source URL is a "directory", the files in the directory will be
     /// downloaded relative to the destination path.
-    pub async fn download(
-        &self,
-        source: impl IntoUrl,
-        destination: impl AsRef<Path>,
-    ) -> Result<()> {
-        let source = source.into_url()?;
+    pub async fn download(&self, source: Url, destination: impl AsRef<Path>) -> Result<()> {
         let destination = destination.as_ref();
 
         // Start by walking the given URL for files to download
@@ -393,7 +387,7 @@ where
                 self.0
                     .backend
                     .walk(source.clone())
-                    .map_err(CopyError::into_retry_error)
+                    .map_err(Error::into_retry_error)
             },
             notify_retry,
         )
@@ -405,7 +399,6 @@ where
         }
 
         // Otherwise, download each file in turn
-        // TODO: perform this work in parallel too?
         for path in paths {
             let mut source = source.clone();
             let mut destination = destination.to_path_buf();
@@ -440,7 +433,7 @@ where
                 self.0
                     .backend
                     .head(source.clone())
-                    .map_err(CopyError::into_retry_error)
+                    .map_err(Error::into_retry_error)
             },
             notify_retry,
         )
@@ -499,11 +492,11 @@ where
                 Retry::spawn_notify(
                     self.0.backend.config().retry_durations(),
                     || {
-                        self.download_in_blocks(source.clone(), destination.as_path(), info.clone())
+                        self.download_in_blocks(source.clone(), &destination, info.clone())
                             .map_err(|e| match e {
                                 // Only retry on modified content errors; otherwise, we've already
                                 // internally retried downloads of the individual blocks
-                                CopyError::RemoteContentModified => RetryError::transient(e),
+                                Error::RemoteContentModified => RetryError::transient(e),
                                 _ => RetryError::permanent(e),
                             })
                     },
@@ -549,7 +542,7 @@ where
                     || {
                         self.0
                             .download(id, source.clone(), &destination, file_size)
-                            .map_err(CopyError::into_retry_error)
+                            .map_err(Error::into_retry_error)
                     },
                     notify_retry,
                 )
@@ -580,10 +573,10 @@ where
         info: DownloadInfo,
     ) -> Result<()> {
         // Start by creating the destination's parent directory
-        let parent = destination.parent().ok_or(CopyError::InvalidPath)?;
+        let parent = destination.parent().ok_or(Error::InvalidPath)?;
         fs::create_dir_all(parent)
             .await
-            .map_err(|error| CopyError::DirectoryCreationFailed {
+            .map_err(|error| Error::DirectoryCreationFailed {
                 path: parent.to_path_buf(),
                 error,
             })?;
@@ -591,7 +584,7 @@ where
         // Use a temp file that will be atomically renamed when the download completes
         // Set its initial size up front so that individual writes don't go past EOF
         let mut temp = NamedTempFile::with_prefix_in(".", parent)
-            .map_err(|error| CopyError::CreateTempFile { error })?;
+            .map_err(|error| Error::CreateTempFile { error })?;
         temp.as_file_mut().set_len(info.file_size)?;
 
         let (file, temp) = temp.into_parts();
@@ -620,7 +613,7 @@ where
                                             ..((block + 1) * info.block_size).min(info.file_size),
                                     },
                                 )
-                                .map_err(CopyError::into_retry_error)
+                                .map_err(Error::into_retry_error)
                         },
                         notify_retry,
                     )
@@ -642,7 +635,7 @@ where
 
         // Persist the temp file to the destination
         temp.persist(destination)
-            .map_err(|e| CopyError::PersistTempFile { error: e.error })?;
+            .map_err(|e| Error::PersistTempFile { error: e.error })?;
         Ok(())
     }
 
@@ -650,9 +643,8 @@ where
     ///
     /// If the path is a directory, each file the directory recursively contains
     /// will be uploaded.
-    pub async fn upload(&self, source: impl AsRef<Path>, destination: impl IntoUrl) -> Result<()> {
+    pub async fn upload(&self, source: impl AsRef<Path>, destination: Url) -> Result<()> {
         let source = source.as_ref();
-        let destination = destination.into_url()?;
 
         // Recursively walk the path looking for files to upload
         for entry in WalkDir::new(source) {
@@ -670,19 +662,12 @@ where
                 .strip_prefix(source)
                 .expect("failed to strip path prefix");
 
-            let mut destination = destination.clone();
-
-            {
-                // Prefer extending the segments over `Url::join` as this always treats the URL
-                // as a "directory"
-                let mut segments = destination.path_segments_mut().expect("expected Azure URL");
-                segments.pop_if_empty();
-                segments.extend(
-                    relative_path
-                        .components()
-                        .map(|c| c.as_os_str().to_str().expect("should be utf-8")),
-                );
-            }
+            let destination = self.0.backend.join_url(
+                destination.clone(),
+                relative_path
+                    .components()
+                    .map(|c| c.as_os_str().to_str().expect("path not UTF-8")),
+            )?;
 
             // Perform the upload
             let result = self
@@ -713,6 +698,12 @@ where
         };
 
         let id = self.0.next_id();
+
+        debug!(
+            "file `{source}` is {file_size} bytes and will be uploaded with {num_blocks} block(s) \
+             of size {block_size}",
+            source = source.display()
+        );
 
         if let Some(events) = self.0.backend.events() {
             events

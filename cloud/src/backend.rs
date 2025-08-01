@@ -7,14 +7,16 @@ use reqwest::Response;
 use tokio::sync::broadcast;
 use url::Url;
 
-use crate::CopyConfig;
+use crate::Config;
 use crate::Result;
 use crate::TransferEvent;
 
+pub(crate) mod auth;
 pub(crate) mod azure;
 pub(crate) mod generic;
+pub(crate) mod s3;
 
-/// Represents an abstract representation of an upload.
+/// Represents an abstract file upload.
 pub trait Upload: Send + Sync + 'static {
     /// Represents information about a part that was uploaded.
     type Part: Default + Clone + Send;
@@ -38,14 +40,17 @@ pub trait StorageBackend {
     /// The upload type the backend uses.
     type Upload: Upload;
 
-    /// Gets the copy configuration used by the backend.
-    fn config(&self) -> &CopyConfig;
+    /// Gets the configuration used by the backend.
+    fn config(&self) -> &Config;
 
     /// Gets the channel for sending transfer events.
     fn events(&self) -> &Option<broadcast::Sender<TransferEvent>>;
 
     /// Gets the block size given the size of a file.
     fn block_size(&self, file_size: u64) -> Result<u64>;
+
+    /// Joins segments to a URL to form a new URL.
+    fn join_url<'a>(&self, url: Url, segments: impl Iterator<Item = &'a str>) -> Result<Url>;
 
     /// Sends a HEAD request for the given URL.
     ///

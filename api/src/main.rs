@@ -124,7 +124,7 @@ pub struct Args {
     verbose: Verbosity<WarnLevel>,
 
     /// The Planetary database URL to use.
-    #[clap(long, env)]
+    #[clap(long, env, hide_env_values(true))]
     database_url: secrecy::SecretString,
 
     /// The Planetary orchestrator service URL to use.

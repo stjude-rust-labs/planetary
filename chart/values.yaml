@@ -1,20 +1,31 @@
+# Additional secrets used to pull container images.
 imagePullSecrets: []
 
+# Configuration related to running tasks.
 tasks:
+  # The name of the namespace where task pods will be created
   namespace: planetary-tasks
 
+# Configuration relating to the Planetary database.
 database:
+  # The default service name for the Postgres database.
+  # Assumes that the database service is in the same namespace as Planetary.
   host: planetary-database-postgresql.planetary
+  # The port to use for the accessing the database.
   port: 5432
+  # The database user.
   user: postgres
+  # The database name.
   name: planetary
   # The name of the Kubernetes secret that stores the PostgreSQL database password
   # The default value corresponds to the secret created by bitnami/postgresql Helm chart
   passwordSecret: planetary-database-postgresql
   # The key within the Kubernetes secret containing the PostgreSQL database password
   # The default value corresponds to the secret created by bitnami/postgresql Helm chart
-  passwordSecretKey: postgres-password 
+  passwordSecretKey: postgres-password
 
+# Configuration relating to the service responsible for
+# implementing the TES API.
 api:
   replicas: 2
   image:
@@ -29,6 +40,8 @@ api:
       memory: 2Gi
   log: info
 
+# Configuration relating to the orchestrator service that is
+# responsible for running tasks to completion.
 orchestrator:
   replicas: 2
   image:
@@ -47,6 +60,8 @@ orchestrator:
       memory: 2Gi
   log: info
 
+# Configuration relating to the monitor service that is responsible
+# for ensuring tasks do not become orphaned.
 monitor:
   image:
     name: stjude-rust-labs/planetary-monitor
@@ -63,7 +78,20 @@ monitor:
       memory: 2Gi
   log: info
 
+# Configuration relating to the transporter used by Planetary for
+# transferring files to and from cloud storage.
 transporter:
   image:
     name: stjude-rust-labs/planetary-transporter
     tag: null
+  storage:
+    # Configuration for S3
+    s3: null
+    #   # The default region to use for `s3://` URLs.
+    #   awsDefaultRegion: "<default-region>"
+    #   # The AWS Access Key Id to use for authentication.
+    #   # Required if `awsSecretAccessKey` is set.
+    #   awsAccessKeyId: "<access-key-id>"
+    #   # The AWS Secret Access Key to use for authentication.
+    #   # Required if `awsAccessKeyId` is set.
+    #   awsSecretAccessKey: "<secret-access-key>"

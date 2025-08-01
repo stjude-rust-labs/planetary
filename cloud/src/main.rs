@@ -9,9 +9,12 @@ use clap::Parser;
 use clap::Subcommand;
 use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
-use cloud::CopyConfig;
+use cloud::Config;
 use cloud::Location;
+use cloud::S3AuthConfig;
+use cloud::S3Config;
 use colored::Colorize;
+use secrecy::SecretString;
 use tokio::sync::broadcast;
 use tokio::sync::oneshot;
 use tracing_indicatif::IndicatifLayer;
@@ -22,12 +25,44 @@ use tracing_subscriber::layer::SubscriberExt;
 #[derive(Parser, Debug)]
 pub struct CopyCommand {
     /// The source location to copy from.
-    #[clap(name = "SOURCE")]
+    #[clap(value_name = "SOURCE")]
     pub source: String,
 
     /// The destination location to copy to.
-    #[clap(name = "DESTINATION")]
+    #[clap(value_name = "DESTINATION")]
     pub destination: String,
+
+    /// The block size to use for file transfers; the default block size depends
+    /// on the cloud service.
+    #[clap(long, value_name = "SIZE")]
+    pub block_size: Option<u64>,
+
+    /// The parallelism level for network operations; defaults to the host's
+    /// available parallelism.
+    #[clap(long, value_name = "NUM")]
+    pub parallelism: Option<usize>,
+
+    /// The number of retries to attempt for network operations.
+    #[clap(long, value_name = "RETRIES")]
+    pub retries: Option<usize>,
+
+    /// The AWS Access Key ID to use.
+    #[clap(long, env, value_name = "ID")]
+    pub aws_access_key_id: Option<String>,
+
+    /// The AWS Secret Access Key to use.
+    #[clap(
+        long,
+        env,
+        hide_env_values(true),
+        value_name = "KEY",
+        requires = "aws_access_key_id"
+    )]
+    pub aws_secret_access_key: Option<SecretString>,
+
+    /// The default AWS region.
+    #[clap(long, env, value_name = "REGION")]
+    pub aws_default_region: Option<String>,
 }
 
 impl CopyCommand {
@@ -44,20 +79,17 @@ impl CopyCommand {
             (None, None)
         };
 
-        let result = cloud::copy(
-            CopyConfig::default(),
-            &self.source,
-            &self.destination,
-            events_tx,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to copy `{source}` to `{destination}`",
-                source = Location::new(&self.source),
-                destination = Location::new(&self.destination),
-            )
-        });
+        let (config, source, destination) = self.into_parts();
+
+        let result = cloud::copy(config, &source, &destination, events_tx)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to copy `{source}` to `{destination}`",
+                    source = Location::new(&source),
+                    destination = Location::new(&destination),
+                )
+            });
 
         if let Some((shutdown_tx, handler)) = handler {
             shutdown_tx.send(()).ok();
@@ -65,6 +97,31 @@ impl CopyCommand {
         }
 
         result
+    }
+
+    /// Converts the command into a `Config`, source, and destination.
+    fn into_parts(self) -> (Config, String, String) {
+        let s3_auth =
+            if let (Some(id), Some(key)) = (self.aws_access_key_id, self.aws_secret_access_key) {
+                Some(S3AuthConfig {
+                    access_key_id: id,
+                    secret_access_key: key,
+                })
+            } else {
+                None
+            };
+
+        let config = Config {
+            block_size: self.block_size,
+            parallelism: self.parallelism,
+            retries: self.retries,
+            s3: S3Config {
+                region: self.aws_default_region,
+                auth: s3_auth,
+            },
+        };
+
+        (config, self.source, self.destination)
     }
 }
 
