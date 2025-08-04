@@ -9,5 +9,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
-* Added support for draining executing pods ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).
-* Initial implementation PostgreSQL database support ([#4](https://github.com/stjude-rust-labs/planetary/pull/4)).
+* Added orchestrator service ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).
