@@ -38,12 +38,16 @@ use anyhow::bail;
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
+use cloud::Config;
+use cloud::S3AuthConfig;
+use cloud::S3Config;
 use cloud::TransferEvent;
 use cloud::UrlExt;
 use colored::Colorize;
 use glob::Pattern;
 use planetary_db::Database;
 use reqwest::Url;
+use secrecy::SecretString;
 use tes::v1::types::responses::OutputFile;
 use tes::v1::types::task::IoType;
 use tes::v1::types::task::Output;
@@ -83,8 +87,8 @@ impl FromStr for Mode {
 #[derive(Parser)]
 struct Args {
     /// The Planetary database URL to use.
-    #[clap(long, env)]
-    database_url: secrecy::SecretString,
+    #[clap(long, env, hide_env_values(true))]
+    database_url: SecretString,
 
     /// The mode of operation.
     #[arg(long)]
@@ -104,6 +108,38 @@ struct Args {
     /// The verbosity level.
     #[command(flatten)]
     verbosity: Verbosity<WarnLevel>,
+
+    /// The block size to use for file transfers; the default block size depends
+    /// on the cloud service.
+    #[clap(long, value_name = "SIZE")]
+    block_size: Option<u64>,
+
+    /// The parallelism level for network operations; defaults to the host's
+    /// available parallelism.
+    #[clap(long, value_name = "NUM")]
+    parallelism: Option<usize>,
+
+    /// The number of retries to attempt for network operations.
+    #[clap(long, value_name = "RETRIES")]
+    retries: Option<usize>,
+
+    /// The AWS Access Key ID to use.
+    #[clap(long, env, value_name = "ID")]
+    aws_access_key_id: Option<String>,
+
+    /// The AWS Secret Access Key to use.
+    #[clap(
+        long,
+        env,
+        hide_env_values(true),
+        value_name = "KEY",
+        requires = "aws_access_key_id"
+    )]
+    aws_secret_access_key: Option<SecretString>,
+
+    /// The default AWS region.
+    #[clap(long, env, value_name = "REGION")]
+    aws_default_region: Option<String>,
 }
 
 impl Args {
@@ -124,6 +160,7 @@ impl Args {
 /// This will also create empty files and directories for outputs in the outputs
 /// directory.
 async fn download_inputs(
+    config: Config,
     database: Arc<dyn Database>,
     tes_id: &str,
     inputs_dir: &Path,
@@ -184,20 +221,15 @@ async fn download_inputs(
                 .context("input URL is invalid")?;
 
             // Perform the copy
-            cloud::copy(
-                Default::default(),
-                url.clone(),
-                &path,
-                Some(events_tx.clone()),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to download input `{url}` to `{path}`",
-                    url = url.display(),
-                    path = input.path
-                )
-            })?;
+            cloud::copy(config.clone(), url.clone(), &path, Some(events_tx.clone()))
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to download input `{url}` to `{path}`",
+                        url = url.display(),
+                        path = input.path
+                    )
+                })?;
 
             // Check that the result matches the input type
             match (path.is_file(), input.ty) {
@@ -242,6 +274,7 @@ async fn download_inputs(
 
 /// Uploads outputs from the specified outputs directory.
 async fn upload_outputs(
+    config: Config,
     database: Arc<dyn Database>,
     tes_id: &str,
     outputs_dir: &Path,
@@ -280,6 +313,7 @@ async fn upload_outputs(
 
             if metadata.is_file() {
                 upload_file(
+                    config.clone(),
                     output,
                     url,
                     path,
@@ -289,7 +323,15 @@ async fn upload_outputs(
                 )
                 .await?;
             } else {
-                upload_directory(output, &url, path, events_tx.clone(), &mut files).await?;
+                upload_directory(
+                    config.clone(),
+                    output,
+                    &url,
+                    path,
+                    events_tx.clone(),
+                    &mut files,
+                )
+                .await?;
             }
         }
 
@@ -309,6 +351,7 @@ async fn upload_outputs(
 
 /// Uploads a file output.
 async fn upload_file(
+    config: Config,
     output: &Output,
     mut url: Url,
     path: &str,
@@ -324,7 +367,7 @@ async fn upload_file(
     }
 
     // Perform the copy
-    cloud::copy(Default::default(), path, url.clone(), events)
+    cloud::copy(config, path, url.clone(), events)
         .await
         .with_context(|| {
             format!(
@@ -348,6 +391,7 @@ async fn upload_file(
 
 /// Uploads a directory output.
 async fn upload_directory(
+    config: Config,
     output: &Output,
     url: &Url,
     path: &str,
@@ -423,19 +467,14 @@ async fn upload_directory(
         }
 
         // Perform the copy
-        cloud::copy(
-            Default::default(),
-            entry.path(),
-            url.clone(),
-            events.clone(),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to upload output `{container_path}` to `{url}`",
-                url = url.display(),
-            )
-        })?;
+        cloud::copy(config.clone(), entry.path(), url.clone(), events.clone())
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to upload output `{container_path}` to `{url}`",
+                    url = url.display(),
+                )
+            })?;
 
         // Clear the query and fragment before saving the output
         url.set_query(None);
@@ -513,17 +552,40 @@ async fn run() -> Result<()> {
         }
     }
 
+    let database = args.database()?;
+
+    let s3_auth =
+        if let (Some(id), Some(key)) = (args.aws_access_key_id, args.aws_secret_access_key) {
+            Some(S3AuthConfig {
+                access_key_id: id,
+                secret_access_key: key,
+            })
+        } else {
+            None
+        };
+
+    let config = Config {
+        block_size: args.block_size,
+        parallelism: args.parallelism,
+        retries: args.retries,
+        s3: S3Config {
+            region: args.aws_default_region,
+            auth: s3_auth,
+        },
+    };
+
     match args.mode {
         Mode::Inputs => {
             download_inputs(
-                args.database()?,
+                config,
+                database,
                 &args.tes_id,
                 &args.inputs_dir.expect("option should be present"),
                 &args.outputs_dir,
             )
             .await
         }
-        Mode::Outputs => upload_outputs(args.database()?, &args.tes_id, &args.outputs_dir).await,
+        Mode::Outputs => upload_outputs(config, database, &args.tes_id, &args.outputs_dir).await,
     }
 }
 

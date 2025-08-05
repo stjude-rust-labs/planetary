@@ -18,8 +18,10 @@ use tokio::sync::broadcast;
 use tracing::debug;
 use url::Url;
 
-use crate::CopyConfig;
-use crate::CopyError;
+use crate::BLOCK_SIZE_THRESHOLD;
+use crate::Config;
+use crate::Error;
+use crate::ONE_MEBIBYTE;
 use crate::Result;
 use crate::TransferEvent;
 use crate::USER_AGENT;
@@ -32,10 +34,7 @@ use crate::streams::ByteStream;
 use crate::streams::TransferStream;
 
 /// The Azure Blob Storage domain suffix.
-pub(crate) const AZURE_STORAGE_DOMAIN_SUFFIX: &str = ".blob.core.windows.net";
-
-/// Represents one mebibyte in bytes.
-const ONE_MEBIBYTE: u64 = 1024 * 1024;
+const AZURE_BLOB_STORAGE_ROOT_DOMAIN: &str = "blob.core.windows.net";
 
 /// The default block size in bytes (4 MiB).
 const DEFAULT_BLOCK_SIZE: u64 = 4 * ONE_MEBIBYTE;
@@ -48,10 +47,6 @@ const MAX_BLOCK_COUNT: u64 = 50000;
 
 /// The maximum supported blob size.
 const MAX_BLOB_SIZE: u64 = MAX_BLOCK_SIZE * MAX_BLOCK_COUNT;
-
-/// The threshold for which block size calculation uses to minimize the block
-/// size (256 MiB).
-const BLOCK_SIZE_THRESHOLD: u64 = 256 * ONE_MEBIBYTE;
 
 /// The header for the Azure storage version supported.
 const AZURE_VERSION_HEADER: &str = "x-ms-version";
@@ -68,36 +63,95 @@ const AZURE_STORAGE_VERSION: &str = "2025-05-05";
 /// The Azure blob type uploaded by this tool.
 const AZURE_BLOB_TYPE: &str = "BlockBlob";
 
-/// Rewrites an Azure Blob Storage URL (az://) into a HTTPS URL.
-pub(crate) fn rewrite_url(url: &Url) -> Result<Url> {
-    assert_eq!(url.scheme(), "az");
+/// The name of the root container.
+const AZURE_ROOT_CONTAINER: &str = "$root";
 
-    let account = url.host_str().ok_or(AzureCopyError::InvalidAzureScheme)?;
+/// Represents an Azure-specific copy operation error.
+#[derive(Debug, thiserror::Error)]
+pub enum AzureError {
+    /// The specified Azure blob block size exceeds the maximum.
+    #[error("Azure blob block size cannot exceed {MAX_BLOCK_SIZE} bytes")]
+    InvalidBlockSize,
+    /// The source size exceeds the supported maximum size.
+    #[error("the size of the source file exceeds the supported maximum of {MAX_BLOB_SIZE} bytes")]
+    MaximumSizeExceeded,
+    /// Invalid URL with an `az` scheme.
+    #[error("invalid URL with `az` scheme: the URL is not in a supported format")]
+    InvalidScheme,
+    /// Cannot upload a directory to the root container.
+    #[error("uploading a directory to the root container is not supported by Azure")]
+    RootDirectoryUploadNotSupported,
+    /// Unexpected response from server.
+    #[error("unexpected {status} response from server: failed to deserialize response contents: {error}", status = .status.as_u16())]
+    UnexpectedResponse {
+        /// The response status code.
+        status: reqwest::StatusCode,
+        /// The deserialization error.
+        error: serde_xml_rs::Error,
+    },
+    /// The blob name is missing in the URL.
+    #[error("a blob name is missing from the provided URL")]
+    BlobNameMissing,
+}
 
-    match (url.query(), url.fragment()) {
-        (None, None) => format!(
-            "https://{account}{AZURE_STORAGE_DOMAIN_SUFFIX}{path}",
-            path = url.path()
-        ),
-        (None, Some(fragment)) => {
-            format!(
-                "https://{account}{AZURE_STORAGE_DOMAIN_SUFFIX}{path}#{fragment}",
-                path = url.path()
-            )
+/// Determines if the given URL is an Azure Blob Storage URL.
+pub fn is_azure_url(url: &Url) -> bool {
+    match url.scheme() {
+        "az" => true,
+        "https" => {
+            let Some(domain) = url.domain() else {
+                return false;
+            };
+
+            // Virtual host style URL of the form https://<account>.blob.core.windows.net/<container>/<path>
+            let Some((_, domain)) = domain.split_once('.') else {
+                return false;
+            };
+            domain.eq_ignore_ascii_case(AZURE_BLOB_STORAGE_ROOT_DOMAIN)
         }
-        (Some(query), None) => format!(
-            "https://{account}{AZURE_STORAGE_DOMAIN_SUFFIX}{path}?{query}",
-            path = url.path()
-        ),
-        (Some(query), Some(fragment)) => {
-            format!(
-                "https://{account}{AZURE_STORAGE_DOMAIN_SUFFIX}{path}?{query}#{fragment}",
-                path = url.path()
-            )
-        }
+        _ => false,
     }
-    .parse()
-    .map_err(|_| AzureCopyError::InvalidAzureScheme.into())
+}
+
+/// Rewrites an Azure Blob Storage URL (az://) into a HTTPS URL.
+///
+/// If the URL is not `az` schemed, the given URL is returned as-is.
+pub fn rewrite_url(url: Url) -> Result<Url> {
+    match url.scheme() {
+        "az" => {
+            let account = url.host_str().ok_or(AzureError::InvalidScheme)?;
+
+            if url.path() == "/" {
+                return Err(AzureError::InvalidScheme.into());
+            }
+
+            match (url.query(), url.fragment()) {
+                (None, None) => format!(
+                    "https://{account}.{AZURE_BLOB_STORAGE_ROOT_DOMAIN}{path}",
+                    path = url.path()
+                ),
+                (None, Some(fragment)) => {
+                    format!(
+                        "https://{account}.{AZURE_BLOB_STORAGE_ROOT_DOMAIN}{path}#{fragment}",
+                        path = url.path()
+                    )
+                }
+                (Some(query), None) => format!(
+                    "https://{account}.{AZURE_BLOB_STORAGE_ROOT_DOMAIN}{path}?{query}",
+                    path = url.path()
+                ),
+                (Some(query), Some(fragment)) => {
+                    format!(
+                        "https://{account}.{AZURE_BLOB_STORAGE_ROOT_DOMAIN}{path}?{query}#{fragment}",
+                        path = url.path()
+                    )
+                }
+            }
+            .parse()
+            .map_err(|_| AzureError::InvalidScheme.into())
+        }
+        _ => Ok(url),
+    }
 }
 
 /// Represents information about a blob.
@@ -137,13 +191,14 @@ struct BlockList<'a> {
     latest: &'a [String],
 }
 
-trait IntoCopyError {
-    /// Converts an error response from an Azure REST API call to a `CopyError`.
-    async fn into_copy_error(self) -> CopyError;
+/// Extension trait for response.
+trait ResponseExt {
+    /// Converts an error response from Azure into an `Error`.
+    async fn into_error(self) -> Error;
 }
 
-impl IntoCopyError for Response {
-    async fn into_copy_error(self) -> CopyError {
+impl ResponseExt for Response {
+    async fn into_error(self) -> Error {
         /// Represents an error response.
         #[derive(Default, Deserialize)]
         #[serde(rename = "Error")]
@@ -159,40 +214,22 @@ impl IntoCopyError for Response {
             Err(e) => return e.into(),
         };
 
+        if text.is_empty() {
+            return Error::Server {
+                status,
+                message: text,
+            };
+        }
+
         let message = match serde_xml_rs::from_str::<ErrorResponse>(&text) {
             Ok(response) => response.message,
             Err(e) => {
-                return AzureCopyError::UnexpectedResponse { status, error: e }.into();
+                return AzureError::UnexpectedResponse { status, error: e }.into();
             }
         };
 
-        CopyError::Server { status, message }
+        Error::Server { status, message }
     }
-}
-
-/// Represents an Azure-specific copy operation error.
-#[derive(Debug, thiserror::Error)]
-pub enum AzureCopyError {
-    /// The specified Azure blob block size exceeds the maximum.
-    #[error("Azure blob block size cannot exceed {MAX_BLOCK_SIZE} bytes")]
-    InvalidBlockSize,
-    /// The source size exceeds the supported maximum size.
-    #[error("the size of the source file exceeds the supported maximum of {MAX_BLOB_SIZE} bytes")]
-    MaximumSizeExceeded,
-    /// Invalid URL with an `az` scheme.
-    #[error("invalid URL with `az` scheme: the URL is not in a supported format")]
-    InvalidAzureScheme,
-    /// Unexpected response from server.
-    #[error("unexpected {status} response from server: failed to deserialize response contents: {error}", status = .status.as_u16())]
-    UnexpectedResponse {
-        /// The response status code.
-        status: reqwest::StatusCode,
-        /// The deserialization error.
-        error: serde_xml_rs::Error,
-    },
-    /// The blob name is missing in the URL.
-    #[error("a blob name is missing from the provided URL")]
-    BlobNameMissing,
 }
 
 /// Represents an upload of a blob to Azure Blob Storage.
@@ -211,8 +248,8 @@ impl AzureBlobUpload {
     /// Constructs a new blob upload.
     fn new(
         client: Client,
-        url: url::Url,
-        block_id: std::sync::Arc<String>,
+        url: Url,
+        block_id: Arc<String>,
         events: Option<broadcast::Sender<TransferEvent>>,
     ) -> Self {
         Self {
@@ -277,7 +314,7 @@ impl Upload for AzureBlobUpload {
         if response.status() == StatusCode::CREATED {
             Ok(block_id)
         } else {
-            Err(response.into_copy_error().await)
+            Err(response.into_error().await)
         }
     }
 
@@ -311,7 +348,7 @@ impl Upload for AzureBlobUpload {
         if response.status() == StatusCode::CREATED {
             Ok(())
         } else {
-            Err(response.into_copy_error().await)
+            Err(response.into_error().await)
         }
     }
 }
@@ -319,8 +356,8 @@ impl Upload for AzureBlobUpload {
 /// Represents a storage backend for Azure Blob Storage.
 #[derive(Clone)]
 pub struct AzureBlobStorageBackend {
-    /// The copy config to use for transferring files.
-    config: CopyConfig,
+    /// The config to use for transferring files.
+    config: Config,
     /// The HTTP client to use for transferring files.
     client: Client,
     /// The channel for sending transfer events.
@@ -330,7 +367,7 @@ pub struct AzureBlobStorageBackend {
 impl AzureBlobStorageBackend {
     /// Constructs a new Azure Blob Storage backend with the given configuration
     /// and events channel.
-    pub fn new(config: CopyConfig, events: Option<broadcast::Sender<TransferEvent>>) -> Self {
+    pub fn new(config: Config, events: Option<broadcast::Sender<TransferEvent>>) -> Self {
         Self {
             config,
             client: new_http_client(),
@@ -342,7 +379,7 @@ impl AzureBlobStorageBackend {
 impl StorageBackend for AzureBlobStorageBackend {
     type Upload = AzureBlobUpload;
 
-    fn config(&self) -> &CopyConfig {
+    fn config(&self) -> &Config {
         &self.config
     }
 
@@ -355,9 +392,9 @@ impl StorageBackend for AzureBlobStorageBackend {
         const BLOCK_COUNT_INCREMENT: u64 = 50;
 
         // Return the block size if one was specified
-        if let Some(size) = self.config.block_size() {
+        if let Some(size) = self.config.block_size {
             if size > MAX_BLOCK_SIZE {
-                return Err(AzureCopyError::InvalidBlockSize.into());
+                return Err(AzureError::InvalidBlockSize.into());
             }
 
             return Ok(size);
@@ -378,13 +415,41 @@ impl StorageBackend for AzureBlobStorageBackend {
         // whatever will fit
         let block_size: u64 = file_size.div_ceil(MAX_BLOCK_COUNT);
         if block_size > MAX_BLOCK_SIZE {
-            return Err(AzureCopyError::MaximumSizeExceeded.into());
+            return Err(AzureError::MaximumSizeExceeded.into());
         }
 
         Ok(block_size)
     }
 
+    fn join_url<'a>(&self, mut url: Url, segments: impl Iterator<Item = &'a str>) -> Result<Url> {
+        let mut segments = segments.peekable();
+
+        // Check to see if we're joining a path to the root container; that's not
+        // supported
+        let mut existing = url.path_segments().expect("URL should have path");
+        if let (Some(first), None) = (existing.next(), existing.next())
+            && !first.is_empty()
+            && segments.peek().is_some()
+        {
+            return Err(AzureError::RootDirectoryUploadNotSupported.into());
+        }
+
+        // Append on the segments
+        {
+            let mut existing = url.path_segments_mut().expect("url should have path");
+            existing.pop_if_empty();
+            existing.extend(segments);
+        }
+
+        Ok(url)
+    }
+
     async fn head(&self, url: Url) -> Result<Response> {
+        debug_assert!(
+            is_azure_url(&url) && url.scheme() == "https",
+            "expected Azure HTTPS URL"
+        );
+
         debug!("sending HEAD request for `{url}`", url = url.display());
 
         let response = self
@@ -397,13 +462,18 @@ impl StorageBackend for AzureBlobStorageBackend {
             .await?;
 
         if !response.status().is_success() {
-            return Err(response.into_copy_error().await);
+            return Err(response.into_error().await);
         }
 
         Ok(response)
     }
 
     async fn get(&self, url: Url) -> Result<Response> {
+        debug_assert!(
+            is_azure_url(&url) && url.scheme() == "https",
+            "expected Azure HTTPS URL"
+        );
+
         debug!("sending GET request for `{url}`", url = url.display());
 
         let response = self
@@ -416,13 +486,18 @@ impl StorageBackend for AzureBlobStorageBackend {
             .await?;
 
         if !response.status().is_success() {
-            return Err(response.into_copy_error().await);
+            return Err(response.into_error().await);
         }
 
         Ok(response)
     }
 
     async fn get_range(&self, url: Url, etag: &str, range: Range<u64>) -> Result<Response> {
+        debug_assert!(
+            is_azure_url(&url) && url.scheme() == "https",
+            "expected Azure HTTPS URL"
+        );
+
         debug!(
             "sending ranged GET request for `{url}` ({start}-{end})",
             url = url.display(),
@@ -445,17 +520,22 @@ impl StorageBackend for AzureBlobStorageBackend {
             .await?;
 
         if !response.status().is_success() {
-            return Err(response.into_copy_error().await);
+            return Err(response.into_error().await);
         }
 
         if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(CopyError::RemoteContentModified);
+            return Err(Error::RemoteContentModified);
         }
 
         Ok(response)
     }
 
     async fn walk(&self, url: Url) -> Result<Vec<String>> {
+        debug_assert!(
+            is_azure_url(&url) && url.scheme() == "https",
+            "expected Azure HTTPS URL"
+        );
+
         debug!("walking `{url}` as a directory", url = url.display());
 
         let mut container = url.clone();
@@ -470,9 +550,7 @@ impl StorageBackend for AzureBlobStorageBackend {
             // Start by treating the first path segment as the container to list the
             // contents of
             let mut source_segments = url.path_segments().expect("URL should have a path");
-            let name = source_segments
-                .next()
-                .ok_or(AzureCopyError::BlobNameMissing)?;
+            let name = source_segments.next().ok_or(AzureError::BlobNameMissing)?;
             container_segments.push(name);
 
             // The remainder is the prefix we're going to search for
@@ -486,13 +564,13 @@ impl StorageBackend for AzureBlobStorageBackend {
             })
         };
 
-        // If there's no prefix, then we need to use the implicit `$root` container
+        // If there's no prefix, then we need to use the implicit root container
         if prefix.is_empty() {
             let mut container_segments = container
                 .path_segments_mut()
                 .expect("URL should have a path");
             container_segments.clear();
-            container_segments.push("$root");
+            container_segments.push(AZURE_ROOT_CONTAINER);
 
             prefix = url.path_segments().expect("URL should have a path").fold(
                 String::new(),
@@ -545,14 +623,14 @@ impl StorageBackend for AzureBlobStorageBackend {
 
             let status = response.status();
             if !status.is_success() {
-                return Err(response.into_copy_error().await);
+                return Err(response.into_error().await);
             }
 
             let text = response.text().await?;
             let results: Results = match serde_xml_rs::from_str(&text) {
                 Ok(response) => response,
                 Err(e) => {
-                    return Err(AzureCopyError::UnexpectedResponse { status, error: e }.into());
+                    return Err(AzureError::UnexpectedResponse { status, error: e }.into());
                 }
             };
 
@@ -583,6 +661,11 @@ impl StorageBackend for AzureBlobStorageBackend {
     }
 
     async fn new_upload(&self, url: Url) -> Result<Self::Upload> {
+        debug_assert!(
+            is_azure_url(&url) && url.scheme() == "https",
+            "expected Azure HTTPS URL"
+        );
+
         Ok(AzureBlobUpload::new(
             self.client.clone(),
             url,

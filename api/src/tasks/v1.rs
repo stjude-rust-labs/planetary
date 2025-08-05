@@ -48,7 +48,7 @@ fn validate_task(task: &RequestTask) -> Result<()> {
                     .map_err(|_| anyhow!("invalid input URL `{url}`"))?;
 
                 match url.scheme() {
-                    "http" | "https" | "az" => {
+                    "http" | "https" | "az" | "s3" => {
                         // Supported
                     }
                     scheme => bail!("input URL `{url}` uses unsupported scheme `{scheme}`"),
@@ -71,10 +71,17 @@ fn validate_task(task: &RequestTask) -> Result<()> {
         }
 
         // The URL must parse
-        output
+        let url = output
             .url
             .parse::<Url>()
             .map_err(|_| anyhow!("invalid output URL `{url}`", url = output.url))?;
+
+        match url.scheme() {
+            "https" | "az" | "s3" => {
+                // Supported
+            }
+            scheme => bail!("output URL `{url}` uses unsupported scheme `{scheme}`"),
+        }
 
         // The output path must be absolute
         let path = Path::new(&output.path);

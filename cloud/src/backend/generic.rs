@@ -14,8 +14,8 @@ use tokio::sync::broadcast;
 use tracing::debug;
 use url::Url;
 
-use crate::CopyConfig;
-use crate::CopyError;
+use crate::Config;
+use crate::Error;
 use crate::Result;
 use crate::TransferEvent;
 use crate::USER_AGENT;
@@ -24,21 +24,21 @@ use crate::backend::StorageBackend;
 use crate::backend::Upload;
 use crate::new_http_client;
 
-/// Helper trait for converting responses into `CopyError`.
-trait IntoCopyError {
-    /// Converts a generic error response to a `CopyError`.
-    async fn into_copy_error(self) -> CopyError;
+/// Helper trait for converting responses into `Error`.
+trait IntoError {
+    /// Converts a generic error response to a `Error`.
+    async fn into_copy_error(self) -> Error;
 }
 
-impl IntoCopyError for Response {
-    async fn into_copy_error(self) -> CopyError {
+impl IntoError for Response {
+    async fn into_copy_error(self) -> Error {
         let status = self.status();
         let text: String = match self.text().await {
             Ok(text) => text,
             Err(e) => return e.into(),
         };
 
-        CopyError::Server {
+        Error::Server {
             status,
             message: text,
         }
@@ -68,7 +68,7 @@ impl Upload for GenericUpload {
 /// The generic storage backend can only be used to download files.
 pub struct GenericStorageBackend {
     /// The configuration to use for transferring files.
-    config: CopyConfig,
+    config: Config,
     /// The HTTP client to use for transferring files.
     client: Client,
     /// The channel for sending transfer events.
@@ -78,7 +78,7 @@ pub struct GenericStorageBackend {
 impl GenericStorageBackend {
     /// Constructs a new generic storage backend with the given configuration
     /// and events channel.
-    pub fn new(config: CopyConfig, events: Option<broadcast::Sender<TransferEvent>>) -> Self {
+    pub fn new(config: Config, events: Option<broadcast::Sender<TransferEvent>>) -> Self {
         Self {
             config,
             client: new_http_client(),
@@ -90,7 +90,7 @@ impl GenericStorageBackend {
 impl StorageBackend for GenericStorageBackend {
     type Upload = GenericUpload;
 
-    fn config(&self) -> &CopyConfig {
+    fn config(&self) -> &Config {
         &self.config
     }
 
@@ -100,7 +100,7 @@ impl StorageBackend for GenericStorageBackend {
 
     fn block_size(&self, _: u64) -> Result<u64> {
         // Return the block size if one was specified
-        if let Some(size) = self.config.block_size() {
+        if let Some(size) = self.config.block_size {
             return Ok(size);
         }
 
@@ -108,7 +108,18 @@ impl StorageBackend for GenericStorageBackend {
         Ok(4 * 1024 * 1024)
     }
 
-    async fn head(&self, url: url::Url) -> Result<Response> {
+    fn join_url<'a>(&self, mut url: Url, segments: impl Iterator<Item = &'a str>) -> Result<Url> {
+        // Append on the segments
+        {
+            let mut existing = url.path_segments_mut().expect("url should have path");
+            existing.pop_if_empty();
+            existing.extend(segments);
+        }
+
+        Ok(url)
+    }
+
+    async fn head(&self, url: Url) -> Result<Response> {
         debug!("sending HEAD request for `{url}`", url = url.display());
 
         let response = self
@@ -126,7 +137,7 @@ impl StorageBackend for GenericStorageBackend {
         Ok(response)
     }
 
-    async fn get(&self, url: url::Url) -> Result<Response> {
+    async fn get(&self, url: Url) -> Result<Response> {
         debug!("sending GET request for `{url}`", url = url.display());
 
         let response = self
@@ -144,7 +155,7 @@ impl StorageBackend for GenericStorageBackend {
         Ok(response)
     }
 
-    async fn get_range(&self, url: url::Url, etag: &str, range: Range<u64>) -> Result<Response> {
+    async fn get_range(&self, url: Url, etag: &str, range: Range<u64>) -> Result<Response> {
         debug!(
             "sending ranged GET request for `{url}` ({start}-{end})",
             url = url.display(),
@@ -170,7 +181,7 @@ impl StorageBackend for GenericStorageBackend {
         }
 
         if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(CopyError::RemoteContentModified);
+            return Err(Error::RemoteContentModified);
         }
 
         Ok(response)

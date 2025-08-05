@@ -16,6 +16,7 @@ use axum::http::StatusCode;
 use k8s_openapi::api::core::v1::Container;
 use k8s_openapi::api::core::v1::ContainerState;
 use k8s_openapi::api::core::v1::ContainerStateWaiting;
+use k8s_openapi::api::core::v1::EnvFromSource;
 use k8s_openapi::api::core::v1::EnvVar;
 use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 use k8s_openapi::api::core::v1::PersistentVolumeClaimSpec;
@@ -23,6 +24,7 @@ use k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::core::v1::PodSpec;
 use k8s_openapi::api::core::v1::ResourceRequirements;
+use k8s_openapi::api::core::v1::SecretEnvSource;
 use k8s_openapi::api::core::v1::Volume;
 use k8s_openapi::api::core::v1::VolumeMount;
 use k8s_openapi::api::core::v1::VolumeResourceRequirements;
@@ -119,6 +121,9 @@ const DEFAULT_TRANSPORTER_CPU: i32 = 4;
 
 /// The default memory request (in GiB) for transporter pods.
 const DEFAULT_TRANSPORTER_MEMORY: f64 = 2.0;
+
+/// The name of the S3 credentials secret.
+const AWS_S3_CREDENTIALS_SECRET: &str = "aws-s3-credentials";
 
 /// Formats a pod name given the TES task id, pod kind, and executor index.
 ///
@@ -671,6 +676,13 @@ impl TaskOrchestrator {
                         "/mnt/outputs".into(),
                         tes_id.into(),
                     ]),
+                    env_from: Some(vec![EnvFromSource {
+                        secret_ref: Some(SecretEnvSource {
+                            name: AWS_S3_CREDENTIALS_SECRET.into(),
+                            optional: Some(true),
+                        }),
+                        ..Default::default()
+                    }]),
                     volume_mounts: Some(vec![
                         VolumeMount {
                             name: STORAGE_VOLUME_NAME.into(),
@@ -987,6 +999,13 @@ impl TaskOrchestrator {
                         "/mnt/outputs".into(),
                         tes_id.into(),
                     ]),
+                    env_from: Some(vec![EnvFromSource {
+                        secret_ref: Some(SecretEnvSource {
+                            name: AWS_S3_CREDENTIALS_SECRET.into(),
+                            optional: Some(true),
+                        }),
+                        ..Default::default()
+                    }]),
                     volume_mounts: Some(vec![VolumeMount {
                         name: STORAGE_VOLUME_NAME.into(),
                         mount_path: "/mnt/outputs".into(),

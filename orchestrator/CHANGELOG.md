@@ -9,4 +9,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Added support for S3 as a storage backend (#[11](https://github.com/stjude-rust-labs/planetary/pull/11)).
 * Added orchestrator service ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).

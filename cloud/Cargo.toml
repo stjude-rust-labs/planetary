@@ -19,12 +19,16 @@ clap-verbosity-flag = { workspace = true, optional = true }
 colored = { workspace = true, optional = true }
 crc64fast-nvme.workspace = true
 futures.workspace = true
+hex.workspace = true
+hmac.workspace = true
 opool.workspace = true
 pin-project-lite.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 serde-xml-rs.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -34,6 +38,7 @@ tracing.workspace = true
 tracing-indicatif.workspace = true
 tracing-subscriber = { workspace = true, optional = true }
 url.workspace = true
+urlencoding.workspace = true
 walkdir.workspace = true
 
 [lints]
@@ -46,3 +51,6 @@ cli = ["dep:clap", "dep:anyhow", "dep:clap-verbosity-flag", "dep:colored", "dep:
 [[bin]]
 name = "cloud"
 required-features = ["cli"]
+
+[package.metadata.docs.rs]
+all-features = true

@@ -1,42 +1,62 @@
 //! Cloud storage copy utility.
+//!
+//! The `cloud` crate offers a simple API for transferring files to and from
+//! Azure Blob Storage, Amazon S3, and Google Cloud Storage.
+//!
+//! It exports only a single function named [`copy`] which is responsible for
+//! copying a source to a destination.
+//!
+//! An optional transfer event stream provided to the [`copy`] function can be
+//! used to display transfer progress.
+//!
+//! Additionally, when this crate is built with the `cli` feature enabled, a
+//! [`handle_events`] function is exported that will display progress bars using
+//! the `tracing_indicatif` crate.
+
+#![deny(rustdoc::broken_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 use std::fmt;
-use std::num::NonZero;
 use std::path::Path;
 use std::path::PathBuf;
-use std::thread::available_parallelism;
 use std::time::Duration;
 
 use reqwest::Client;
 use reqwest::StatusCode;
 use tokio::sync::broadcast;
 use tokio_retry2::RetryError;
-use tokio_retry2::strategy::ExponentialFactorBackoff;
-use tokio_retry2::strategy::MaxInterval;
 use tracing::warn;
-use url::Host;
 use url::Url;
 
 use crate::backend::azure::AzureBlobStorageBackend;
-use crate::backend::azure::AzureCopyError;
 use crate::backend::generic::GenericStorageBackend;
+use crate::backend::s3::S3StorageBackend;
 use crate::transfer::FileTransfer;
 
 mod backend;
+mod config;
 mod generator;
 mod os;
 mod pool;
 mod streams;
 mod transfer;
 
+pub use backend::azure::AzureError;
+pub use backend::s3::S3Error;
+pub use config::*;
+
 /// The utility user agent.
 const USER_AGENT: &str = concat!("cloud-copy v", env!("CARGO_PKG_VERSION"));
 
-/// The default number of retries for network operations.
-const DEFAULT_RETRIES: usize = 5;
+/// Represents one mebibyte in bytes.
+const ONE_MEBIBYTE: u64 = 1024 * 1024;
+
+/// The threshold for which block size calculation uses to minimize the block
+/// size (256 MiB).
+const BLOCK_SIZE_THRESHOLD: u64 = 256 * ONE_MEBIBYTE;
 
 /// Helper for notifying that a network operation failed and will be retried.
-fn notify_retry(e: &CopyError, duration: Duration) {
+fn notify_retry(e: &Error, duration: Duration) {
     warn!(
         "network operation failed: {e} (retrying after {duration} seconds)",
         duration = duration.as_secs()
@@ -111,12 +131,6 @@ pub trait UrlExt {
     /// represented as a local path.
     fn to_local_path(&self) -> Result<Option<PathBuf>>;
 
-    /// Determines if the URL is for Azure.
-    ///
-    /// This method only returns true for `https` schemed URLs for Azure
-    /// Storage.
-    fn is_azure_storage(&self) -> bool;
-
     /// Displays a URL without its query parameters.
     ///
     /// This is used to prevent authentication information from being displayed
@@ -132,22 +146,7 @@ impl UrlExt for Url {
 
         self.to_file_path()
             .map(Some)
-            .map_err(|_| CopyError::InvalidFileUrl(self.clone()))
-    }
-
-    fn is_azure_storage(&self) -> bool {
-        if self.scheme() != "https" {
-            return false;
-        }
-
-        self.host()
-            .map(|host| match host {
-                Host::Domain(domain) => domain
-                    .strip_suffix(backend::azure::AZURE_STORAGE_DOMAIN_SUFFIX)
-                    .is_some(),
-                _ => false,
-            })
-            .unwrap_or(false)
+            .map_err(|_| Error::InvalidFileUrl(self.clone()))
     }
 
     fn display(&self) -> impl fmt::Display {
@@ -184,7 +183,7 @@ fn new_http_client() -> Client {
         .expect("failed to build HTTP client")
 }
 
-/// Helper for displaying a message in `CopyError`.
+/// Helper for displaying a message in `Error`.
 struct DisplayMessage<'a> {
     /// The status code of the error.
     status: StatusCode,
@@ -214,7 +213,7 @@ impl fmt::Display for DisplayMessage<'_> {
 
 /// Represents a copy operation error.
 #[derive(Debug, thiserror::Error)]
-pub enum CopyError {
+pub enum Error {
     /// Copying between remote locations is not supported.
     #[error("copying between remote locations is not supported")]
     RemoteCopyNotSupported,
@@ -270,9 +269,12 @@ pub enum CopyError {
         /// This may be the contents of the entire response body.
         message: String,
     },
-    /// An Azure copy error occurred.
+    /// An Azure error occurred.
     #[error(transparent)]
-    Azure(#[from] backend::azure::AzureCopyError),
+    Azure(#[from] AzureError),
+    /// An S3 error occurred.
+    #[error(transparent)]
+    S3(#[from] S3Error),
     /// An I/O error occurred.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -287,125 +289,24 @@ pub enum CopyError {
     Temp(#[from] tempfile::PersistError),
 }
 
-impl CopyError {
-    /// Converts the copy error into a retry error.
+impl Error {
+    /// Converts the error into a retry error.
     fn into_retry_error(self) -> RetryError<Self> {
         match &self {
-            CopyError::Server { status, .. }
-            | CopyError::Azure(AzureCopyError::UnexpectedResponse { status, .. })
+            Error::Server { status, .. }
+            | Error::Azure(AzureError::UnexpectedResponse { status, .. })
                 if status.is_server_error() =>
             {
                 RetryError::transient(self)
             }
-            CopyError::Io(_) | CopyError::Reqwest(_) => RetryError::transient(self),
+            Error::Io(_) | Error::Reqwest(_) => RetryError::transient(self),
             _ => RetryError::permanent(self),
         }
     }
 }
 
 /// Represents a result for copy operations.
-pub type Result<T> = std::result::Result<T, CopyError>;
-
-/// Used to configure a cloud copy operation.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CopyConfig {
-    /// The block size to use for file transfers.
-    ///
-    /// The default block size depends on the cloud storage service.
-    block_size: Option<u64>,
-    /// The parallelism level for network operations.
-    ///
-    /// Defaults to the host's available parallelism.
-    parallelism: Option<usize>,
-    /// The number of retries to attempt for network operations.
-    ///
-    /// Defaults to `5`.
-    retries: Option<usize>,
-}
-
-impl CopyConfig {
-    /// Constructs a new copy configuration.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets the block size (in bytes) for file transfers.
-    ///
-    /// The default block size depends on the cloud storage service.
-    pub fn with_block_size(mut self, size: u64) -> Self {
-        self.block_size = Some(size);
-        self
-    }
-
-    /// Sets the parallelism count for copy operations.
-    ///
-    /// Defaults to the host's available parallelism.
-    pub fn with_parallelism(mut self, parallelism: usize) -> Self {
-        self.parallelism = Some(parallelism);
-        self
-    }
-
-    /// Sets the number of retries to use for network operations.
-    ///
-    /// The default number of retries is `5`.
-    ///
-    /// Retries use an exponential power of 2 backoff, starting at 1 second with
-    /// a maximum duration of 10 minutes.
-    pub fn with_retries(&mut self, retries: usize) -> &mut Self {
-        self.retries = Some(retries);
-        self
-    }
-
-    /// Gets the block size (in bytes) for file transfers.
-    ///
-    /// The default block size depends on the cloud storage service.
-    pub fn block_size(&self) -> Option<u64> {
-        self.block_size
-    }
-
-    /// Gets the parallelism supported for uploads and downloads.
-    ///
-    /// For uploads, this is the number of files and blocks that may be
-    /// concurrently transferred.
-    ///
-    /// For downloads, this is the number of files that may be concurrently
-    /// transferred.
-    ///
-    /// Defaults to the host's available parallelism. If the parallelism
-    /// cannot be detected, defaults to 1.
-    pub fn parallelism(&self) -> usize {
-        self.parallelism
-            .unwrap_or_else(|| available_parallelism().map(NonZero::get).unwrap_or(1))
-    }
-
-    /// Gets the number of retries for network operations.
-    pub fn retries(&self) -> usize {
-        self.retries.unwrap_or(DEFAULT_RETRIES)
-    }
-
-    /// Gets an iterator over the retry durations for network operations.
-    ///
-    /// Retries use an exponential power of 2 backoff, starting at 1 second with
-    /// a maximum duration of 10 minutes.
-    pub fn retry_durations<'a>(&self) -> impl Iterator<Item = Duration> + use<'a> {
-        const INITIAL_DELAY_MILLIS: u64 = 1000;
-        const BASE_FACTOR: f64 = 2.0;
-        const MAX_DURATION: Duration = Duration::from_secs(600);
-
-        ExponentialFactorBackoff::from_millis(INITIAL_DELAY_MILLIS, BASE_FACTOR)
-            .max_duration(MAX_DURATION)
-            .take(self.retries.unwrap_or(DEFAULT_RETRIES))
-    }
-}
-
-/// Rewrites a cloud storage URL.
-fn rewrite_url(url: Url) -> Result<Url> {
-    match url.scheme() {
-        "file" | "http" | "https" => Ok(url),
-        "az" => Ok(backend::azure::rewrite_url(&url)?),
-        scheme => Err(CopyError::UnsupportedUrlScheme(scheme.to_string())),
-    }
-}
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Represents an event that may occur during a file transfer.
 #[derive(Debug, Clone)]
@@ -477,18 +378,26 @@ pub enum TransferEvent {
 /// * `az` schemed URLs in the format `az://<account>/<container>/<blob>`.
 /// * `https` schemed URLs in the format `https://<account>.blob.core.windows.net/<container>/<blob>`.
 ///
-/// If authorization is required, the URL is expected to contain a SAS token in
+/// If authentication is required, the URL is expected to contain a SAS token in
 /// its query parameters.
 ///
 /// # Amazon S3
 ///
-/// Support coming soon
+/// Supported remote URLs for S3 Storage:
+///
+/// * `s3` schemed URLs in the format: `s3://<bucket>/<object>` (note: uses the
+///   default region).
+/// * `https` schemed URLs in the format `https://<bucket>.s3.<region>.amazonaws.com/<object>`.
+/// * `https` schemed URLs in the format `https://<region>.s3.amazonaws.com/<bucket>/<object>`.
+///
+/// If authentication is required, the provided `Config` must have S3
+/// authentication information.
 ///
 /// # Google Cloud Storage
 ///
 /// Support coming soon.
 pub async fn copy(
-    config: CopyConfig,
+    config: Config,
     source: impl Into<Location<'_>>,
     destination: impl Into<Location<'_>>,
     events: Option<broadcast::Sender<TransferEvent>>,
@@ -513,12 +422,16 @@ pub async fn copy(
                     .map_err(Into::into);
             }
 
-            let destination = rewrite_url(destination)?;
-            if destination.is_azure_storage() {
+            if backend::azure::is_azure_url(&destination) {
+                let destination = backend::azure::rewrite_url(destination)?;
                 let transfer = FileTransfer::new(AzureBlobStorageBackend::new(config, events));
                 transfer.upload(source, destination).await
+            } else if backend::s3::is_s3_url(&destination) {
+                let destination = backend::s3::rewrite_url(&config, destination)?;
+                let transfer = FileTransfer::new(S3StorageBackend::new(config, events));
+                transfer.upload(source, destination).await
             } else {
-                Err(CopyError::UnsupportedUrl(destination))
+                Err(Error::UnsupportedUrl(destination))
             }
         }
         (Location::Url(source), Location::Path(destination)) => {
@@ -531,12 +444,16 @@ pub async fn copy(
             }
 
             if destination.exists() {
-                return Err(CopyError::DestinationExists(destination.to_path_buf()));
+                return Err(Error::DestinationExists(destination.to_path_buf()));
             }
 
-            let source = rewrite_url(source)?;
-            if source.is_azure_storage() {
+            if backend::azure::is_azure_url(&source) {
+                let source = backend::azure::rewrite_url(source)?;
                 let transfer = FileTransfer::new(AzureBlobStorageBackend::new(config, events));
+                transfer.download(source, destination).await
+            } else if backend::s3::is_s3_url(&source) {
+                let source = backend::s3::rewrite_url(&config, source)?;
+                let transfer = FileTransfer::new(S3StorageBackend::new(config, events));
                 transfer.download(source, destination).await
             } else {
                 let transfer = FileTransfer::new(GenericStorageBackend::new(config, events));
@@ -554,18 +471,19 @@ pub async fn copy(
                     .map_err(Into::into);
             }
 
-            Err(CopyError::RemoteCopyNotSupported)
+            Err(Error::RemoteCopyNotSupported)
         }
     }
 }
 
-/// Handles events that may occur during the copy operation.
+/// Handles events that may occur during a copy operation.
 ///
 /// This is responsible for showing and updating progress bars for files
 /// being transferred.
 ///
 /// Used from CLI implementations.
 #[cfg(feature = "cli")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cli")))]
 pub async fn handle_events(
     mut events: broadcast::Receiver<TransferEvent>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
