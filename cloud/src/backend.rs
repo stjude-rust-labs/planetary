@@ -14,6 +14,7 @@ use crate::TransferEvent;
 pub(crate) mod auth;
 pub(crate) mod azure;
 pub(crate) mod generic;
+pub(crate) mod google;
 pub(crate) mod s3;
 
 /// Represents an abstract file upload.

@@ -10,6 +10,8 @@ use clap::Subcommand;
 use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
 use cloud::Config;
+use cloud::GoogleAuthConfig;
+use cloud::GoogleConfig;
 use cloud::Location;
 use cloud::S3AuthConfig;
 use cloud::S3Config;
@@ -63,6 +65,20 @@ pub struct CopyCommand {
     /// The default AWS region.
     #[clap(long, env, value_name = "REGION")]
     pub aws_default_region: Option<String>,
+
+    /// The Google Cloud Storage HMAC access key to use.
+    #[clap(long, env, value_name = "KEY")]
+    pub google_hmac_access_key: Option<String>,
+
+    /// The Google Cloud Storage HMAC secret to use.
+    #[clap(
+        long,
+        env,
+        hide_env_values(true),
+        value_name = "SECRET",
+        requires = "google_hmac_access_key"
+    )]
+    pub google_hmac_secret: Option<SecretString>,
 }
 
 impl CopyCommand {
@@ -111,6 +127,14 @@ impl CopyCommand {
                 None
             };
 
+        let google_auth = if let (Some(access_key), Some(secret)) =
+            (self.google_hmac_access_key, self.google_hmac_secret)
+        {
+            Some(GoogleAuthConfig { access_key, secret })
+        } else {
+            None
+        };
+
         let config = Config {
             block_size: self.block_size,
             parallelism: self.parallelism,
@@ -119,6 +143,7 @@ impl CopyCommand {
                 region: self.aws_default_region,
                 auth: s3_auth,
             },
+            google: GoogleConfig { auth: google_auth },
         };
 
         (config, self.source, self.destination)

@@ -48,7 +48,7 @@ fn validate_task(task: &RequestTask) -> Result<()> {
                     .map_err(|_| anyhow!("invalid input URL `{url}`"))?;
 
                 match url.scheme() {
-                    "http" | "https" | "az" | "s3" => {
+                    "http" | "https" | "az" | "s3" | "gs" => {
                         // Supported
                     }
                     scheme => bail!("input URL `{url}` uses unsupported scheme `{scheme}`"),
@@ -77,7 +77,7 @@ fn validate_task(task: &RequestTask) -> Result<()> {
             .map_err(|_| anyhow!("invalid output URL `{url}`", url = output.url))?;
 
         match url.scheme() {
-            "https" | "az" | "s3" => {
+            "https" | "az" | "s3" | "gs" => {
                 // Supported
             }
             scheme => bail!("output URL `{url}` uses unsupported scheme `{scheme}`"),

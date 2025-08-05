@@ -125,6 +125,9 @@ const DEFAULT_TRANSPORTER_MEMORY: f64 = 2.0;
 /// The name of the S3 credentials secret.
 const AWS_S3_CREDENTIALS_SECRET: &str = "aws-s3-credentials";
 
+/// The name of the Google Cloud Storage credentials secret.
+const GOOGLE_STORAGE_CREDENTIALS_SECRET: &str = "google-storage-credentials";
+
 /// Formats a pod name given the TES task id, pod kind, and executor index.
 ///
 /// The executor index must be specified when the pod is an executor.
@@ -676,13 +679,22 @@ impl TaskOrchestrator {
                         "/mnt/outputs".into(),
                         tes_id.into(),
                     ]),
-                    env_from: Some(vec![EnvFromSource {
-                        secret_ref: Some(SecretEnvSource {
-                            name: AWS_S3_CREDENTIALS_SECRET.into(),
-                            optional: Some(true),
-                        }),
-                        ..Default::default()
-                    }]),
+                    env_from: Some(vec![
+                        EnvFromSource {
+                            secret_ref: Some(SecretEnvSource {
+                                name: AWS_S3_CREDENTIALS_SECRET.into(),
+                                optional: Some(true),
+                            }),
+                            ..Default::default()
+                        },
+                        EnvFromSource {
+                            secret_ref: Some(SecretEnvSource {
+                                name: GOOGLE_STORAGE_CREDENTIALS_SECRET.into(),
+                                optional: Some(true),
+                            }),
+                            ..Default::default()
+                        },
+                    ]),
                     volume_mounts: Some(vec![
                         VolumeMount {
                             name: STORAGE_VOLUME_NAME.into(),
@@ -999,13 +1011,22 @@ impl TaskOrchestrator {
                         "/mnt/outputs".into(),
                         tes_id.into(),
                     ]),
-                    env_from: Some(vec![EnvFromSource {
-                        secret_ref: Some(SecretEnvSource {
-                            name: AWS_S3_CREDENTIALS_SECRET.into(),
-                            optional: Some(true),
-                        }),
-                        ..Default::default()
-                    }]),
+                    env_from: Some(vec![
+                        EnvFromSource {
+                            secret_ref: Some(SecretEnvSource {
+                                name: AWS_S3_CREDENTIALS_SECRET.into(),
+                                optional: Some(true),
+                            }),
+                            ..Default::default()
+                        },
+                        EnvFromSource {
+                            secret_ref: Some(SecretEnvSource {
+                                name: GOOGLE_STORAGE_CREDENTIALS_SECRET.into(),
+                                optional: Some(true),
+                            }),
+                            ..Default::default()
+                        },
+                    ]),
                     volume_mounts: Some(vec![VolumeMount {
                         name: STORAGE_VOLUME_NAME.into(),
                         mount_path: "/mnt/outputs".into(),

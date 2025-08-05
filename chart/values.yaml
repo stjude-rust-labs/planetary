@@ -95,3 +95,11 @@ transporter:
     #   # The AWS Secret Access Key to use for authentication.
     #   # Required if `awsAccessKeyId` is set.
     #   awsSecretAccessKey: "<secret-access-key>"
+    # Configuration for Google Cloud Storage
+    google: null
+    #   # The Google Cloud Storage HMAC access key to use for authentication.
+    #   # Required if `hmacSecret` is set.
+    #   hmacAccessKey: "<access-key>"
+    #   # The Google Cloud Storage HMAC secret to use for authentication.
+    #   # Required if `hmacAccessKey` is set.
+    #   hmacSecret: "<secret>"
