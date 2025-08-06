@@ -1,4 +1,4 @@
-//! Implementation of the S3 storage backend.
+//! Implementation of the Google Cloud Storage backend.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -10,7 +10,6 @@ use reqwest::Body;
 use reqwest::Client;
 use reqwest::Request;
 use reqwest::Response;
-use reqwest::StatusCode;
 use reqwest::header;
 use reqwest::header::HeaderValue;
 use secrecy::ExposeSecret;
@@ -23,9 +22,9 @@ use url::Url;
 use crate::BLOCK_SIZE_THRESHOLD;
 use crate::Config;
 use crate::Error;
+use crate::GoogleAuthConfig;
 use crate::ONE_MEBIBYTE;
 use crate::Result;
-use crate::S3AuthConfig;
 use crate::TransferEvent;
 use crate::USER_AGENT;
 use crate::UrlExt as _;
@@ -34,15 +33,14 @@ use crate::backend::Upload;
 use crate::backend::auth::RequestSigner;
 use crate::backend::auth::SignatureProvider;
 use crate::backend::auth::sha256_hex_string;
+use crate::backend::s3::InitiateMultipartUploadResult;
+use crate::backend::s3::ListBucketResult;
 use crate::new_http_client;
 use crate::streams::ByteStream;
 use crate::streams::TransferStream;
 
-/// The root domain for AWS.
-pub const AWS_ROOT_DOMAIN: &str = "amazonaws.com";
-
-/// The default S3 URL region.
-const DEFAULT_REGION: &str = "us-east-1";
+/// The root domain for Google Cloud Storage.
+pub const GOOGLE_ROOT_DOMAIN: &str = "storage.googleapis.com";
 
 /// The maximum number of parts in an upload.
 const MAX_PARTS: u64 = 10000;
@@ -54,32 +52,29 @@ const MIN_PART_SIZE: u64 = 5 * ONE_MEBIBYTE;
 /// The maximum size in bytes (5 GiB) for an upload part.
 const MAX_PART_SIZE: u64 = MIN_PART_SIZE * 1024;
 
-/// The maximum size of a file on S3 in bytes (5 TiB).
+/// The maximum size of a file on Google in bytes (5 TiB).
 const MAX_FILE_SIZE: u64 = MAX_PART_SIZE * 1024;
 
-/// The AWS date header name.
-const AWS_DATE_HEADER: &str = "x-amz-date";
+/// The Google date header name.
+const GOOGLE_DATE_HEADER: &str = "x-goog-date";
 
-/// The AWS content SHA256 header name.
-const AWS_CONTENT_SHA256_HEADER: &str = "x-amz-content-sha256";
+/// The Google content SHA256 header name.
+const GOOGLE_CONTENT_SHA256_HEADER: &str = "x-goog-content-sha256";
 
-/// Represents a S3-specific copy operation error.
+/// Represents a Google-specific copy operation error.
 #[derive(Debug, thiserror::Error)]
-pub enum S3Error {
-    /// The specified S3 block size exceeds the maximum.
-    #[error("S3 block size cannot exceed {MAX_PART_SIZE} bytes")]
+pub enum GoogleError {
+    /// The specified Google Storage block size exceeds the maximum.
+    #[error("Google Storage block size cannot exceed {MAX_PART_SIZE} bytes")]
     InvalidBlockSize,
     /// The source size exceeds the supported maximum size.
     #[error("the size of the source file exceeds the supported maximum of {MAX_FILE_SIZE} bytes")]
     MaximumSizeExceeded,
-    /// Invalid URL with an `s3` scheme.
-    #[error("invalid URL with `s3` scheme: the URL is not in a supported format")]
+    /// Invalid URL with an `gs` scheme.
+    #[error("invalid URL with `gs` scheme: the URL is not in a supported format")]
     InvalidScheme,
-    /// A "path-style" URL is missing the bucket.
-    #[error("URL is missing the bucket in the path")]
-    MissingBucket,
-    /// The S3 secret access key is invalid.
-    #[error("invalid S3 secret access key")]
+    /// The Google Cloud HMAC secret is invalid.
+    #[error("invalid Google Cloud Storage HMAC secret")]
     InvalidSecretAccessKey,
     /// The response was missing an ETag header.
     #[error("response from server was missing an ETag header")]
@@ -97,94 +92,60 @@ pub enum S3Error {
     },
 }
 
-/// Represents content in a list operation results.
-#[derive(Debug, Deserialize)]
-pub struct Content {
-    /// The key of the S3 object.
-    #[serde(rename = "Key")]
-    pub key: String,
+/// Represents a Google Cloud Storage signature provider.
+pub struct GoogleSignatureProvider<'a> {
+    /// The Google Storage authentication configuration.
+    auth: &'a GoogleAuthConfig,
 }
 
-/// Represents results of a list operation.
-#[derive(Debug, Deserialize)]
-#[serde(rename = "ListBucketResult")]
-pub struct ListBucketResult {
-    /// The contents of the results.
-    #[serde(default, rename = "Contents")]
-    pub contents: Vec<Content>,
-    /// The next continuation token.
-    #[serde(rename = "NextContinuationToken", default)]
-    pub token: Option<String>,
-}
-
-/// Represents the result of initiating an upload.
-#[derive(Default, Deserialize)]
-#[serde(rename = "InitiateMultipartUploadResult")]
-pub struct InitiateMultipartUploadResult {
-    /// The upload identifier.
-    #[serde(rename = "UploadId")]
-    pub upload_id: String,
-}
-
-/// Represents a S3 signature provider.
-pub struct S3SignatureProvider<'a> {
-    /// The region for the request.
-    region: &'a str,
-    /// The S3 authentication configuration.
-    auth: &'a S3AuthConfig,
-}
-
-impl SignatureProvider for S3SignatureProvider<'_> {
+impl SignatureProvider for GoogleSignatureProvider<'_> {
     fn algorithm(&self) -> &str {
-        "AWS4-HMAC-SHA256"
+        "GOOG4-HMAC-SHA256"
     }
 
     fn secret_key_prefix(&self) -> &str {
-        "AWS4"
+        "GOOG4"
     }
 
     fn request_type(&self) -> &str {
-        "aws4_request"
+        "goog4_request"
     }
 
     fn region(&self) -> &str {
-        self.region
+        "any"
     }
 
     fn service(&self) -> &str {
-        "s3"
+        "storage"
     }
 
     fn date_header_name(&self) -> &str {
-        AWS_DATE_HEADER
+        GOOGLE_DATE_HEADER
     }
 
     fn content_hash_header_name(&self) -> &str {
-        AWS_CONTENT_SHA256_HEADER
+        GOOGLE_CONTENT_SHA256_HEADER
     }
 
     fn access_key_id(&self) -> &str {
-        &self.auth.access_key_id
+        &self.auth.access_key
     }
 
     fn secret_access_key(&self) -> &str {
-        self.auth.secret_access_key.expose_secret()
+        self.auth.secret.expose_secret()
     }
 }
 
 /// Appends the authentication header to the request.
 fn append_authentication_header(
-    auth: &S3AuthConfig,
+    auth: &GoogleAuthConfig,
     date: DateTime<Utc>,
     request: &mut Request,
 ) -> Result<()> {
-    let signer = RequestSigner::new(S3SignatureProvider {
-        region: request.url().region(),
-        auth,
-    });
+    let signer = RequestSigner::new(GoogleSignatureProvider { auth });
     let auth = signer
         .sign(date, request)
-        .ok_or(S3Error::InvalidSecretAccessKey)?;
+        .ok_or(GoogleError::InvalidSecretAccessKey)?;
     request.headers_mut().append(
         header::AUTHORIZATION,
         HeaderValue::try_from(auth).expect("value should be valid"),
@@ -192,96 +153,75 @@ fn append_authentication_header(
     Ok(())
 }
 
-/// Determines if the given URL is an S3 URL.
-pub fn is_s3_url(url: &Url) -> bool {
+/// Determines if the given URL is a Google Cloud Storage URL.
+pub fn is_gcs_url(url: &Url) -> bool {
     match url.scheme() {
-        "s3" => true,
+        "gs" => true,
         "https" => {
             let Some(domain) = url.domain() else {
                 return false;
             };
 
-            if domain.starts_with("s3.") || domain.starts_with("S3.") {
-                // Path-style URL of the form https://s3.<region>.amazonaws.com/<bucket>/<path>
-                let domain = &domain[3..];
-                let Some((region, domain)) = domain.split_once('.') else {
-                    return false;
-                };
-
+            if domain.eq_ignore_ascii_case(GOOGLE_ROOT_DOMAIN) {
+                // Path-style URL of the form http://storage.googleapis.com/<bucket>/<object>
                 // There must be at least two path segments
-                !region.is_empty()
-                    && domain.eq_ignore_ascii_case(AWS_ROOT_DOMAIN)
-                    && url
-                        .path_segments()
-                        .map(|mut s| s.nth(1).is_some())
-                        .unwrap_or(false)
-            } else {
-                // Virtual host style URL of the form https://<bucket>.s3.<region>.amazonaws.com/<path>
-                let mut parts = domain.splitn(4, '.');
-                match (parts.next(), parts.next(), parts.next(), parts.next()) {
-                    (Some(bucket), Some(service), Some(region), Some(domain)) => {
-                        // There must be at least one path segment
-                        !bucket.is_empty()
-                            && !region.is_empty()
-                            && service.eq_ignore_ascii_case("s3")
-                            && domain.eq_ignore_ascii_case(AWS_ROOT_DOMAIN)
-                            && url
-                                .path_segments()
-                                .map(|mut s| s.next().is_some())
-                                .unwrap_or(false)
-                    }
-                    _ => false,
-                }
+                return url
+                    .path_segments()
+                    .map(|mut s| s.nth(1).is_some())
+                    .unwrap_or(false);
             }
+
+            // Virtual host style URL of the form https://<bucket>.storage.googleapis.com/<object>
+            let Some((bucket, domain)) = domain.split_once('.') else {
+                return false;
+            };
+
+            // There must be at least one path segment
+            !bucket.is_empty()
+                && domain.eq_ignore_ascii_case(GOOGLE_ROOT_DOMAIN)
+                && url
+                    .path_segments()
+                    .map(|mut s| s.next().is_some())
+                    .unwrap_or(false)
         }
         _ => false,
     }
 }
 
-/// Rewrites a S3 URL (s3://) into a HTTPS URL.
+/// Rewrites a Google Cloud Storage URL (gs://) into a HTTPS URL.
 ///
-/// If the URL is not `s3` schemed, the given URL is returned as-is.
-pub fn rewrite_url(config: &Config, url: Url) -> Result<Url> {
+/// If the URL is not `gs` schemed, the given URL is returned as-is.
+pub fn rewrite_url(url: Url) -> Result<Url> {
     match url.scheme() {
-        "s3" => {
-            let region = config.s3.region.as_deref().unwrap_or(DEFAULT_REGION);
-            let bucket = url.host_str().ok_or(S3Error::InvalidScheme)?;
+        "gs" => {
+            let bucket = url.host_str().ok_or(GoogleError::InvalidScheme)?;
             let path = url.path();
 
             if url.path() == "/" {
-                return Err(S3Error::InvalidScheme.into());
+                return Err(GoogleError::InvalidScheme.into());
             }
 
             match (url.query(), url.fragment()) {
-                (None, None) => format!("https://{bucket}.s3.{region}.{AWS_ROOT_DOMAIN}{path}"),
+                (None, None) => format!("https://{bucket}.{GOOGLE_ROOT_DOMAIN}{path}"),
                 (None, Some(fragment)) => {
-                    format!("https://{bucket}.s3.{region}.{AWS_ROOT_DOMAIN}{path}#{fragment}")
+                    format!("https://{bucket}.{GOOGLE_ROOT_DOMAIN}{path}#{fragment}")
                 }
                 (Some(query), None) => {
-                    format!("https://{bucket}.s3.{region}.{AWS_ROOT_DOMAIN}{path}?{query}")
+                    format!("https://{bucket}.{GOOGLE_ROOT_DOMAIN}{path}?{query}")
                 }
                 (Some(query), Some(fragment)) => {
-                    format!(
-                        "https://{bucket}.s3.{region}.{AWS_ROOT_DOMAIN}{path}?{query}#{fragment}"
-                    )
+                    format!("https://{bucket}.{GOOGLE_ROOT_DOMAIN}{path}?{query}#{fragment}")
                 }
             }
             .parse()
-            .map_err(|_| S3Error::InvalidScheme.into())
+            .map_err(|_| GoogleError::InvalidScheme.into())
         }
         _ => Ok(url),
     }
 }
 
-/// URL extensions for S3.
+/// URL extensions for Google Cloud Storage.
 trait UrlExt {
-    /// Extracts the region from the URL.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the URL is not a valid S3 URL.
-    fn region(&self) -> &str;
-
     /// Extracts the bucket name and object path from the URL.
     ///
     /// # Panics
@@ -291,32 +231,11 @@ trait UrlExt {
 }
 
 impl UrlExt for Url {
-    fn region(&self) -> &str {
-        let domain = self.domain().expect("URL should have domain");
-
-        if domain.starts_with("s3.") || domain.starts_with("S3.") {
-            // Path-style URL of the form https://s3.<region>.amazonaws.com/<bucket>/<path>
-            let mut parts = domain.splitn(3, '.');
-            match (parts.next(), parts.next()) {
-                (_, Some(region)) => region,
-                _ => panic!("invalid S3 URL"),
-            }
-        } else {
-            // Virtual host style URL of the form https://<bucket>.s3.<region>.amazonaws.com/<path>
-            let mut parts = domain.splitn(4, '.');
-
-            match (parts.next(), parts.next(), parts.next()) {
-                (_, _, Some(region)) => region,
-                _ => panic!("invalid S3 URL"),
-            }
-        }
-    }
-
     fn bucket_and_path(&self) -> (&str, &str) {
         let domain = self.domain().expect("URL should have domain");
 
-        if domain.starts_with("s3.") || domain.starts_with("S3.") {
-            // Path-style URL of the form https://s3.<region>.amazonaws.com/<bucket>/<path>
+        if domain.eq_ignore_ascii_case(GOOGLE_ROOT_DOMAIN) {
+            // Path-style URL of the form https://storage.googleapis.com/<bucket>/<path>
             let bucket = self
                 .path_segments()
                 .expect("URL should have path")
@@ -332,7 +251,7 @@ impl UrlExt for Url {
                     .unwrap(),
             )
         } else {
-            // Virtual host style URL of the form https://<bucket>.s3.<region>.amazonaws.com/<path>
+            // Virtual host style URL of the form https://<bucket>.storage.googleapis.com/<path>
             let Some((bucket, _)) = domain.split_once('.') else {
                 panic!("URL domain does not contain a bucket");
             };
@@ -344,7 +263,7 @@ impl UrlExt for Url {
 
 /// Extension trait for response.
 trait ResponseExt {
-    /// Converts an error response from S3 into an `Error`.
+    /// Converts an error response from Google Cloud Storage into an `Error`.
     async fn into_error(self) -> Error;
 }
 
@@ -355,22 +274,14 @@ impl ResponseExt for Response {
         #[serde(rename = "Error")]
         struct ErrorResponse {
             /// The error message.
-            #[serde(rename = "Message")]
+            #[serde(rename = "Message", default)]
             message: String,
+            /// The error details.
+            #[serde(rename = "Details", default)]
+            details: Option<String>,
         }
 
         let status = self.status();
-
-        // Improve a 301 response which is likely due to using the wrong region
-        if status == StatusCode::MOVED_PERMANENTLY {
-            return Error::Server {
-                status,
-                message: "the AWS region being used may not be the correct region for the storage \
-                          bucket"
-                    .into(),
-            };
-        }
-
         let text: String = match self.text().await {
             Ok(text) => text,
             Err(e) => return e.into(),
@@ -384,9 +295,14 @@ impl ResponseExt for Response {
         }
 
         let message = match serde_xml_rs::from_str::<ErrorResponse>(&text) {
-            Ok(response) => response.message,
+            Ok(response) => match response.details {
+                Some(details) => {
+                    format!("{message}\ndetails: {details}", message = response.message)
+                }
+                None => response.message,
+            },
             Err(e) => {
-                return S3Error::UnexpectedResponse { status, error: e }.into();
+                return GoogleError::UnexpectedResponse { status, error: e }.into();
             }
         };
 
@@ -397,7 +313,7 @@ impl ResponseExt for Response {
 /// Represents a completed part of an upload.
 #[derive(Default, Clone, Serialize)]
 #[serde(rename = "Part")]
-pub struct S3UploadPart {
+pub struct GoogleUploadPart {
     /// The part number of the upload.
     #[serde(rename = "PartNumber")]
     number: u64,
@@ -406,8 +322,8 @@ pub struct S3UploadPart {
     etag: String,
 }
 
-/// Represents an S3 file upload.
-pub struct S3Upload {
+/// Represents an Google Cloud Storage file upload.
+pub struct GoogleUpload {
     /// The configuration to use for the upload.
     config: Arc<Config>,
     /// The HTTP client to use for uploading.
@@ -420,11 +336,11 @@ pub struct S3Upload {
     events: Option<broadcast::Sender<TransferEvent>>,
 }
 
-impl Upload for S3Upload {
-    type Part = S3UploadPart;
+impl Upload for GoogleUpload {
+    type Part = GoogleUploadPart;
 
     async fn put(&self, id: u64, block: u64, bytes: Bytes) -> Result<Self::Part> {
-        // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_UploadPart.html
+        // See: https://cloud.google.com/storage/docs/xml-api/put-object-multipart
 
         debug!(
             "sending PUT request for block {block} of `{url}`",
@@ -455,12 +371,15 @@ impl Upload for S3Upload {
             .header(header::USER_AGENT, USER_AGENT)
             .header(header::CONTENT_LENGTH, length)
             .header(header::CONTENT_TYPE, "application/octet-stream")
-            .header(AWS_DATE_HEADER, date.format("%Y%m%dT%H%M%SZ").to_string())
-            .header(AWS_CONTENT_SHA256_HEADER, &digest)
+            .header(
+                GOOGLE_DATE_HEADER,
+                date.format("%Y%m%dT%H%M%SZ").to_string(),
+            )
+            .header(GOOGLE_CONTENT_SHA256_HEADER, &digest)
             .body(body)
             .build()?;
 
-        if let Some(auth) = &self.config.s3.auth {
+        if let Some(auth) = &self.config.google.auth {
             append_authentication_header(auth, date, &mut request)?;
         }
 
@@ -473,16 +392,16 @@ impl Upload for S3Upload {
             .headers()
             .get(header::ETAG)
             .and_then(|v| v.to_str().ok())
-            .ok_or(S3Error::ResponseMissingETag)?;
+            .ok_or(GoogleError::ResponseMissingETag)?;
 
-        Ok(S3UploadPart {
+        Ok(GoogleUploadPart {
             number: block + 1,
             etag: etag.to_string(),
         })
     }
 
     async fn finalize(&self, parts: &[Self::Part]) -> Result<()> {
-        // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html
+        // See: https://cloud.google.com/storage/docs/xml-api/post-object-complete
 
         /// Represents the request body for completing a multipart upload.
         #[derive(Serialize)]
@@ -490,7 +409,7 @@ impl Upload for S3Upload {
         struct CompleteUpload<'a> {
             /// The parts of the upload.
             #[serde(rename = "Part")]
-            parts: &'a [S3UploadPart],
+            parts: &'a [GoogleUploadPart],
         }
 
         debug!(
@@ -506,7 +425,6 @@ impl Upload for S3Upload {
         }
 
         let body = serde_xml_rs::SerdeXml::new()
-            .default_namespace("http://s3.amazonaws.com/doc/2006-03-01/")
             .to_string(&CompleteUpload { parts })
             .expect("should serialize");
 
@@ -517,12 +435,15 @@ impl Upload for S3Upload {
             .header(header::USER_AGENT, USER_AGENT)
             .header(header::CONTENT_LENGTH, body.len())
             .header(header::CONTENT_TYPE, "application/xml")
-            .header(AWS_DATE_HEADER, date.format("%Y%m%dT%H%M%SZ").to_string())
-            .header(AWS_CONTENT_SHA256_HEADER, sha256_hex_string(&body))
+            .header(
+                GOOGLE_DATE_HEADER,
+                date.format("%Y%m%dT%H%M%SZ").to_string(),
+            )
+            .header(GOOGLE_CONTENT_SHA256_HEADER, sha256_hex_string(&body))
             .body(body)
             .build()?;
 
-        if let Some(auth) = &self.config.s3.auth {
+        if let Some(auth) = &self.config.google.auth {
             append_authentication_header(auth, date, &mut request)?;
         }
 
@@ -535,8 +456,8 @@ impl Upload for S3Upload {
     }
 }
 
-/// Represents the S3 storage backend.
-pub struct S3StorageBackend {
+/// Represents the Google Cloud Storage backend.
+pub struct GoogleStorageBackend {
     /// The config to use for transferring files.
     config: Arc<Config>,
     /// The HTTP client to use for transferring files.
@@ -545,8 +466,8 @@ pub struct S3StorageBackend {
     events: Option<broadcast::Sender<TransferEvent>>,
 }
 
-impl S3StorageBackend {
-    /// Constructs a new S3 storage backend.
+impl GoogleStorageBackend {
+    /// Constructs a new Google Cloud Storage backend.
     pub fn new(config: Config, events: Option<broadcast::Sender<TransferEvent>>) -> Self {
         Self {
             config: Arc::new(config),
@@ -556,8 +477,8 @@ impl S3StorageBackend {
     }
 }
 
-impl StorageBackend for S3StorageBackend {
-    type Upload = S3Upload;
+impl StorageBackend for GoogleStorageBackend {
+    type Upload = GoogleUpload;
 
     fn config(&self) -> &Config {
         &self.config
@@ -574,7 +495,7 @@ impl StorageBackend for S3StorageBackend {
         // Return the block size if one was specified
         if let Some(size) = self.config.block_size {
             if size > MAX_PART_SIZE {
-                return Err(S3Error::InvalidBlockSize.into());
+                return Err(GoogleError::InvalidBlockSize.into());
             }
 
             return Ok(size);
@@ -595,7 +516,7 @@ impl StorageBackend for S3StorageBackend {
         // whatever will fit
         let block_size: u64 = file_size.div_ceil(MAX_PARTS);
         if block_size > MAX_PART_SIZE {
-            return Err(S3Error::MaximumSizeExceeded.into());
+            return Err(GoogleError::MaximumSizeExceeded.into());
         }
 
         Ok(block_size)
@@ -614,8 +535,8 @@ impl StorageBackend for S3StorageBackend {
 
     async fn head(&self, url: Url) -> Result<Response> {
         debug_assert!(
-            is_s3_url(&url) && url.scheme() == "https",
-            "expected S3 HTTPS URL"
+            is_gcs_url(&url) && url.scheme() == "https",
+            "expected Google Cloud Storage HTTPS URL"
         );
 
         debug!("sending HEAD request for `{url}`", url = url.display());
@@ -625,11 +546,14 @@ impl StorageBackend for S3StorageBackend {
             .client
             .head(url)
             .header(header::USER_AGENT, USER_AGENT)
-            .header(AWS_DATE_HEADER, date.format("%Y%m%dT%H%M%SZ").to_string())
-            .header(AWS_CONTENT_SHA256_HEADER, sha256_hex_string([]))
+            .header(
+                GOOGLE_DATE_HEADER,
+                date.format("%Y%m%dT%H%M%SZ").to_string(),
+            )
+            .header(GOOGLE_CONTENT_SHA256_HEADER, sha256_hex_string([]))
             .build()?;
 
-        if let Some(auth) = &self.config.s3.auth {
+        if let Some(auth) = &self.config.google.auth {
             append_authentication_header(auth, date, &mut request)?;
         }
 
@@ -643,8 +567,8 @@ impl StorageBackend for S3StorageBackend {
 
     async fn get(&self, url: Url) -> Result<Response> {
         debug_assert!(
-            is_s3_url(&url) && url.scheme() == "https",
-            "expected S3 HTTPS URL"
+            is_gcs_url(&url) && url.scheme() == "https",
+            "expected Google Cloud Storage HTTPS URL"
         );
 
         debug!("sending GET request for `{url}`", url = url.display());
@@ -654,11 +578,14 @@ impl StorageBackend for S3StorageBackend {
             .client
             .get(url)
             .header(header::USER_AGENT, USER_AGENT)
-            .header(AWS_DATE_HEADER, date.format("%Y%m%dT%H%M%SZ").to_string())
-            .header(AWS_CONTENT_SHA256_HEADER, sha256_hex_string([]))
+            .header(
+                GOOGLE_DATE_HEADER,
+                date.format("%Y%m%dT%H%M%SZ").to_string(),
+            )
+            .header(GOOGLE_CONTENT_SHA256_HEADER, sha256_hex_string([]))
             .build()?;
 
-        if let Some(auth) = &self.config.s3.auth {
+        if let Some(auth) = &self.config.google.auth {
             append_authentication_header(auth, date, &mut request)?;
         }
 
@@ -672,8 +599,8 @@ impl StorageBackend for S3StorageBackend {
 
     async fn get_range(&self, url: Url, etag: &str, range: Range<u64>) -> Result<Response> {
         debug_assert!(
-            is_s3_url(&url) && url.scheme() == "https",
-            "expected S3 HTTPS URL"
+            is_gcs_url(&url) && url.scheme() == "https",
+            "expected Google Cloud Storage HTTPS URL"
         );
 
         debug!(
@@ -689,8 +616,11 @@ impl StorageBackend for S3StorageBackend {
             .client
             .get(url)
             .header(header::USER_AGENT, USER_AGENT)
-            .header(AWS_DATE_HEADER, date.format("%Y%m%dT%H%M%SZ").to_string())
-            .header(AWS_CONTENT_SHA256_HEADER, sha256_hex_string([]))
+            .header(
+                GOOGLE_DATE_HEADER,
+                date.format("%Y%m%dT%H%M%SZ").to_string(),
+            )
+            .header(GOOGLE_CONTENT_SHA256_HEADER, sha256_hex_string([]))
             .header(
                 header::RANGE,
                 format!("bytes={start}-{end}", start = range.start, end = range.end),
@@ -698,7 +628,7 @@ impl StorageBackend for S3StorageBackend {
             .header(header::IF_RANGE, etag)
             .build()?;
 
-        if let Some(auth) = &self.config.s3.auth {
+        if let Some(auth) = &self.config.google.auth {
             append_authentication_header(auth, date, &mut request)?;
         }
 
@@ -711,16 +641,15 @@ impl StorageBackend for S3StorageBackend {
     }
 
     async fn walk(&self, mut url: Url) -> Result<Vec<String>> {
-        // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
+        // See: https://cloud.google.com/storage/docs/xml-api/get-bucket-list
 
         debug_assert!(
-            is_s3_url(&url) && url.scheme() == "https",
-            "expected S3 HTTPS URL"
+            is_gcs_url(&url) && url.scheme() == "https",
+            "expected Google Cloud Storage HTTPS URL"
         );
 
         debug!("walking `{url}` as a directory", url = url.display());
 
-        let region = url.region();
         let (bucket, path) = url.bucket_and_path();
 
         // The prefix should end with `/` to signify a directory.
@@ -728,8 +657,8 @@ impl StorageBackend for S3StorageBackend {
         prefix.push('/');
 
         // Format the request to always use the virtual-host style URL
-        url.set_host(Some(&format!("{bucket}.s3.{region}.{AWS_ROOT_DOMAIN}")))
-            .map_err(|_| S3Error::InvalidBucketName)?;
+        url.set_host(Some(&format!("{bucket}.{GOOGLE_ROOT_DOMAIN}")))
+            .map_err(|_| GoogleError::InvalidBucketName)?;
         url.set_path("/");
 
         {
@@ -755,11 +684,14 @@ impl StorageBackend for S3StorageBackend {
                 .client
                 .get(url)
                 .header(header::USER_AGENT, USER_AGENT)
-                .header(AWS_DATE_HEADER, date.format("%Y%m%dT%H%M%SZ").to_string())
-                .header(AWS_CONTENT_SHA256_HEADER, sha256_hex_string([]))
+                .header(
+                    GOOGLE_DATE_HEADER,
+                    date.format("%Y%m%dT%H%M%SZ").to_string(),
+                )
+                .header(GOOGLE_CONTENT_SHA256_HEADER, sha256_hex_string([]))
                 .build()?;
 
-            if let Some(auth) = &self.config.s3.auth {
+            if let Some(auth) = &self.config.google.auth {
                 append_authentication_header(auth, date, &mut request)?;
             }
 
@@ -774,7 +706,7 @@ impl StorageBackend for S3StorageBackend {
             let results: ListBucketResult = match serde_xml_rs::from_str(&text) {
                 Ok(response) => response,
                 Err(e) => {
-                    return Err(S3Error::UnexpectedResponse { status, error: e }.into());
+                    return Err(GoogleError::UnexpectedResponse { status, error: e }.into());
                 }
             };
 
@@ -805,11 +737,11 @@ impl StorageBackend for S3StorageBackend {
     }
 
     async fn new_upload(&self, url: Url) -> Result<Self::Upload> {
-        // See: https://docs.aws.amazon.com/AmazonS3/latest/API/API_CreateMultipartUpload.html
+        // See: https://cloud.google.com/storage/docs/xml-api/post-object-multipart
 
         debug_assert!(
-            is_s3_url(&url) && url.scheme() == "https",
-            "expected S3 HTTPS URL"
+            is_gcs_url(&url) && url.scheme() == "https",
+            "expected Google Cloud Storage HTTPS URL"
         );
 
         debug!("sending POST request for `{url}`", url = url.display());
@@ -823,11 +755,15 @@ impl StorageBackend for S3StorageBackend {
             .client
             .post(create)
             .header(header::USER_AGENT, USER_AGENT)
-            .header(AWS_DATE_HEADER, date.format("%Y%m%dT%H%M%SZ").to_string())
-            .header(AWS_CONTENT_SHA256_HEADER, sha256_hex_string([]))
+            .header(header::CONTENT_LENGTH, "0")
+            .header(
+                GOOGLE_DATE_HEADER,
+                date.format("%Y%m%dT%H%M%SZ").to_string(),
+            )
+            .header(GOOGLE_CONTENT_SHA256_HEADER, sha256_hex_string([]))
             .build()?;
 
-        if let Some(auth) = &self.config.s3.auth {
+        if let Some(auth) = &self.config.google.auth {
             append_authentication_header(auth, date, &mut request)?;
         }
 
@@ -846,11 +782,11 @@ impl StorageBackend for S3StorageBackend {
         let id = match serde_xml_rs::from_str::<InitiateMultipartUploadResult>(&text) {
             Ok(response) => response.upload_id,
             Err(e) => {
-                return Err(S3Error::UnexpectedResponse { status, error: e }.into());
+                return Err(GoogleError::UnexpectedResponse { status, error: e }.into());
             }
         };
 
-        Ok(S3Upload {
+        Ok(GoogleUpload {
             config: self.config.clone(),
             client: self.client.clone(),
             url,

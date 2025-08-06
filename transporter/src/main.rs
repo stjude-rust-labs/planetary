@@ -39,6 +39,8 @@ use clap::Parser;
 use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
 use cloud::Config;
+use cloud::GoogleAuthConfig;
+use cloud::GoogleConfig;
 use cloud::S3AuthConfig;
 use cloud::S3Config;
 use cloud::TransferEvent;
@@ -140,6 +142,20 @@ struct Args {
     /// The default AWS region.
     #[clap(long, env, value_name = "REGION")]
     aws_default_region: Option<String>,
+
+    /// The Google Cloud Storage HMAC access key to use.
+    #[clap(long, env, value_name = "KEY")]
+    google_hmac_access_key: Option<String>,
+
+    /// The Google Cloud Storage HMAC secret to use.
+    #[clap(
+        long,
+        env,
+        hide_env_values(true),
+        value_name = "SECRET",
+        requires = "google_hmac_access_key"
+    )]
+    google_hmac_secret: Option<SecretString>,
 }
 
 impl Args {
@@ -564,6 +580,14 @@ async fn run() -> Result<()> {
             None
         };
 
+    let google_auth = if let (Some(access_key), Some(secret)) =
+        (args.google_hmac_access_key, args.google_hmac_secret)
+    {
+        Some(GoogleAuthConfig { access_key, secret })
+    } else {
+        None
+    };
+
     let config = Config {
         block_size: args.block_size,
         parallelism: args.parallelism,
@@ -572,6 +596,7 @@ async fn run() -> Result<()> {
             region: args.aws_default_region,
             auth: s3_auth,
         },
+        google: GoogleConfig { auth: google_auth },
     };
 
     match args.mode {

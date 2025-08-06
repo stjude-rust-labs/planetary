@@ -21,6 +21,15 @@ pub struct S3AuthConfig {
     pub secret_access_key: SecretString,
 }
 
+/// Represents authentication configuration for Google Cloud Storage.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GoogleAuthConfig {
+    /// The HMAC Access Key to use.
+    pub access_key: String,
+    /// The HMAC Secret to use.
+    pub secret: SecretString,
+}
+
 /// Represents configuration for AWS S3.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct S3Config {
@@ -34,6 +43,16 @@ pub struct S3Config {
     /// If `None`, no authentication header will be put on requests.
     #[serde(default)]
     pub auth: Option<S3AuthConfig>,
+}
+
+/// Represents configuration for Google Cloud Storage.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GoogleConfig {
+    /// The auth to use for Google Cloud Storage.
+    ///
+    /// If `None`, no authentication header will be put on requests.
+    #[serde(default)]
+    pub auth: Option<GoogleAuthConfig>,
 }
 
 /// Configuration used in a cloud copy operation.
@@ -57,6 +76,9 @@ pub struct Config {
     /// The AWS S3 configuration.
     #[serde(default)]
     pub s3: S3Config,
+    /// The Google Cloud Storage configuration.
+    #[serde(default)]
+    pub google: GoogleConfig,
 }
 
 impl Config {

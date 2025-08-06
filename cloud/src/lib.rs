@@ -30,6 +30,8 @@ use url::Url;
 
 use crate::backend::azure::AzureBlobStorageBackend;
 use crate::backend::generic::GenericStorageBackend;
+use crate::backend::google::GoogleError;
+use crate::backend::google::GoogleStorageBackend;
 use crate::backend::s3::S3StorageBackend;
 use crate::transfer::FileTransfer;
 
@@ -275,6 +277,9 @@ pub enum Error {
     /// An S3 error occurred.
     #[error(transparent)]
     S3(#[from] S3Error),
+    /// A Google Cloud Storage error occurred.
+    #[error(transparent)]
+    Google(#[from] GoogleError),
     /// An I/O error occurred.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -395,7 +400,16 @@ pub enum TransferEvent {
 ///
 /// # Google Cloud Storage
 ///
-/// Support coming soon.
+/// Supported remote URLs for Google Cloud Storage:
+///
+/// * `gs` schemed URLs in the format: `gs://<bucket>/<object>`.
+/// * `https` schemed URLs in the format `https://<bucket>.storage.googleapis.com/<object>`.
+/// * `https` schemed URLs in the format `https://storage.googleapis.com/<bucket>/<object>`.
+///
+/// If authentication is required, the provided `Config` must have Google
+/// authentication information.
+///
+/// Note that HMAC authentication is used for Google Cloud Storage access.
 pub async fn copy(
     config: Config,
     source: impl Into<Location<'_>>,
@@ -430,6 +444,10 @@ pub async fn copy(
                 let destination = backend::s3::rewrite_url(&config, destination)?;
                 let transfer = FileTransfer::new(S3StorageBackend::new(config, events));
                 transfer.upload(source, destination).await
+            } else if backend::google::is_gcs_url(&destination) {
+                let destination = backend::google::rewrite_url(destination)?;
+                let transfer = FileTransfer::new(GoogleStorageBackend::new(config, events));
+                transfer.upload(source, destination).await
             } else {
                 Err(Error::UnsupportedUrl(destination))
             }
@@ -454,6 +472,10 @@ pub async fn copy(
             } else if backend::s3::is_s3_url(&source) {
                 let source = backend::s3::rewrite_url(&config, source)?;
                 let transfer = FileTransfer::new(S3StorageBackend::new(config, events));
+                transfer.download(source, destination).await
+            } else if backend::google::is_gcs_url(&source) {
+                let source = backend::google::rewrite_url(source)?;
+                let transfer = FileTransfer::new(GoogleStorageBackend::new(config, events));
                 transfer.download(source, destination).await
             } else {
                 let transfer = FileTransfer::new(GenericStorageBackend::new(config, events));
