@@ -7,9 +7,20 @@ metadata:
   annotations:
     "helm.sh/hook": test
 spec:
+  resources:
+    requests:
+      cpu: 1000m
+    limits:
+      memory: 256MiB
   containers:
     - name: wget
-      image: busybox
+      image: busybox:1.37.0
       command: ['wget']
-      args: ['http://planetary-api:{{ .Values.api.service.port }}']
+      args:
+        - "-O -"
+        - 'http://planetary-api:{{ .Values.api.service.port }}'
+      securityContext:
+        readOnlyRootFilesystem: true
+        runAsUser: 1000
+        runAsNonRoot: true
   restartPolicy: Never

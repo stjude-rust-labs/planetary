@@ -6,14 +6,20 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::State as ExtractState;
 use axum::routing::delete;
+use axum::routing::get;
 use axum::routing::patch;
 use axum::routing::post;
+use axum::routing::put;
 use bon::Builder;
 use planetary_db::Database;
+use planetary_db::TaskIo;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
+use planetary_server::Json;
 use planetary_server::Path;
 use planetary_server::ServerResponse;
+use tes::v1::types::responses::OutputFile;
+use url::Url;
 
 use crate::orchestrator::Monitor;
 use crate::orchestrator::TaskOrchestrator;
@@ -43,6 +49,10 @@ pub struct Server {
     #[builder(into)]
     pod_name: String,
 
+    /// The URL of the orchestrator service.
+    #[builder(into)]
+    service_url: Url,
+
     /// The TES database to use for the server.
     #[builder(name = "shared_database")]
     database: Arc<dyn Database>,
@@ -69,9 +79,9 @@ pub struct Server {
     #[builder(into)]
     transporter_cpu: Option<i32>,
 
-    /// The amount of memory (in GiB) to request for transporter pods.
+    /// The amount of memory (in GB) to request for transporter pods.
     ///
-    /// Defaults to `2.0` GiB.
+    /// Defaults to `1.07374182` GB (i.e 1 GiB).
     #[builder(into)]
     transporter_memory: Option<f64>,
 }
@@ -105,6 +115,8 @@ impl Server {
                 Router::new()
                     .route("/v1/tasks/{tes_id}", post(Self::start_task))
                     .route("/v1/tasks/{tes_id}", delete(Self::cancel_task))
+                    .route("/v1/tasks/{tes_id}/io", get(Self::get_task_io))
+                    .route("/v1/tasks/{tes_id}/outputs", put(Self::put_task_outputs))
                     .route("/v1/pods/{name}", patch(Self::adopt_pod))
             ])
             .build();
@@ -113,6 +125,7 @@ impl Server {
             TaskOrchestrator::new(
                 self.database,
                 self.pod_name,
+                self.service_url,
                 self.tasks_namespace,
                 self.storage_class,
                 TransporterInfo {
@@ -136,24 +149,64 @@ impl Server {
     }
 
     /// Implements the API endpoint for starting a task.
+    ///
+    /// This endpoint is used by the TES API service.
     async fn start_task(
         Path(tes_id): Path<String>,
         ExtractState(state): ExtractState<State>,
     ) -> ServerResponse<()> {
-        state.orchestrator.start_task(&tes_id).await?;
+        tokio::spawn(async move {
+            state.orchestrator.start_task(&tes_id).await;
+        });
+
         Ok(())
     }
 
     /// Implements the API endpoint for canceling a task.
+    ///
+    /// This endpoint is used by the TES API service.
     async fn cancel_task(
         Path(tes_id): Path<String>,
         ExtractState(state): ExtractState<State>,
     ) -> ServerResponse<()> {
-        state.orchestrator.cancel_task(&tes_id).await?;
+        tokio::spawn(async move {
+            state.orchestrator.cancel_task(&tes_id).await;
+        });
+
+        Ok(())
+    }
+
+    /// Implements the API endpoint for getting a task's inputs and outputs.
+    ///
+    /// This endpoint is used by the transporter.
+    async fn get_task_io(
+        Path(tes_id): Path<String>,
+        ExtractState(state): ExtractState<State>,
+    ) -> ServerResponse<Json<TaskIo>> {
+        Ok(Json(
+            state.orchestrator.database().get_task_io(&tes_id).await?,
+        ))
+    }
+
+    /// Implements the API endpoint for updating a task's output files.
+    ///
+    /// This endpoint is used by the transporter.
+    async fn put_task_outputs(
+        ExtractState(state): ExtractState<State>,
+        Path(tes_id): Path<String>,
+        Json(files): Json<Vec<OutputFile>>,
+    ) -> ServerResponse<()> {
+        state
+            .orchestrator
+            .database()
+            .update_task_output_files(&tes_id, &files)
+            .await?;
         Ok(())
     }
 
     /// Implements the API endpoint for adopting a pod to this orchestrator.
+    ///
+    /// This endpoint is used by the monitor.
     async fn adopt_pod(
         Path(name): Path<String>,
         ExtractState(state): ExtractState<State>,

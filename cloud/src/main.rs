@@ -40,7 +40,7 @@ pub struct CopyCommand {
     pub block_size: Option<u64>,
 
     /// The parallelism level for network operations; defaults to the host's
-    /// available parallelism.
+    /// available parallelism multiplied by 4.
     #[clap(long, value_name = "NUM")]
     pub parallelism: Option<usize>,
 

@@ -31,6 +31,7 @@ diesel::table! {
         stdout -> Nullable<Text>,
         stderr -> Nullable<Text>,
         exit_code -> Nullable<Int4>,
+        creation_time -> Timestamptz,
     }
 }
 

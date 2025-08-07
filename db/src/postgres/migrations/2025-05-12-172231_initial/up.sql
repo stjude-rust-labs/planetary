@@ -79,6 +79,7 @@ CREATE TABLE pods (
     stdout TEXT NULL,
     stderr TEXT NULL,
     exit_code INTEGER NULL,
+    creation_time TIMESTAMPTZ NOT NULL DEFAULT (now() at time zone 'utc'),
     CONSTRAINT pods_name_unique UNIQUE (name)
 );
 

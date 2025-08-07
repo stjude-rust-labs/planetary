@@ -2256,6 +2256,7 @@ dependencies = [
  "serde_json",
  "tes",
  "tokio",
+ "tokio-retry2",
  "tower",
  "tower-http",
  "tracing",
@@ -2281,6 +2282,7 @@ dependencies = [
  "serde_json",
  "tes",
  "thiserror 2.0.12",
+ "tokio",
  "tracing",
 ]
 
@@ -2337,6 +2339,7 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2373,6 +2376,7 @@ dependencies = [
  "secrecy",
  "tes",
  "tokio",
+ "tokio-retry2",
  "tracing",
  "tracing-indicatif",
  "tracing-log",
