@@ -1136,12 +1136,11 @@ impl TaskOrchestrator {
         debug!("pod `{name}` is in state `{pod_state}`");
 
         // Check for an initializing pod that is failing to pull its image.
-        if pod_state == PodState::Initializing {
-            if let Some(state) = pod.first_container_state().and_then(|s| s.waiting.as_ref()) {
-                if state.reason.as_deref() == Some("ErrImagePull") {
-                    return self.handle_image_pull_error(tes_id, name, state).await;
-                }
-            }
+        if pod_state == PodState::Initializing
+            && let Some(state) = pod.first_container_state().and_then(|s| s.waiting.as_ref())
+            && state.reason.as_deref() == Some("ErrImagePull")
+        {
+            return self.handle_image_pull_error(tes_id, name, state).await;
         }
 
         // Update the pod in the database

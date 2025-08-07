@@ -150,32 +150,32 @@ fn validate_task(task: &RequestTask) -> Result<()> {
             _ => bail!("executor command must have at least one entry"),
         }
 
-        if let Some(stdin) = &executor.stdin {
-            if !Path::new(stdin).is_absolute() {
-                bail!("executor stdin path must be a absolute");
-            }
+        if let Some(stdin) = &executor.stdin
+            && !Path::new(stdin).is_absolute()
+        {
+            bail!("executor stdin path must be a absolute");
         }
 
-        if let Some(stdout) = &executor.stdout {
-            if !Path::new(stdout).is_absolute() {
-                bail!("executor stdout path must be a absolute");
-            }
+        if let Some(stdout) = &executor.stdout
+            && !Path::new(stdout).is_absolute()
+        {
+            bail!("executor stdout path must be a absolute");
         }
 
-        if let Some(stderr) = &executor.stderr {
-            if !Path::new(stderr).is_absolute() {
-                bail!("executor stderr path must be a absolute");
-            }
+        if let Some(stderr) = &executor.stderr
+            && !Path::new(stderr).is_absolute()
+        {
+            bail!("executor stderr path must be a absolute");
         }
 
         Ok(())
     }
 
     fn validate_resources(resources: &Resources) -> Result<()> {
-        if let Some(cpus) = resources.cpu_cores {
-            if cpus <= 0 {
-                bail!("task resource cpu cores must be greater than zero");
-            }
+        if let Some(cpus) = resources.cpu_cores
+            && cpus <= 0
+        {
+            bail!("task resource cpu cores must be greater than zero");
         }
 
         if let Some(ram) = resources.ram_gb {

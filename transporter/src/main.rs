@@ -529,11 +529,11 @@ async fn upload_directory(
         }
 
         // If there's a pattern, ensure the container path matches it
-        if let Some(pattern) = &pattern {
-            if !pattern.matches(container_path) {
-                info!("skipping output file `{container_path}` as it does not match the pattern");
-                continue;
-            }
+        if let Some(pattern) = &pattern
+            && !pattern.matches(container_path)
+        {
+            info!("skipping output file `{container_path}` as it does not match the pattern");
+            continue;
         }
 
         info!(
