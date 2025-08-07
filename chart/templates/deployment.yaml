@@ -21,9 +21,23 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                - api
+            topologyKey: "kubernetes.io/hostname"
       containers:
         - name: planetary-api
           image: "{{ .Values.api.image.name }}:{{ .Values.api.image.tag | default .Chart.AppVersion }}"
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsUser: 1000
+            runAsNonRoot: true
           ports:
             - name: http
               containerPort: 8080
@@ -39,6 +53,10 @@ spec:
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
           env:
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
           - name: RUST_LOG
             value: {{ .Values.api.log }}
           - name: DATABASE_USER
@@ -55,7 +73,7 @@ spec:
           - name: DATABASE_NAME
             value: {{ .Values.database.name }}
           - name: DATABASE_URL
-            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)
+            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?application_name=$(POD_NAME)
           - name: ORCHESTRATOR_URL
             value: "http://planetary-orchestrator:{{ .Values.orchestrator.service.port }}"
 ---
@@ -82,10 +100,24 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values:
+                - orchestrator
+            topologyKey: "kubernetes.io/hostname"
       serviceAccountName: {{ .Values.orchestrator.account.name }}
       containers:
         - name: planetary-orchestrator
           image: "{{ .Values.orchestrator.image.name }}:{{ .Values.orchestrator.image.tag | default .Chart.AppVersion }}"
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsUser: 1000
+            runAsNonRoot: true
           ports:
             - name: http
               containerPort: 8080
@@ -107,6 +139,8 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.name
+          - name: SERVICE_URL
+            value: "http://planetary-orchestrator.{{ .Release.Namespace }}:8080"
           - name: DATABASE_USER
             value: {{ .Values.database.user }}
           - name: DATABASE_PASSWORD
@@ -121,7 +155,7 @@ spec:
           - name: DATABASE_NAME
             value: {{ .Values.database.name }}
           - name: DATABASE_URL
-            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)
+            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?application_name=$(POD_NAME)
           - name: TRANSPORTER_IMAGE
             value: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
           - name: TASKS_NAMESPACE
@@ -158,6 +192,10 @@ spec:
       containers:
         - name: planetary-monitor
           image: "{{ .Values.monitor.image.name }}:{{ .Values.monitor.image.tag | default .Chart.AppVersion }}"
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsUser: 1000
+            runAsNonRoot: true
           ports:
             - name: http
               containerPort: 8080
@@ -193,7 +231,7 @@ spec:
           - name: DATABASE_NAME
             value: {{ .Values.database.name }}
           - name: DATABASE_URL
-            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)
+            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?application_name=$(POD_NAME)
           - name: PLANETARY_NAMESPACE
             value: "{{ .Release.Namespace }}"
           - name: TASKS_NAMESPACE

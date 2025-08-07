@@ -569,17 +569,16 @@ pub async fn handle_events(
                     }
                 }
                 Ok(TransferEvent::BlockProgress { id, block, transferred }) => {
-                    if let Some(transfer) = transfers.get_mut(&id) {
-                        if let Some(block) = transfer.block_transfers.get_mut(&block) {
+                    if let Some(transfer) = transfers.get_mut(&id)
+                        && let Some(block) = transfer.block_transfers.get_mut(&block) {
                             transfer.transferred += transferred;
                             block.transferred += transferred;
                             transfer.bar.pb_set_position(transfer.transferred);
                         }
-                    }
                 }
                 Ok(TransferEvent::BlockCompleted { id, block, failed }) => {
-                    if let Some(transfer) = transfers.get_mut(&id) {
-                        if let Some(block) = transfer.block_transfers.get_mut(&block) {
+                    if let Some(transfer) = transfers.get_mut(&id)
+                        && let Some(block) = transfer.block_transfers.get_mut(&block) {
                             transfer.transferred -= block.transferred;
                             if !failed && let Some(size) = block.size {
                                 transfer.transferred += size;
@@ -587,7 +586,6 @@ pub async fn handle_events(
 
                             transfer.bar.pb_set_position(transfer.transferred);
                         }
-                    }
                 }
                 Ok(TransferEvent::TransferCompleted { id, .. }) => {
                     transfers.remove(&id);

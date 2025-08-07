@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bon::Builder;
 use planetary_db::Database;
@@ -9,10 +10,36 @@ use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
 use reqwest::Client;
 use tes::v1::types::responses::ServiceInfo;
+use tokio_retry2::strategy::ExponentialFactorBackoff;
+use tokio_retry2::strategy::MaxInterval;
+use tracing::warn;
 use url::Url;
 
 mod info;
 mod tasks;
+
+/// Gets an iterator over the retry durations for network operations.
+///
+/// Retries use an exponential power of 2 backoff, starting at 1 second with
+/// a maximum duration of 60 seconds.
+fn retry_durations() -> impl Iterator<Item = Duration> {
+    const INITIAL_DELAY_MILLIS: u64 = 1000;
+    const BASE_FACTOR: f64 = 2.0;
+    const MAX_DURATION: Duration = Duration::from_secs(60);
+    const RETRIES: usize = 5;
+
+    ExponentialFactorBackoff::from_millis(INITIAL_DELAY_MILLIS, BASE_FACTOR)
+        .max_duration(MAX_DURATION)
+        .take(RETRIES)
+}
+
+/// Helper for notifying that a network operation failed and will be retried.
+fn notify_retry(e: &reqwest::Error, duration: Duration) {
+    warn!(
+        "network operation failed: {e} (retrying after {duration} seconds)",
+        duration = duration.as_secs()
+    );
+}
 
 /// The state for the server.
 #[derive(Clone)]

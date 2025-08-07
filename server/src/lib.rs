@@ -53,11 +53,7 @@ fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response {
         error!("server panicked: unknown panic message");
     };
 
-    Error {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        message: "internal server error".to_string(),
-    }
-    .into_response()
+    Error::internal().into_response()
 }
 
 /// An extractor that wraps the JSON extractor of Axum.
@@ -110,11 +106,9 @@ impl Error {
             message: message.into(),
         }
     }
-}
 
-impl From<anyhow::Error> for Error {
-    fn from(e: anyhow::Error) -> Self {
-        tracing::error!("{e:#}");
+    /// Returns an "internal server error" JSON error response.
+    pub fn internal() -> Error {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: StatusCode::INTERNAL_SERVER_ERROR.to_string(),
@@ -122,13 +116,17 @@ impl From<anyhow::Error> for Error {
     }
 }
 
+impl From<anyhow::Error> for Error {
+    fn from(e: anyhow::Error) -> Self {
+        tracing::error!("{e:#}");
+        Self::internal()
+    }
+}
+
 impl From<reqwest::Error> for Error {
     fn from(e: reqwest::Error) -> Self {
         tracing::error!("{e:#}");
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: StatusCode::INTERNAL_SERVER_ERROR.to_string(),
-        }
+        Self::internal()
     }
 }
 
@@ -142,18 +140,12 @@ impl From<planetary_db::postgres::Error> for Error {
             Pool(e) => {
                 // Log the error but do not return it to the client
                 tracing::error!("database connection error: {e:#}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    StatusCode::INTERNAL_SERVER_ERROR.to_string(),
-                )
+                return Self::internal();
             }
             Diesel(e) => {
                 // Log the error but do not return it to the client
                 tracing::error!("database error: {e:#}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    StatusCode::INTERNAL_SERVER_ERROR.to_string(),
-                )
+                return Self::internal();
             }
         };
 

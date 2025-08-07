@@ -9,7 +9,8 @@ use anyhow::Result;
 use anyhow::bail;
 use chrono::DateTime;
 use chrono::Utc;
-use secrecy::SecretString;
+use serde::Deserialize;
+use serde::Serialize;
 use tes::v1::types::requests::GetTaskParams;
 use tes::v1::types::requests::ListTasksParams;
 use tes::v1::types::requests::Task as RequestTask;
@@ -46,7 +47,7 @@ pub enum Error {
 pub type DatabaseResult<T> = Result<T, Error>;
 
 /// Represents information about a task's inputs and outputs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskIo {
     /// The list of inputs for the task.
     pub inputs: Vec<Input>,
@@ -168,9 +169,6 @@ impl ExecutingPod {
 /// An abstraction for the planetary database.
 #[async_trait::async_trait]
 pub trait Database: Send + Sync + 'static {
-    /// Gets the URL of the database.
-    fn url(&self) -> &SecretString;
-
     /// Inserts a task into the database.
     ///
     /// Note: it is expected that the newly inserted task has the `UNKNOWN`
@@ -219,8 +217,8 @@ pub trait Database: Send + Sync + 'static {
     /// Inserts a pod into the database.
     ///
     /// Returns `Ok(true)` if the pod was inserted or `Ok(false)` if the pod
-    /// could not be inserted because the associated task is canceling or
-    /// canceled.
+    /// could not be inserted because the associated task is canceling,
+    /// canceled, or in an error state.
     async fn insert_pod(
         &self,
         tes_id: &str,

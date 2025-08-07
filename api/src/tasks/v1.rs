@@ -29,7 +29,12 @@ use tes::v1::types::task::IoType;
 use tes::v1::types::task::Output;
 use tes::v1::types::task::Resources;
 use tes::v1::types::task::State as TesState;
+use tokio_retry2::Retry;
+use tokio_retry2::RetryError;
 use url::Url;
+
+use crate::notify_retry;
+use crate::retry_durations;
 
 /// Performs validation on the request.
 fn validate_task(task: &RequestTask) -> Result<()> {
@@ -145,32 +150,32 @@ fn validate_task(task: &RequestTask) -> Result<()> {
             _ => bail!("executor command must have at least one entry"),
         }
 
-        if let Some(stdin) = &executor.stdin {
-            if !Path::new(stdin).is_absolute() {
-                bail!("executor stdin path must be a absolute");
-            }
+        if let Some(stdin) = &executor.stdin
+            && !Path::new(stdin).is_absolute()
+        {
+            bail!("executor stdin path must be a absolute");
         }
 
-        if let Some(stdout) = &executor.stdout {
-            if !Path::new(stdout).is_absolute() {
-                bail!("executor stdout path must be a absolute");
-            }
+        if let Some(stdout) = &executor.stdout
+            && !Path::new(stdout).is_absolute()
+        {
+            bail!("executor stdout path must be a absolute");
         }
 
-        if let Some(stderr) = &executor.stderr {
-            if !Path::new(stderr).is_absolute() {
-                bail!("executor stderr path must be a absolute");
-            }
+        if let Some(stderr) = &executor.stderr
+            && !Path::new(stderr).is_absolute()
+        {
+            bail!("executor stderr path must be a absolute");
         }
 
         Ok(())
     }
 
     fn validate_resources(resources: &Resources) -> Result<()> {
-        if let Some(cpus) = resources.cpu_cores {
-            if cpus <= 0 {
-                bail!("task resource cpu cores must be greater than zero");
-            }
+        if let Some(cpus) = resources.cpu_cores
+            && cpus <= 0
+        {
+            bail!("task resource cpu cores must be greater than zero");
         }
 
         if let Some(ram) = resources.ram_gb {
@@ -263,17 +268,28 @@ pub async fn create_task(
     let id = state.database.insert_task(&task).await?;
 
     // Notify an orchestrator service to start the task
-    let response = state
-        .client
-        .post(
+    Retry::spawn_notify(
+        retry_durations(),
+        || async {
+            // Retry the operation is there is a problem sending the request to the server
+            // Don't retry if the service returned an error response
             state
-                .orchestrator_service
-                .join(&format!("/v1/tasks/{id}"))
-                .expect("URL should join"),
-        )
-        .send()
-        .await?;
-    response.error_for_status()?;
+                .client
+                .post(
+                    state
+                        .orchestrator_service
+                        .join(&format!("/v1/tasks/{id}"))
+                        .expect("URL should join"),
+                )
+                .send()
+                .await
+                .map_err(RetryError::transient)?
+                .error_for_status()
+                .map_err(RetryError::permanent)
+        },
+        notify_retry,
+    )
+    .await?;
 
     Ok(Json(CreatedTask { id }))
 }
@@ -343,17 +359,28 @@ pub async fn cancel_task(
     }
 
     // Notify the orchestrator service to cancel the task
-    let response = state
-        .client
-        .delete(
+    Retry::spawn_notify(
+        retry_durations(),
+        || async {
+            // Retry the operation is there is a problem sending the request to the server
+            // Don't retry if the service returned an error response
             state
-                .orchestrator_service
-                .join(&format!("/v1/tasks/{id}"))
-                .expect("URL should join"),
-        )
-        .send()
-        .await?;
-    response.error_for_status()?;
+                .client
+                .delete(
+                    state
+                        .orchestrator_service
+                        .join(&format!("/v1/tasks/{id}"))
+                        .expect("URL should join"),
+                )
+                .send()
+                .await
+                .map_err(RetryError::transient)?
+                .error_for_status()
+                .map_err(RetryError::permanent)
+        },
+        notify_retry,
+    )
+    .await?;
 
     // The spec uses a 200 response with an empty JSON object
     Ok(Json(serde_json::Value::Object(Default::default())))

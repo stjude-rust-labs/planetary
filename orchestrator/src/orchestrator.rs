@@ -49,7 +49,6 @@ use planetary_db::PodKind;
 use planetary_db::PodState;
 use planetary_db::TaskIo;
 use planetary_db::format_log_message;
-use secrecy::ExposeSecret;
 use tes::v1::types::task::Executor;
 use tes::v1::types::task::IoType;
 use tes::v1::types::task::Resources;
@@ -62,12 +61,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use url::Url;
 
 /// The default namespace for planetary tasks.
 const PLANETARY_TASKS_NAMESPACE: &str = "planetary-tasks";
 
 /// The default storage size, in gigabytes.
-const DEFAULT_STORAGE_SIZE: f64 = 1.0;
+///
+/// Uses a 1 GiB default.
+const DEFAULT_STORAGE_SIZE: f64 = 1.07374182;
 
 /// The name of the volume that pods will attach to for their storage.
 const STORAGE_VOLUME_NAME: &str = "storage";
@@ -116,11 +118,21 @@ const PLANETARY_DELETED_ANNOTATION: &str = "planetary/deleted";
 /// The maximum number of lines to tail for an executor pod's logs.
 const MAX_EXECUTOR_LOG_LINES: i64 = 15;
 
-/// The default cpu request (in cores) for transporter pods.
-const DEFAULT_TRANSPORTER_CPU: i32 = 4;
+/// The default CPU request (in cores) for transporter pods.
+const DEFAULT_TRANSPORTER_CPU: i32 = 1;
 
-/// The default memory request (in GiB) for transporter pods.
-const DEFAULT_TRANSPORTER_MEMORY: f64 = 2.0;
+/// The default memory request (in GB) for transporter pods.
+///
+/// Uses a 1 GiB default.
+const DEFAULT_TRANSPORTER_MEMORY: f64 = 1.07374182;
+
+/// The default CPU request (in cores) for pods.
+const DEFAULT_POD_CPU: i32 = 1;
+
+/// The default memory request (in GB) for pods.
+///
+/// Uses a 1 GiB default.
+const DEFAULT_POD_MEMORY: f64 = 1.07374182;
 
 /// The name of the S3 credentials secret.
 const AWS_S3_CREDENTIALS_SECRET: &str = "aws-s3-credentials";
@@ -153,20 +165,23 @@ fn format_pvc_name(tes_id: &str) -> String {
 
 /// Converts TES resources into K8S resource requirements.
 fn convert_resources(resources: Resources) -> ResourceRequirements {
-    let mut requests = BTreeMap::new();
-    if let Some(cores) = resources.cpu_cores {
-        requests.insert(K8S_KEY_CPU.to_owned(), Quantity(cores.to_string()));
-    }
-
-    if let Some(memory) = resources.ram_gb {
-        requests.insert(
-            K8S_KEY_MEMORY.to_owned(),
-            Quantity(format!("{memory}G", memory = memory.ceil() as u64)),
-        );
-    }
-
     ResourceRequirements {
-        requests: Some(requests),
+        requests: Some(
+            [
+                (
+                    K8S_KEY_CPU.to_string(),
+                    Quantity(resources.cpu_cores.unwrap_or(DEFAULT_POD_CPU).to_string()),
+                ),
+                (
+                    K8S_KEY_MEMORY.to_string(),
+                    Quantity(format!(
+                        "{memory}G",
+                        memory = resources.ram_gb.unwrap_or(DEFAULT_POD_MEMORY).ceil() as u64
+                    )),
+                ),
+            ]
+            .into(),
+        ),
         ..Default::default()
     }
 }
@@ -341,10 +356,7 @@ impl Error {
 impl From<Error> for planetary_server::Error {
     fn from(e: Error) -> Self {
         error!("orchestration error: {e:#}");
-        planetary_server::Error {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: StatusCode::INTERNAL_SERVER_ERROR.to_string(),
-        }
+        planetary_server::Error::internal()
     }
 }
 
@@ -358,7 +370,7 @@ pub struct TransporterInfo {
     pub image: Option<String>,
     /// The number of cpu cores to request for the transporter pod.
     pub cpu: Option<i32>,
-    /// The amount of memory (in GiB) to request for the transporter pod.
+    /// The amount of memory (in GB) to request for the transporter pod.
     pub memory: Option<f64>,
 }
 
@@ -367,6 +379,8 @@ pub struct TransporterInfo {
 pub struct TaskOrchestrator {
     /// The id (pod name) of the orchestrator.
     id: String,
+    /// The URL of the orchestrator service.
+    service_url: Url,
     /// The planetary database used by the orchestrator.
     database: Arc<dyn Database>,
     /// The namespace to use for K8S resources relating to tasks.
@@ -386,6 +400,7 @@ impl TaskOrchestrator {
     pub async fn new(
         database: Arc<dyn Database>,
         id: String,
+        service_url: Url,
         tasks_namespace: Option<String>,
         storage_class: Option<String>,
         transporter: TransporterInfo,
@@ -403,6 +418,7 @@ impl TaskOrchestrator {
 
         Ok(Self {
             id,
+            service_url,
             database,
             tasks_namespace,
             pods,
@@ -410,6 +426,11 @@ impl TaskOrchestrator {
             storage_class,
             transporter,
         })
+    }
+
+    /// Gets the database associated with the orchestrator.
+    pub fn database(&self) -> &Arc<dyn Database> {
+        &self.database
     }
 
     /// Starts a task.
@@ -421,63 +442,97 @@ impl TaskOrchestrator {
     /// 2) Schedule an inputs pod if necessary (if the task has inputs or file
     ///    outputs).
     /// 3) Otherwise, schedule the first executor.
-    pub async fn start_task(&self, tes_id: &str) -> OrchestrationResult<()> {
+    pub async fn start_task(&self, tes_id: &str) {
         debug!("task `{tes_id}` is starting");
 
-        self.database
-            .append_system_log(
-                tes_id,
-                &[&format_log_message!("task `{tes_id}` is starting")],
-            )
-            .await?;
+        let start = async {
+            self.database
+                .append_system_log(
+                    tes_id,
+                    &[&format_log_message!("task `{tes_id}` is starting")],
+                )
+                .await?;
 
-        // Create the storage PVC
-        let task_io = self.create_storage_pvc(tes_id).await?;
+            // Create the storage PVC
+            let task_io = self.create_storage_pvc(tes_id).await?;
 
-        // If there are inputs, start the inputs pod
-        // The inputs pod is also required if there are any outputs that are files; the
-        // inputs pod will create the files so that Kubernetes will mount them as files.
-        if !task_io.inputs.is_empty() || task_io.outputs.iter().any(|o| o.ty == IoType::File) {
-            return self.start_inputs_pod(tes_id).await;
+            // If there are inputs, start the inputs pod
+            // The inputs pod is also required if there are any outputs that are files; the
+            // inputs pod will create the files so that Kubernetes will mount them as files.
+            if !task_io.inputs.is_empty() || task_io.outputs.iter().any(|o| o.ty == IoType::File) {
+                return self.start_inputs_pod(tes_id).await;
+            }
+
+            // Otherwise, start the first executor of the task
+            if !self.start_executor(tes_id, 0, &task_io, false).await? {
+                return Err(Error::System(format!("task `{tes_id}` has no executors")));
+            }
+
+            Ok(())
+        };
+
+        if let Err(e) = start.await {
+            error!("failed to start task `{tes_id}`: {e}");
+
+            self.cleanup_pvc(tes_id);
+
+            self.database
+                .update_task_state(
+                    tes_id,
+                    State::SystemError,
+                    &[&format_log_message!("task `{tes_id}` failed to start")],
+                )
+                .await
+                .ok();
         }
-
-        // Otherwise, start the first executor of the task
-        if !self.start_executor(tes_id, 0, &task_io, false).await? {
-            return Err(Error::System(format!("task `{tes_id}` has no executors")));
-        }
-
-        Ok(())
     }
 
     /// Cancels the given task.
-    pub async fn cancel_task(&self, tes_id: &str) -> OrchestrationResult<()> {
+    pub async fn cancel_task(&self, tes_id: &str) {
         debug!("task `{tes_id}` is canceling");
 
-        // Find the executing pod for the task and delete it; wait for it to be deleted
-        if let Some(name) = self.database.find_executing_pod(tes_id).await? {
-            match self.pods.delete(&name, &DeleteParams::default()).await {
-                Ok(_) | Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
-                Err(e) => {
-                    error!("failed to delete pod `{name}`: {e}");
+        let cancel = async {
+            // Find the executing pod for the task and delete it; wait for it to be deleted
+            if let Some(name) = self.database.find_executing_pod(tes_id).await? {
+                match self.pods.delete(&name, &DeleteParams::default()).await {
+                    Ok(_) | Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
+                    Err(e) => {
+                        error!("failed to delete pod `{name}`: {e}");
+                    }
                 }
             }
+
+            self.cleanup_pvc(tes_id);
+
+            if self
+                .database
+                .update_task_state(
+                    tes_id,
+                    State::Canceled,
+                    &[&format_log_message!("task `{tes_id}` has been canceled")],
+                )
+                .await?
+            {
+                debug!("task `{tes_id}` has been canceled");
+            }
+
+            OrchestrationResult::Ok(())
+        };
+
+        if let Err(e) = cancel.await {
+            error!("failed to cancel task `{tes_id}`: {e}");
+
+            self.database
+                .update_task_state(
+                    tes_id,
+                    State::SystemError,
+                    &[&format_log_message!(
+                        "task `{tes_id}` failed to be canceled"
+                    )],
+                )
+                .await
+                .ok();
         }
-
-        self.cleanup_pvc(tes_id);
-
-        if self
-            .database
-            .update_task_state(
-                tes_id,
-                State::Canceled,
-                &[&format_log_message!("task `{tes_id}` has been canceled")],
-            )
-            .await?
-        {
-            debug!("task `{tes_id}` has been canceled");
-        }
-
-        Ok(())
     }
 
     /// Adopts an orphaned task pod.
@@ -557,6 +612,10 @@ impl TaskOrchestrator {
             .insert_pod(tes_id, &name, PodKind::Inputs, None)
             .await?
         {
+            info!(
+                "not creating inputs pod for task `{tes_id}` because it is in a canceled or error \
+                 state"
+            );
             return Ok(());
         }
 
@@ -590,7 +649,10 @@ impl TaskOrchestrator {
                     .insert_pod(tes_id, &name, PodKind::Executor, Some(executor_index))
                     .await?
                 {
-                    // Task was canceled
+                    info!(
+                        "not creating executor pod for task `{tes_id}` because it is in a \
+                         canceled or error state"
+                    );
                     return Ok(true);
                 }
 
@@ -622,6 +684,10 @@ impl TaskOrchestrator {
             .insert_pod(tes_id, &name, PodKind::Outputs, None)
             .await?
         {
+            info!(
+                "not creating outputs pod for task `{tes_id}` because it is in a canceled or \
+                 error state"
+            );
             return Ok(());
         }
 
@@ -669,8 +735,8 @@ impl TaskOrchestrator {
                     ),
                     args: Some(vec![
                         "-v".into(),
-                        "--database-url".into(),
-                        self.database.url().expose_secret().to_string(),
+                        "--orchestrator-service".into(),
+                        self.service_url.to_string(),
                         "--mode".into(),
                         "inputs".into(),
                         "--inputs-dir".into(),
@@ -1003,8 +1069,8 @@ impl TaskOrchestrator {
                     ),
                     args: Some(vec![
                         "-v".into(),
-                        "--database-url".into(),
-                        self.database.url().expose_secret().to_string(),
+                        "--orchestrator-service".into(),
+                        self.service_url.to_string(),
                         "--mode".into(),
                         "outputs".into(),
                         "--outputs-dir".into(),
@@ -1076,12 +1142,11 @@ impl TaskOrchestrator {
         debug!("pod `{name}` is in state `{pod_state}`");
 
         // Check for an initializing pod that is failing to pull its image.
-        if pod_state == PodState::Initializing {
-            if let Some(state) = pod.first_container_state().and_then(|s| s.waiting.as_ref()) {
-                if state.reason.as_deref() == Some("ErrImagePull") {
-                    return self.handle_image_pull_error(tes_id, name, state).await;
-                }
-            }
+        if pod_state == PodState::Initializing
+            && let Some(state) = pod.first_container_state().and_then(|s| s.waiting.as_ref())
+            && state.reason.as_deref() == Some("ErrImagePull")
+        {
+            return self.handle_image_pull_error(tes_id, name, state).await;
         }
 
         // Update the pod in the database

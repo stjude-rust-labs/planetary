@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fixed
 
+* The transporter now communicates with the orchestrator service instead of
+  making direct database connections ([#13](https://github.com/stjude-rust-labs/planetary/pull/13)).
 * Fixed incorrect upload URLs when uploading an output directory ([#8](https://github.com/stjude-rust-labs/planetary/pull/8)).
 
 #### Changed

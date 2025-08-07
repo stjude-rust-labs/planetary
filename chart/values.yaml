@@ -10,7 +10,7 @@ tasks:
 database:
   # The default service name for the Postgres database.
   # Assumes that the database service is in the same namespace as Planetary.
-  host: planetary-database-postgresql.planetary
+  host: planetary-database-postgresql
   # The port to use for the accessing the database.
   port: 5432
   # The database user.
@@ -37,7 +37,8 @@ api:
   resources:
     requests:
       cpu: 2000m
-      memory: 2Gi
+    limits:
+      memory: 4Gi
   log: info
 
 # Configuration relating to the orchestrator service that is
@@ -57,7 +58,8 @@ orchestrator:
   resources:
     requests:
       cpu: 2000m
-      memory: 2Gi
+    limits:
+      memory: 4Gi
   log: info
 
 # Configuration relating to the monitor service that is responsible
@@ -75,7 +77,8 @@ monitor:
   resources:
     requests:
       cpu: 2000m
-      memory: 2Gi
+    limits:
+      memory: 4Gi
   log: info
 
 # Configuration relating to the transporter used by Planetary for

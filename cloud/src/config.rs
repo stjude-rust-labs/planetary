@@ -65,7 +65,7 @@ pub struct Config {
     pub block_size: Option<u64>,
     /// The parallelism level for network operations.
     ///
-    /// Defaults to the host's available parallelism.
+    /// Defaults to the host's available parallelism multiplied by 4.
     #[serde(default)]
     pub parallelism: Option<usize>,
     /// The number of retries to attempt for network operations.
@@ -90,12 +90,11 @@ impl Config {
     /// For downloads, this is the number of blocks that may be concurrently
     /// downloaded if the download supports ranged requests.
     ///
-    /// Defaults to the host's available parallelism.
-    ///
-    /// If the host's parallelism cannot be determined, the default is `1`.
+    /// Defaults to the host's available parallelism (or 1 if it cannot be
+    /// determined) multiplied by 4.
     pub fn parallelism(&self) -> usize {
         self.parallelism
-            .unwrap_or_else(|| available_parallelism().map(NonZero::get).unwrap_or(1))
+            .unwrap_or_else(|| available_parallelism().map(NonZero::get).unwrap_or(1) * 4)
     }
 
     /// Gets an iterator over the retry durations for network operations.

@@ -113,16 +113,14 @@ where
                     .and_then(|last| now.duration_since(last).ok().map(|d| d >= UPDATE_INTERVAL))
                     .unwrap_or(true);
 
-                if update {
-                    if let Some(events) = &this.events {
-                        events
-                            .send(TransferEvent::BlockProgress {
-                                id: *this.id,
-                                block: *this.block,
-                                transferred: bytes.len().try_into().unwrap(),
-                            })
-                            .ok();
-                    }
+                if update && let Some(events) = &this.events {
+                    events
+                        .send(TransferEvent::BlockProgress {
+                            id: *this.id,
+                            block: *this.block,
+                            transferred: bytes.len().try_into().unwrap(),
+                        })
+                        .ok();
                 }
 
                 Poll::Ready(Some(Ok(bytes)))

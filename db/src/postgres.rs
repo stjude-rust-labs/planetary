@@ -2,11 +2,13 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use diesel::Connection;
+use diesel::dsl::now;
 use diesel_async::AsyncConnection;
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
@@ -33,6 +35,7 @@ use tes::v1::types::task::Input;
 use tes::v1::types::task::Output;
 use tes::v1::types::task::Resources;
 use tes::v1::types::task::State;
+use tracing::debug;
 use tracing::info;
 
 use super::Database;
@@ -51,6 +54,19 @@ pub(crate) mod schema;
 /// Used to embed the migrations into the binary so they can be applied at
 /// runtime.
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("src/postgres/migrations");
+
+/// The interval between attempts to retain unexpired connections from the
+/// connection pool.
+const POOL_RETAIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The maximum age a database connection will remain in the pool since it was
+/// last used.
+const MAX_CONNECTION_AGE: Duration = Duration::from_secs(60);
+
+/// The maximum number of connections in the connection pool.
+///
+/// This is currently a fixed-size limit as we keep a connection pool per-pod.
+const MAX_POOL_SIZE: usize = 10;
 
 /// Helper for zipping two uneven iterators.
 ///
@@ -126,12 +142,33 @@ impl PostgresDatabase {
     /// Constructs a new PostgreSQL database with the given database URL.
     pub fn new(url: SecretString) -> Result<Self> {
         let config = AsyncDieselConnectionManager::new(url.expose_secret());
-        Ok(Self {
-            url,
-            pool: Pool::builder(config)
-                .build()
-                .context("failed to initialize PostgreSQL connection pool")?,
-        })
+        debug!("creating database connection pool with {MAX_POOL_SIZE} slots");
+
+        let pool = Pool::builder(config)
+            .max_size(MAX_POOL_SIZE)
+            .build()
+            .context("failed to initialize PostgreSQL connection pool")?;
+
+        let p = pool.clone();
+
+        // Span a task that is responsible for removing connections from the pool that
+        // exceed
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(POOL_RETAIN_INTERVAL).await;
+
+                let res = p.retain(|_, metrics| metrics.last_used() < MAX_CONNECTION_AGE);
+
+                debug!(
+                    "removed {removed} and retained {retained} connections(s) from the database \
+                     connection pool",
+                    removed = res.removed.len(),
+                    retained = res.retained
+                );
+            }
+        });
+
+        Ok(Self { url, pool })
     }
 
     /// Runs any pending migrations for the database.
@@ -308,10 +345,6 @@ impl PostgresDatabase {
 
 #[async_trait::async_trait]
 impl Database for PostgresDatabase {
-    fn url(&self) -> &SecretString {
-        &self.url
-    }
-
     async fn insert_task(&self, task: &TesTask) -> DatabaseResult<String> {
         use diesel_async::RunQueryDsl;
 
@@ -667,7 +700,9 @@ impl Database for PostgresDatabase {
                     .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
 
                 match task.state {
-                    models::TaskState::Canceling | models::TaskState::Canceled => {
+                    models::TaskState::Canceling
+                    | models::TaskState::Canceled
+                    | models::TaskState::SystemError => {
                         return Ok::<_, Error>(false);
                     }
                     _ => {}
@@ -753,6 +788,8 @@ impl Database for PostgresDatabase {
                 + Send,
         >,
     ) -> DatabaseResult<()> {
+        use diesel::dsl::IntervalDsl;
+        use diesel::pg::sql_types::Timestamptz;
         use diesel::*;
         use diesel_async::RunQueryDsl;
 
@@ -761,16 +798,24 @@ impl Database for PostgresDatabase {
         let transaction = conn.transaction(|conn| {
             async move {
                 // Query the set of pods that haven't terminated yet
+                // Only include pods that are older than 5 minutes
                 // We must lock the rows for updating while we're performing the drain
                 let pods: Vec<(String, String)> = schema::pods::table
                     .inner_join(schema::tasks::table)
                     .select((schema::tasks::tes_id, schema::pods::name))
-                    .filter(schema::pods::state.eq_any(&[
-                        models::PodState::Unknown,
-                        models::PodState::Waiting,
-                        models::PodState::Initializing,
-                        models::PodState::Running,
-                    ]))
+                    .filter(
+                        schema::pods::state
+                            .eq_any(&[
+                                models::PodState::Unknown,
+                                models::PodState::Waiting,
+                                models::PodState::Initializing,
+                                models::PodState::Running,
+                            ])
+                            .and(
+                                schema::pods::creation_time
+                                    .le(now.into_sql::<Timestamptz>() - 5.minutes()),
+                            ),
+                    )
                     .for_update()
                     .load(conn)
                     .await?;
@@ -807,7 +852,10 @@ impl Database for PostgresDatabase {
                         conn,
                         &pod.tes_id,
                         State::SystemError,
-                        &[&format_log_message!("task was aborted by the system")],
+                        &[&format_log_message!(
+                            "task `{id}` was aborted by the system",
+                            id = pod.tes_id
+                        )],
                     )
                     .await?;
                 }

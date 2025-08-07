@@ -29,7 +29,7 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -47,7 +47,8 @@ use cloud::TransferEvent;
 use cloud::UrlExt;
 use colored::Colorize;
 use glob::Pattern;
-use planetary_db::Database;
+use planetary_db::TaskIo;
+use reqwest::Client;
 use reqwest::Url;
 use secrecy::SecretString;
 use tes::v1::types::responses::OutputFile;
@@ -57,12 +58,40 @@ use tokio::fs::File;
 use tokio::fs::create_dir_all;
 use tokio::sync::broadcast;
 use tokio::sync::oneshot;
+use tokio_retry2::Retry;
+use tokio_retry2::RetryError;
+use tokio_retry2::strategy::ExponentialFactorBackoff;
+use tokio_retry2::strategy::MaxInterval;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use walkdir::WalkDir;
+
+/// Gets an iterator over the retry durations for network operations.
+///
+/// Retries use an exponential power of 2 backoff, starting at 1 second with
+/// a maximum duration of 60 seconds.
+fn retry_durations() -> impl Iterator<Item = Duration> {
+    const INITIAL_DELAY_MILLIS: u64 = 1000;
+    const BASE_FACTOR: f64 = 2.0;
+    const MAX_DURATION: Duration = Duration::from_secs(60);
+    const RETRIES: usize = 5;
+
+    ExponentialFactorBackoff::from_millis(INITIAL_DELAY_MILLIS, BASE_FACTOR)
+        .max_duration(MAX_DURATION)
+        .take(RETRIES)
+}
+
+/// Helper for notifying that a network operation failed and will be retried.
+fn notify_retry(e: &reqwest::Error, duration: Duration) {
+    warn!(
+        "network operation failed: {e} (retrying after {duration} seconds)",
+        duration = duration.as_secs()
+    );
+}
 
 /// The mode of operation.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,9 +117,9 @@ impl FromStr for Mode {
 /// A tool for transporting Planetary task's inputs and outputs.
 #[derive(Parser)]
 struct Args {
-    /// The Planetary database URL to use.
-    #[clap(long, env, hide_env_values(true))]
-    database_url: SecretString,
+    /// The URL for the orchestrator service.
+    #[clap(long, env)]
+    orchestrator_service: Url,
 
     /// The mode of operation.
     #[arg(long)]
@@ -117,7 +146,7 @@ struct Args {
     block_size: Option<u64>,
 
     /// The parallelism level for network operations; defaults to the host's
-    /// available parallelism.
+    /// available parallelism multiplied by 4.
     #[clap(long, value_name = "NUM")]
     parallelism: Option<usize>,
 
@@ -158,17 +187,55 @@ struct Args {
     google_hmac_secret: Option<SecretString>,
 }
 
-impl Args {
-    /// Gets the TES database from the CLI options.
-    fn database(&self) -> Result<Arc<dyn Database>> {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "postgres")] {
-                Ok(Arc::new(planetary_db::postgres::PostgresDatabase::new(self.database_url.clone())?))
-            } else {
-                compile_error!("no database feature was enabled");
-            }
-        }
-    }
+/// Gets the inputs and outputs for the given task.
+async fn get_task_io(client: &Client, service: &Url, tes_id: &str) -> Result<TaskIo> {
+    Ok(Retry::spawn_notify(
+        retry_durations(),
+        || async {
+            // Retry the operation is there is a problem sending the request to the server
+            // Don't retry if the service returned an error response
+            client
+                .get(format!("{service}v1/tasks/{tes_id}/io"))
+                .send()
+                .await
+                .map_err(RetryError::transient)?
+                .error_for_status()
+                .map_err(RetryError::permanent)?
+                .json()
+                .await
+                .map_err(RetryError::permanent)
+        },
+        notify_retry,
+    )
+    .await?)
+}
+
+/// Updates a task's output files.
+async fn update_output_files(
+    client: &Client,
+    service: &Url,
+    tes_id: &str,
+    outputs: &[OutputFile],
+) -> Result<()> {
+    Retry::spawn_notify(
+        retry_durations(),
+        || async {
+            // Retry the operation is there is a problem sending the request to the server
+            // Don't retry if the service returned an error response
+            client
+                .put(format!("{service}v1/tasks/{tes_id}/outputs"))
+                .json(outputs)
+                .send()
+                .await
+                .map_err(RetryError::transient)?
+                .error_for_status()
+                .map_err(RetryError::permanent)
+        },
+        notify_retry,
+    )
+    .await?;
+
+    Ok(())
 }
 
 /// Downloads inputs into the inputs directory.
@@ -177,15 +244,18 @@ impl Args {
 /// directory.
 async fn download_inputs(
     config: Config,
-    database: Arc<dyn Database>,
+    orchestrator_service: Url,
     tes_id: &str,
     inputs_dir: &Path,
     outputs_dir: &Path,
 ) -> Result<()> {
-    let task_io = database.get_task_io(tes_id).await.map_err(|e| {
-        error!("failed to retrieve inputs and outputs of task `{tes_id}`: {e:#}");
-        anyhow!("failed to retrieve information for task `{tes_id}`")
-    })?;
+    let client = Client::new();
+    let task_io = get_task_io(&client, &orchestrator_service, tes_id)
+        .await
+        .map_err(|e| {
+            error!("failed to retrieve inputs and outputs of task `{tes_id}`: {e:#}");
+            anyhow!("failed to retrieve information for task `{tes_id}`")
+        })?;
 
     // Create the inputs directory
     create_dir_all(inputs_dir).await.with_context(|| {
@@ -291,14 +361,17 @@ async fn download_inputs(
 /// Uploads outputs from the specified outputs directory.
 async fn upload_outputs(
     config: Config,
-    database: Arc<dyn Database>,
+    orchestrator_service: Url,
     tes_id: &str,
     outputs_dir: &Path,
 ) -> Result<()> {
-    let task_io = database.get_task_io(tes_id).await.map_err(|e| {
-        error!("failed to retrieve inputs and outputs of task `{tes_id}`: {e:#}");
-        anyhow!("failed to retrieve information for task `{tes_id}`")
-    })?;
+    let client = Client::new();
+    let task_io = get_task_io(&client, &orchestrator_service, tes_id)
+        .await
+        .map_err(|e| {
+            error!("failed to retrieve inputs and outputs of task `{tes_id}`: {e:#}");
+            anyhow!("failed to retrieve information for task `{tes_id}`")
+        })?;
 
     // Only handle transfer events if for a terminal to display the progress
     let (handler, events_tx) = if std::io::stderr().is_terminal() {
@@ -361,7 +434,11 @@ async fn upload_outputs(
         handler.await.expect("failed to join events handler");
     }
 
-    database.update_task_output_files(tes_id, &result?).await?;
+    if let Err(e) = update_output_files(&client, &orchestrator_service, tes_id, &result?).await {
+        error!("failed to update output files for task `{tes_id}`: {e:#}");
+        bail!("failed to update output files for task `{tes_id}`")
+    }
+
     Ok(())
 }
 
@@ -452,11 +529,11 @@ async fn upload_directory(
         }
 
         // If there's a pattern, ensure the container path matches it
-        if let Some(pattern) = &pattern {
-            if !pattern.matches(container_path) {
-                info!("skipping output file `{container_path}` as it does not match the pattern");
-                continue;
-            }
+        if let Some(pattern) = &pattern
+            && !pattern.matches(container_path)
+        {
+            info!("skipping output file `{container_path}` as it does not match the pattern");
+            continue;
         }
 
         info!(
@@ -568,8 +645,6 @@ async fn run() -> Result<()> {
         }
     }
 
-    let database = args.database()?;
-
     let s3_auth =
         if let (Some(id), Some(key)) = (args.aws_access_key_id, args.aws_secret_access_key) {
             Some(S3AuthConfig {
@@ -603,14 +678,22 @@ async fn run() -> Result<()> {
         Mode::Inputs => {
             download_inputs(
                 config,
-                database,
+                args.orchestrator_service,
                 &args.tes_id,
                 &args.inputs_dir.expect("option should be present"),
                 &args.outputs_dir,
             )
             .await
         }
-        Mode::Outputs => upload_outputs(config, database, &args.tes_id, &args.outputs_dir).await,
+        Mode::Outputs => {
+            upload_outputs(
+                config,
+                args.orchestrator_service,
+                &args.tes_id,
+                &args.outputs_dir,
+            )
+            .await
+        }
     }
 }
 
