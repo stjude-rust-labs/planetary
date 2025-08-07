@@ -21,5 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Changed
 
+* Default parallelism is now 4 times the available parallelism ([#13](https://github.com/stjude-rust-labs/planetary/pull/13)).
 * Refactored crate to a single `FileTransfer` implementation with cloud storage
   backends ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).

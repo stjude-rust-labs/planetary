@@ -18,3 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Changed
 
 * Refactored the orchestrator into its own service ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).
+
+#### Fixed
+
+* Limit database connection pool to 10 connections and remove connections from
+  the pool that haven't been used for 60 seconds ([#13](https://github.com/stjude-rust-labs/planetary/pull/13)).
+* Creating a task no longer waits to start the task and cannot cause the future
+  responsible for starting the task to be dropped ([#13](https://github.com/stjude-rust-labs/planetary/pull/13)).
