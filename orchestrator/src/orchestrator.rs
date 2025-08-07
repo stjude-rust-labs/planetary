@@ -67,6 +67,8 @@ use url::Url;
 const PLANETARY_TASKS_NAMESPACE: &str = "planetary-tasks";
 
 /// The default storage size, in gigabytes.
+///
+/// Uses a 1 GiB default.
 const DEFAULT_STORAGE_SIZE: f64 = 1.07374182;
 
 /// The name of the volume that pods will attach to for their storage.
@@ -120,12 +122,16 @@ const MAX_EXECUTOR_LOG_LINES: i64 = 15;
 const DEFAULT_TRANSPORTER_CPU: i32 = 1;
 
 /// The default memory request (in GB) for transporter pods.
+///
+/// Uses a 1 GiB default.
 const DEFAULT_TRANSPORTER_MEMORY: f64 = 1.07374182;
 
 /// The default CPU request (in cores) for pods.
 const DEFAULT_POD_CPU: i32 = 1;
 
 /// The default memory request (in GB) for pods.
+///
+/// Uses a 1 GiB default.
 const DEFAULT_POD_MEMORY: f64 = 1.07374182;
 
 /// The name of the S3 credentials secret.
