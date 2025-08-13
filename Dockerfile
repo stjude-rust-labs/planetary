@@ -19,7 +19,6 @@ WORKDIR /app
 # Add the files needed to build the `planetary` and `transporter` binaries.
 COPY ./Cargo.toml ./Cargo.lock ./
 COPY ./api ./api
-COPY ./cloud ./cloud
 COPY ./db ./db
 COPY ./monitor ./monitor
 COPY ./orchestrator ./orchestrator

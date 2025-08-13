@@ -84,4 +84,18 @@ CREATE TABLE pods (
 );
 
 -- Create an index on the `state` column for list operations.
+CREATE INDEX idx_pods_task_id ON pods (task_id);
 CREATE INDEX idx_pods_state ON pods (state);
+
+-- Table for internal system errors encountered.
+CREATE TABLE errors (
+    id SERIAL PRIMARY KEY,
+    source TEXT NOT NULL,
+    task_id INTEGER NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    message TEXT NOT NULL,
+    creation_time TIMESTAMPTZ NOT NULL DEFAULT (now() at time zone 'utc')
+);
+
+-- Create an index on the `source` column for errors.
+CREATE INDEX idx_errors_task_id ON errors (task_id);
+CREATE INDEX idx_errors_source ON errors (source);

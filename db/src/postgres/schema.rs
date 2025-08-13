@@ -15,6 +15,16 @@ pub mod sql_types {
 }
 
 diesel::table! {
+    errors (id) {
+        id -> Int4,
+        source -> Text,
+        task_id -> Nullable<Int4>,
+        message -> Text,
+        creation_time -> Timestamptz,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::*;
     use super::sql_types::PodKind;
     use super::sql_types::PodState;
@@ -63,6 +73,7 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(errors -> tasks (task_id));
 diesel::joinable!(pods -> tasks (task_id));
 
-diesel::allow_tables_to_appear_in_same_query!(pods, tasks,);
+diesel::allow_tables_to_appear_in_same_query!(errors, pods, tasks,);

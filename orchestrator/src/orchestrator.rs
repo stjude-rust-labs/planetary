@@ -472,9 +472,12 @@ impl TaskOrchestrator {
         };
 
         if let Err(e) = start.await {
-            error!("failed to start task `{tes_id}`: {e}");
-
-            self.cleanup_pvc(tes_id);
+            let message = format!("failed to start task `{tes_id}`: {e:#}");
+            error!("{message}");
+            self.database
+                .insert_error(&self.id, Some(tes_id), &message)
+                .await
+                .ok();
 
             self.database
                 .update_task_state(
@@ -484,6 +487,8 @@ impl TaskOrchestrator {
                 )
                 .await
                 .ok();
+
+            self.cleanup_pvc(tes_id).await.ok();
         }
     }
 
@@ -494,15 +499,10 @@ impl TaskOrchestrator {
         let cancel = async {
             // Find the executing pod for the task and delete it; wait for it to be deleted
             if let Some(name) = self.database.find_executing_pod(tes_id).await? {
-                match self.pods.delete(&name, &DeleteParams::default()).await {
-                    Ok(_) | Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
-                    Err(e) => {
-                        error!("failed to delete pod `{name}`: {e}");
-                    }
-                }
+                self.cleanup_pod(&name).await?;
             }
 
-            self.cleanup_pvc(tes_id);
+            self.cleanup_pvc(tes_id).await?;
 
             if self
                 .database
@@ -520,7 +520,12 @@ impl TaskOrchestrator {
         };
 
         if let Err(e) = cancel.await {
-            error!("failed to cancel task `{tes_id}`: {e}");
+            let message = format!("failed to cancel task `{tes_id}`: {e:#}");
+            error!("{message}");
+            self.database
+                .insert_error(&self.id, Some(tes_id), &message)
+                .await
+                .ok();
 
             self.database
                 .update_task_state(
@@ -1451,7 +1456,7 @@ impl TaskOrchestrator {
                 .await?
             {
                 debug!("task `{tes_id}` has completed");
-                self.cleanup_pvc(tes_id);
+                self.cleanup_pvc(tes_id).await?;
             }
         }
 
@@ -1516,7 +1521,7 @@ impl TaskOrchestrator {
                     .await?
                 {
                     debug!("task `{tes_id}` has completed");
-                    self.cleanup_pvc(tes_id);
+                    self.cleanup_pvc(tes_id).await?;
                 }
             }
         } else if self
@@ -1531,7 +1536,7 @@ impl TaskOrchestrator {
             .await?
         {
             debug!("executor {executor_index} of task `{tes_id}` has failed");
-            self.cleanup_pvc(tes_id);
+            self.cleanup_pvc(tes_id).await?;
         }
 
         Ok(())
@@ -1594,7 +1599,7 @@ impl TaskOrchestrator {
             .await?
         {
             debug!("task `{tes_id}` has completed");
-            self.cleanup_pvc(tes_id);
+            self.cleanup_pvc(tes_id).await?;
         }
 
         Ok(())
@@ -1625,7 +1630,7 @@ impl TaskOrchestrator {
             .await?
         {
             debug!("task `{tes_id}` failed to {action}");
-            self.cleanup_pvc(tes_id);
+            self.cleanup_pvc(tes_id).await?;
         }
 
         Ok(())
@@ -1645,9 +1650,15 @@ impl TaskOrchestrator {
             )
             .await?
         {
-            error!("task `{tes_id}` has failed: communication was lost with pod `{pod_name}`");
-            self.cleanup_pod(pod_name.to_string());
-            self.cleanup_pvc(tes_id);
+            let message =
+                format!("task `{tes_id}` has failed: communication was lost with pod `{pod_name}`");
+            error!("{message}");
+            self.database
+                .insert_error(&self.id, Some(tes_id), &message)
+                .await
+                .ok();
+            self.cleanup_pod(pod_name).await?;
+            self.cleanup_pvc(tes_id).await?;
         }
 
         Ok(())
@@ -1679,11 +1690,42 @@ impl TaskOrchestrator {
                 .await?
         {
             debug!("task `{tes_id}` failed to pull image: {message}");
-            self.cleanup_pod(name.to_string());
-            self.cleanup_pvc(tes_id);
+            self.cleanup_pod(name).await?;
+            self.cleanup_pvc(tes_id).await?;
         }
 
         Ok(())
+    }
+
+    /// Handles a pod deleted event.
+    ///
+    /// This is not called when a pod is deleted by the orchestrator.
+    async fn handle_pod_deleted(&self, tes_id: &str, name: &str) -> OrchestrationResult<()> {
+        if self
+            .database
+            .update_pod_state(
+                name,
+                PodState::Failed,
+                Some(FinishedPod {
+                    exit_code: 130,
+                    stderr: Some("task was preempted"),
+                    stdout: None,
+                    start_time: None,
+                    end_time: None,
+                }),
+            )
+            .await?
+        {
+            self.database
+                .update_task_state(
+                    tes_id,
+                    State::Preempted,
+                    &[&format_log_message!("task `{tes_id}` has been preempted")],
+                )
+                .await?;
+        }
+
+        self.cleanup_pvc(tes_id).await
     }
 
     /// Updates the pod in the database.
@@ -1767,60 +1809,54 @@ impl TaskOrchestrator {
 
         // If the pod is finished, delete the pod
         if updated && finished.is_some() {
-            self.cleanup_pod(name.into_owned());
+            self.cleanup_pod(&name).await?;
         }
 
         Ok((updated, output))
     }
 
     /// Cleans up the given pod.
-    ///
-    /// This method does not wait for the pod to be deleted.
-    fn cleanup_pod(&self, name: String) {
-        let pods = self.pods.clone();
-
-        tokio::spawn(async move {
-            // Add an annotation to track the pod was deleted by the orchestrator
-            if let Err(e) = pods
-                .patch(
-                    &name,
-                    &PatchParams::default(),
-                    &Patch::Merge(Pod {
-                        metadata: ObjectMeta {
-                            annotations: Some(BTreeMap::from_iter([(
-                                PLANETARY_DELETED_ANNOTATION.to_string(),
-                                "true".to_string(),
-                            )])),
-                            ..Default::default()
-                        },
+    async fn cleanup_pod(&self, name: &str) -> OrchestrationResult<()> {
+        // Add an annotation to track the pod was deleted by the orchestrator
+        match self
+            .pods
+            .patch(
+                name,
+                &PatchParams::default(),
+                &Patch::Merge(Pod {
+                    metadata: ObjectMeta {
+                        annotations: Some(BTreeMap::from_iter([(
+                            PLANETARY_DELETED_ANNOTATION.to_string(),
+                            "true".to_string(),
+                        )])),
                         ..Default::default()
-                    }),
-                )
-                .await
-            {
-                error!("failed to patch annotation for pod `{name}`: {e}");
-            }
+                    },
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => return Ok(()),
+            Err(e) => return Err(e.into()),
+        }
 
-            match pods.delete(&name, &DeleteParams::default()).await {
-                Ok(_) | Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
-                Err(e) => error!("failed to delete pod `{name}`: {e}"),
-            }
-        });
+        match self.pods.delete(name, &DeleteParams::default()).await {
+            Ok(_) | Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Cleans up the given PVC.
-    ///
-    /// This method does not wait for the PVC to be deleted.
-    fn cleanup_pvc(&self, tes_id: &str) {
-        let name = format_pvc_name(tes_id);
-        let pvc = self.pvc.clone();
-
-        tokio::spawn(async move {
-            match pvc.delete(&name, &DeleteParams::default()).await {
-                Ok(_) | Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
-                Err(e) => error!("failed to delete PVC `{name}`: {e}"),
-            }
-        });
+    async fn cleanup_pvc(&self, tes_id: &str) -> OrchestrationResult<()> {
+        match self
+            .pvc
+            .delete(&format_pvc_name(tes_id), &DeleteParams::default())
+            .await
+        {
+            Ok(_) | Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -1874,20 +1910,18 @@ impl Monitor {
                         Some(Ok(Event::Apply(pod))) => {
                             let orchestrator = orchestrator.clone();
                             tokio::spawn(async move {
-                                let tes_id = match pod.tes_id() {
-                                    Ok(id) => id,
-                                    Err(_) => {
-                                        let name = pod.name();
-                                        error!(
-                                            "pod `{name}` is missing an associated TES task identifier",
-                                            name = name.as_deref().unwrap_or("unknown")
-                                        );
-                                        return;
-                                    }
+                                let tes_id = match pod.tes_id().ok() {
+                                    Some(id) => id,
+                                    None => return
                                 };
 
                                 if let Err(e) = orchestrator.update_task(tes_id, &pod).await {
-                                    error!("error while updating task: {e}");
+                                    let message = format!("error while updating task: {e:#}");
+                                    error!("{message}");
+                                    orchestrator.database
+                                        .insert_error(&orchestrator.id, Some(tes_id), &message)
+                                        .await
+                                        .ok();
 
                                     orchestrator
                                         .database
@@ -1902,7 +1936,7 @@ impl Monitor {
                                         .await
                                         .ok();
 
-                                    orchestrator.cleanup_pvc(tes_id);
+                                    orchestrator.cleanup_pvc(tes_id).await.ok();
                                 }
                             });
                         }
@@ -1924,49 +1958,34 @@ impl Monitor {
                                     None => return,
                                 };
 
-                                let tes_id = match pod.tes_id() {
-                                    Ok(id) => id,
-                                    Err(_) => {
-                                        error!("pod `{name}` is missing an associated TES task identifier");
-                                        return;
-                                    }
+                                let tes_id = match pod.tes_id().ok() {
+                                    Some(id) => id,
+                                    None => return,
                                 };
 
-                                if let Err(e) = orchestrator
-                                    .database
-                                    .update_pod_state(
-                                        &name,
-                                        PodState::Failed,
-                                        Some(FinishedPod {
-                                            exit_code: 130,
-                                            stderr: Some("task was preempted"),
-                                            stdout: None,
-                                            start_time: None,
-                                            end_time: None,
-                                        }),
-                                    )
-                                    .await
-                                {
-                                    error!("failed to update task `{tes_id}`: {e}");
-                                }
+                                if let Err(e) = orchestrator.handle_pod_deleted(tes_id, &name).await {
+                                    let message = format!("error while handling pod deletion: {e:#}");
+                                    error!("{message}");
+                                    orchestrator.database
+                                        .insert_error(&orchestrator.id, Some(tes_id), &message)
+                                        .await
+                                        .ok();
 
-                                match orchestrator
-                                    .database
-                                    .update_task_state(
-                                        tes_id,
-                                        State::Preempted,
-                                        &[&format_log_message!("task `{tes_id}` has been preempted")],
-                                    )
-                                    .await
-                                {
-                                    Ok(false) => {}
-                                    Ok(true) => {
-                                        debug!("task `{tes_id}` has been preempted");
-                                    }
-                                    Err(e) => error!("failed to update task `{tes_id}`: {e}"),
-                                }
+                                    orchestrator
+                                        .database
+                                        .update_task_state(
+                                            tes_id,
+                                            State::SystemError,
+                                            &[&format_log_message!(
+                                                "{msg}",
+                                                msg = e.as_system_log_message()
+                                            )],
+                                        )
+                                        .await
+                                        .ok();
 
-                                orchestrator.cleanup_pvc(tes_id);
+                                    orchestrator.cleanup_pvc(tes_id).await.ok();
+                                }
                             });
                         }
                         Some(Ok(Event::Init | Event::InitDone | Event::InitApply(_))) => continue,
@@ -1976,7 +1995,12 @@ impl Monitor {
                             // resource version, so don't bother logging the error
                         }
                         Some(Err(e)) => {
-                            error!("error while streaming Kubernetes pod events: {e}");
+                            let message = format!("error while streaming Kubernetes pod events: {e:#}");
+                            error!("{message}");
+                            orchestrator.database
+                                .insert_error(&orchestrator.id, None, &message)
+                                .await
+                                .ok();
                         }
                         None => break,
                     }

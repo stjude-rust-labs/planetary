@@ -43,6 +43,9 @@ const PLANETARY_ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
 /// The default interval for the monitoring service.
 const MONITORING_INTERVAL: Duration = Duration::from_secs(60);
 
+/// The error source for the monitor.
+const MONITOR_ERROR_SOURCE: &str = "monitor";
+
 /// Represents the task monitor.
 pub struct Monitor {
     /// The cancellation token for shutting down the service.
@@ -125,7 +128,9 @@ impl Monitor {
                     if let Err(e) = database.drain_executing_pods(Box::new(|executing| { async move {
                         Self::check_executing_pods(&client, &orchestrator_url, &planetary_pods, &task_pods, executing).await
                     }.boxed() })).await {
-                        error!("failed to drain executing pods: {e:#}");
+                        let message = format!("failed to drain executing pods: {e:#}");
+                        error!("{message}");
+                        database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await.ok();
                     }
                 }
             }

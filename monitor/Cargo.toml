@@ -9,9 +9,23 @@ homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "planetary-monitor"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli", "postgres"]
+cli = [
+    "dep:cfg-if",
+    "dep:clap",
+    "dep:clap-verbosity-flag",
+    "dep:tracing-log",
+    "dep:tracing-subscriber",
+]
+postgres = ["planetary-db/postgres"]
+
 [dependencies]
-planetary-db = { version = "0.1.0", path = "../db" }
-planetary-server = { version = "0.1.0", path = "../server" }
 anyhow.workspace = true
 bon.workspace = true
 cfg-if = { workspace = true, optional = true }
@@ -20,24 +34,16 @@ clap-verbosity-flag = { workspace = true, optional = true }
 futures.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
+planetary-db = { version = "0.1.0", path = "../db" }
+planetary-server = { version = "0.1.0", path = "../server" }
 reqwest.workspace = true
 secrecy.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tracing.workspace = true
 tracing-log = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
-tracing.workspace = true
 url.workspace = true
 
 [lints]
 workspace = true
-
-[features]
-default = ["cli", "postgres"]
-cli = ["dep:cfg-if", "dep:clap", "dep:clap-verbosity-flag", "dep:tracing-log", "dep:tracing-subscriber"]
-postgres = ["planetary-db/postgres"]
-
-[[bin]]
-name = "planetary-monitor"
-path = "src/main.rs"
-required-features = ["cli"]
