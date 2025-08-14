@@ -145,8 +145,7 @@ your situation.
   timely incident detection and response. Configure logging to avoid exposing
   sensitive information, and ensure log retention complies with your policies.
 - [ ] **Automated Compliance Scanning.** Use automated Kubernetes security
-  scanners (e.g., `kube-score`, `kubescape`, `Polaris`) to verify compliance
-  with your organizational policies.
+  scanners to verify compliance with your organizational policies.
 - [ ] **Upgrades and Patch Management.** Keep Planetary and its dependencies
   up-to-date. We may publish chart updates in response to vulnerabilities, but
   you are responsible for monitoring for published updates and applying them
