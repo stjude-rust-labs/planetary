@@ -113,7 +113,7 @@ deployment and the Helm chart. Keep in mind that this list is non-exhaustive, so
 you should do your own research to create a complete list of concerns to
 consider in your situation.
 
-- [ ] **Ingress and External Exposure.** The services provided by Planetary
+- [ ] **Ingress and external exposure.** The services provided by Planetary
   include **no authentication or authorization at all and will accept and
   execute unauthenticated requests if you do not take action to secure them
   further**. It is imperitive that you restrict these services using external
@@ -122,44 +122,44 @@ consider in your situation.
   are exposed only as needed. Ensure TLS termination, authentication,
   authorization, and rate-limiting are configured according to your policies,
   and integrate the service with a web application firewall.
-- [ ] **RBAC Permissions.** We've scoped roles and bindings according to what we
+- [ ] **RBAC permissions.** We've scoped roles and bindings according to what we
   believe to be least-privilege access. Review these to ensure they align with
   your internal access control policies and compliance standards.
-- [ ] **Pod Security Contexts.** We’ve configured workloads to run as non-root
+- [ ] **Pod security contexts.** We’ve configured workloads to run as non-root
   and use read-only file systems where possible. These measures help limit
   container privileges and reduce the attack surface. Confirm these settings
   meet your container hardening requirements for all deployments and containers.
-- [ ] **Network Policies.** We include policies to restrict pod-to-pod ingress
+- [ ] **Network policies.** We include policies to restrict pod-to-pod ingress
   and egress traffic, balancing security with ease of configuration. Validate
   that these meet your segmentation, isolation, and ingress/egress control
   goals.
-- [ ] **Secrets Management.** We've defined Kubernetes Secrets where needed and
+- [ ] **Secrets management.** We've defined Kubernetes Secrets where needed and
   structured their use for secure injection. Verify these secrets meet your
   standards for confidentiality, access control, and rotation.
 - [ ] **Credentials.** This chart does not provide default passwords or API
   keys. You must set secure, unique credentials for all components before
   deployment.
-- [ ] **Resource Limits and Requests.** We've set default CPU and memory
+- [ ] **Resource limits and requests.** We've set default CPU and memory
   constraints to encourage efficient scheduling and prevent resource exhaustion.
   Adjust these for your expected workloads.
-- [ ] **Container Images and Supply Chain Security.** We use version-pinned
+- [ ] **Container images and supply chain security.** We use version-pinned
   images from known registries. Review these to ensure they come from sources
   you trust, are vulnerability-scanned, and, where appropriate, have verified
   signatures.
-- [ ] **Monitoring, Logging, and Alerting.** Implement robust observability for
+- [ ] **Monitoring, logging, and alerting.** Implement robust observability for
   timely incident detection and response. Configure logging to avoid exposing
   sensitive information, and ensure log retention complies with your policies.
-- [ ] **Automated Compliance Scanning.** Use automated Kubernetes security
+- [ ] **Automated compliance scanning.** Use automated Kubernetes security
   scanners to verify compliance with your organizational policies.
-- [ ] **Upgrades and Patch Management.** Keep Planetary and its dependencies
+- [ ] **Upgrades and patch management.** Keep Planetary and its dependencies
   up-to-date. We may publish chart updates in response to vulnerabilities, but
   you are responsible for monitoring for published updates and applying them
   promptly.
-- [ ] **Cluster Environment Assumptions.** This chart assumes it is deployed
+- [ ] **Cluster environment assumptions.** This chart assumes it is deployed
   into a hardened Kubernetes cluster (e.g., restricted API server access,
   encrypted etcd, secure CSI drivers). Ensure your cluster meets these
   prerequisites.
-- [ ] **Backups and Disaster Recovery.** If Planetary stores persistent state in
+- [ ] **Backups and disaster recovery.** If Planetary stores persistent state in
   your environment, implement a tested backup and restore process.
 
 We recommend regularly auditing your deployment to ensure continued security and
