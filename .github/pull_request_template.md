@@ -24,6 +24,9 @@ Repository specific checklist:
 
 - [ ] If you update the supported TES version, you should change the version at
       `planetary::server::TES_VERSION`.
+- [ ] Make sure that (a) none of the changes conflict with information we lay 
+      out in the "Security Notice" section of the `README.md` and (b) anything
+      that needs to be added to this section is added.
 
 END SECTION -->
 
