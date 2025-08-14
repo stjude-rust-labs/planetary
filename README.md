@@ -110,9 +110,18 @@ your environment.
 
 As a starting point, we recommend you review the following aspects of your
 deployment and the Helm chart. Keep in mind that this list is non-exhaustive, so
-you should do your own research to create a complete list of requirements for
-your situation.
+you should do your own research to create a complete list of concerns to
+consider in your situation.
 
+- [ ] **Ingress and External Exposure.** The services provided by Planetary
+  include **no authentication or authorization at all and will accept and
+  execute unauthenticated requests if you do not take action to secure them
+  further**. It is imperitive that you restrict these services using external
+  authentication and authorization mechanisms. Further, we encourage you to
+  review any Services or Ingress resources included in the chart to confirm they
+  are exposed only as needed. Ensure TLS termination, authentication,
+  authorization, and rate-limiting are configured according to your policies,
+  and integrate the service with a web application firewall.
 - [ ] **RBAC Permissions.** We've scoped roles and bindings according to what we
   believe to be least-privilege access. Review these to ensure they align with
   your internal access control policies and compliance standards.
@@ -124,10 +133,6 @@ your situation.
   and egress traffic, balancing security with ease of configuration. Validate
   that these meet your segmentation, isolation, and ingress/egress control
   goals.
-- [ ] **Ingress and External Exposure.** Review any Services or Ingress resources
-  to confirm they are exposed only as needed. Ensure TLS termination,
-  authentication, and rate-limiting are configured according to your policies,
-  and integrate the service with a web application firewall.
 - [ ] **Secrets Management.** We've defined Kubernetes Secrets where needed and
   structured their use for secure injection. Verify these secrets meet your
   standards for confidentiality, access control, and rotation.
