@@ -15,7 +15,7 @@ edition = "2024"
 authors = ["St. Jude Rust Labs"]
 homepage = "https://github.com/stjude-rust-labs/planetary"
 repository = "https://github.com/stjude-rust-labs/planetary"
-rust-version = "1.88.0"
+rust-version = "1.89.0"
 
 [workspace.dependencies]
 anyhow = "1.0.99"
