@@ -1699,7 +1699,15 @@ impl TaskOrchestrator {
 
     /// Handles a pod deleted event.
     ///
-    /// This is not called when a pod is deleted by the orchestrator.
+    /// This method is not called when a pod is deleted by the orchestrator.
+    ///
+    /// It is called when a pod is deleted by Kubernetes or manually by a
+    /// cluster administrator.
+    ///
+    /// Currently it treats an external pod deletion as a preempted task; in the
+    /// future we may need to distinguish between a pod that's been moved as a
+    /// result of a node scale up/down and one that was terminated on a
+    /// specifically preemptible node (e.g. a spot instance).
     async fn handle_pod_deleted(&self, tes_id: &str, name: &str) -> OrchestrationResult<()> {
         if self
             .database
