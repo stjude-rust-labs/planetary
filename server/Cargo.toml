@@ -9,12 +9,16 @@ homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["postgres"]
+postgres = ["planetary-db/postgres"]
+
 [dependencies]
-planetary-db = { version = "0.1.0", path = "../db" }
 anyhow.workspace = true
 axum.workspace = true
 axum-extra.workspace = true
 bon.workspace = true
+planetary-db = { version = "0.1.0", path = "../db" }
 reqwest.workspace = true
 serde.workspace = true
 tokio.workspace = true
@@ -24,7 +28,3 @@ tracing.workspace = true
 
 [lints]
 workspace = true
-
-[features]
-default = ["postgres"]
-postgres = ["planetary-db/postgres"]

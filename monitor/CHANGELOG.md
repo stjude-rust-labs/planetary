@@ -9,4 +9,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Log errors to the database ([#15](https://github.com/stjude-rust-labs/planetary/pull/15)).
 * Added monitor service ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).

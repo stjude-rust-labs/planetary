@@ -731,10 +731,6 @@ impl Database for PostgresDatabase {
         Ok(inserted)
     }
 
-    /// Updates the state of a pod.
-    ///
-    /// Returns `Ok(true)` if the status was updated or `Ok(false)` if the
-    /// task's current state cannot be transitioned to the given state.
     async fn update_pod_state(
         &self,
         name: &str,
@@ -890,7 +886,6 @@ impl Database for PostgresDatabase {
         Ok(())
     }
 
-    /// Updates the output files of the given task.
     async fn update_task_output_files(
         &self,
         tes_id: &str,
@@ -912,6 +907,54 @@ impl Database for PostgresDatabase {
             .await
             .map_err(Error::Diesel)?;
 
+        Ok(())
+    }
+
+    async fn insert_error(
+        &self,
+        source: &str,
+        tes_id: Option<&str>,
+        message: &str,
+    ) -> DatabaseResult<()> {
+        use diesel::*;
+        use diesel_async::RunQueryDsl;
+
+        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
+
+        let transaction = conn.transaction(|conn| {
+            async move {
+                // Lookup the associated task id, if there is one
+                let task_id = if let Some(tes_id) = tes_id {
+                    Some(
+                        schema::tasks::table
+                            .select(schema::tasks::id)
+                            .filter(schema::tasks::tes_id.eq(tes_id))
+                            .for_update()
+                            .first(conn)
+                            .await
+                            .optional()
+                            .map_err(Error::Diesel)?
+                            .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+
+                // Insert the new error
+                diesel::insert_into(schema::errors::table)
+                    .values(models::NewError {
+                        source,
+                        task_id,
+                        message,
+                    })
+                    .execute(conn)
+                    .await
+                    .map_err(Error::Diesel)
+            }
+            .scope_boxed()
+        });
+
+        transaction.await?;
         Ok(())
     }
 }

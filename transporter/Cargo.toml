@@ -9,31 +9,35 @@ homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "planetary-transporter"
+path = "src/main.rs"
+
 [dependencies]
-cloud = { version = "0.1.0", path = "../cloud", features = ["cli"] }
-planetary-db = { version = "0.1.0", path = "../db" }
 anyhow.workspace = true
+byte-unit.workspace = true
 cfg-if.workspace = true
+chrono.workspace = true
 clap.workspace = true
 clap-verbosity-flag.workspace = true
+cloud-copy.workspace = true
 colored.workspace = true
 futures.workspace = true
 glob.workspace = true
+planetary-db = { version = "0.1.0", path = "../db" }
 reqwest.workspace = true
+reqwest-middleware.workspace = true
 secrecy.workspace = true
 tes.workspace = true
 tokio.workspace = true
 tokio-retry2.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
 tracing-indicatif.workspace = true
 tracing-log.workspace = true
 tracing-subscriber.workspace = true
-tracing.workspace = true
 url.workspace = true
 walkdir.workspace = true
 
 [lints]
 workspace = true
-
-[[bin]]
-name = "planetary-transporter"
-path = "src/main.rs"

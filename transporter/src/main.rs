@@ -29,26 +29,39 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use byte_unit::Byte;
+use byte_unit::UnitType;
+use chrono::TimeDelta;
+use chrono::Utc;
 use clap::Parser;
 use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
-use cloud::Config;
-use cloud::GoogleAuthConfig;
-use cloud::GoogleConfig;
-use cloud::S3AuthConfig;
-use cloud::S3Config;
-use cloud::TransferEvent;
-use cloud::UrlExt;
+use cloud_copy::AzureConfig;
+use cloud_copy::Config;
+use cloud_copy::GoogleAuthConfig;
+use cloud_copy::GoogleConfig;
+use cloud_copy::HttpClient;
+use cloud_copy::S3AuthConfig;
+use cloud_copy::S3Config;
+use cloud_copy::TransferEvent;
+use cloud_copy::UrlExt;
+use cloud_copy::cli::TimeDeltaExt;
+use cloud_copy::cli::handle_events;
 use colored::Colorize;
+use futures::FutureExt;
+use futures::StreamExt;
+use futures::stream;
 use glob::Pattern;
 use planetary_db::TaskIo;
-use reqwest::Client;
 use reqwest::Url;
 use secrecy::SecretString;
 use tes::v1::types::responses::OutputFile;
@@ -56,12 +69,13 @@ use tes::v1::types::task::IoType;
 use tes::v1::types::task::Output;
 use tokio::fs::File;
 use tokio::fs::create_dir_all;
+use tokio::pin;
 use tokio::sync::broadcast;
-use tokio::sync::oneshot;
 use tokio_retry2::Retry;
 use tokio_retry2::RetryError;
 use tokio_retry2::strategy::ExponentialFactorBackoff;
 use tokio_retry2::strategy::MaxInterval;
+use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -86,10 +100,37 @@ fn retry_durations() -> impl Iterator<Item = Duration> {
 }
 
 /// Helper for notifying that a network operation failed and will be retried.
-fn notify_retry(e: &reqwest::Error, duration: Duration) {
+fn notify_retry(e: &reqwest_middleware::Error, duration: Duration) {
     warn!(
         "network operation failed: {e} (retrying after {duration} seconds)",
         duration = duration.as_secs()
+    );
+}
+
+/// Prints the statistics after transferring inputs or outputs.
+fn print_stats(delta: TimeDelta, files: usize, bytes: u64) {
+    let seconds = delta.num_seconds();
+
+    println!(
+        "{files} file{s} copied with a total of {bytes:#} transferred in {time} ({speed})",
+        files = files.to_string().cyan(),
+        s = if files == 1 { "" } else { "s" },
+        bytes = format!(
+            "{:#.3}",
+            Byte::from_u64(bytes).get_appropriate_unit(UnitType::Binary)
+        )
+        .cyan(),
+        time = delta.english().to_string().cyan(),
+        speed = format!(
+            "{bytes:#.3}/s",
+            bytes = if seconds == 0 || bytes < 60 {
+                Byte::from_u64(bytes)
+            } else {
+                Byte::from_u64(bytes / seconds as u64)
+            }
+            .get_appropriate_unit(UnitType::Binary)
+        )
+        .cyan()
     );
 }
 
@@ -146,7 +187,7 @@ struct Args {
     block_size: Option<u64>,
 
     /// The parallelism level for network operations; defaults to the host's
-    /// available parallelism multiplied by 4.
+    /// available parallelism.
     #[clap(long, value_name = "NUM")]
     parallelism: Option<usize>,
 
@@ -188,7 +229,7 @@ struct Args {
 }
 
 /// Gets the inputs and outputs for the given task.
-async fn get_task_io(client: &Client, service: &Url, tes_id: &str) -> Result<TaskIo> {
+async fn get_task_io(client: &HttpClient, service: &Url, tes_id: &str) -> Result<TaskIo> {
     Ok(Retry::spawn_notify(
         retry_durations(),
         || async {
@@ -200,10 +241,10 @@ async fn get_task_io(client: &Client, service: &Url, tes_id: &str) -> Result<Tas
                 .await
                 .map_err(RetryError::transient)?
                 .error_for_status()
-                .map_err(RetryError::permanent)?
+                .map_err(|e| RetryError::permanent(e.into()))?
                 .json()
                 .await
-                .map_err(RetryError::permanent)
+                .map_err(|e| RetryError::permanent(e.into()))
         },
         notify_retry,
     )
@@ -212,7 +253,7 @@ async fn get_task_io(client: &Client, service: &Url, tes_id: &str) -> Result<Tas
 
 /// Updates a task's output files.
 async fn update_output_files(
-    client: &Client,
+    client: &HttpClient,
     service: &Url,
     tes_id: &str,
     outputs: &[OutputFile],
@@ -229,7 +270,7 @@ async fn update_output_files(
                 .await
                 .map_err(RetryError::transient)?
                 .error_for_status()
-                .map_err(RetryError::permanent)
+                .map_err(|e| RetryError::permanent(e.into()))
         },
         notify_retry,
     )
@@ -248,8 +289,9 @@ async fn download_inputs(
     tes_id: &str,
     inputs_dir: &Path,
     outputs_dir: &Path,
+    cancel: CancellationToken,
 ) -> Result<()> {
-    let client = Client::new();
+    let client = HttpClient::new();
     let task_io = get_task_io(&client, &orchestrator_service, tes_id)
         .await
         .map_err(|e| {
@@ -273,71 +315,114 @@ async fn download_inputs(
         )
     })?;
 
+    // Create an event handling task
     let (events_tx, events_rx) = broadcast::channel(1000);
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let handler = tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
+    let c = cancel.clone();
+    let handler = tokio::spawn(async move { handle_events(events_rx, c).await });
 
-    let transfer = async move || {
-        for (index, input) in task_io.inputs.into_iter().enumerate() {
-            let path = inputs_dir.join(index.to_string());
+    let files_created = Arc::new(AtomicUsize::new(0));
 
-            // Write the contents if directly given
-            if let Some(contents) = &input.content {
-                assert_eq!(
-                    input.ty,
-                    IoType::File,
-                    "cannot create content for a directory"
-                );
+    let created = files_created.clone();
+    let transfer = async || {
+        let mut downloads = stream::iter(task_io.inputs.into_iter().enumerate())
+            .map(|(index, input)| {
+                let path = inputs_dir.join(index.to_string());
+                let cancel = cancel.clone();
+                let config = config.clone();
+                let client = client.clone();
+                let events_tx = events_tx.clone();
+                let created = created.clone();
+                tokio::spawn(async move {
+                    // Write the contents if directly given
+                    if let Some(contents) = &input.content {
+                        assert_eq!(
+                            input.ty,
+                            IoType::File,
+                            "cannot create content for a directory"
+                        );
 
-                info!(
-                    "creating input file `{path}` with specified contents",
-                    path = input.path,
-                );
+                        info!(
+                            "creating input file `{path}` with specified contents",
+                            path = input.path,
+                        );
 
-                tokio::fs::write(&path, contents).await.with_context(|| {
-                    format!("failed to create input file `{path}`", path = input.path)
-                })?;
-                continue;
-            }
+                        tokio::fs::write(&path, contents).await.with_context(|| {
+                            format!("failed to create input file `{path}`", path = input.path)
+                        })?;
 
-            let url = input
-                .url
-                .context("input is missing a URL")?
-                .parse::<Url>()
-                .context("input URL is invalid")?;
+                        created.fetch_add(1, Ordering::SeqCst);
+                        return anyhow::Ok(());
+                    }
 
-            // Perform the copy
-            cloud::copy(config.clone(), url.clone(), &path, Some(events_tx.clone()))
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to download input `{url}` to `{path}`",
-                        url = url.display(),
-                        path = input.path
+                    let url = input
+                        .url
+                        .context("input is missing a URL")?
+                        .parse::<Url>()
+                        .context("input URL is invalid")?;
+
+                    // Perform the copy
+                    cloud_copy::copy(
+                        config,
+                        client.clone(),
+                        url.clone(),
+                        &path,
+                        cancel,
+                        Some(events_tx),
                     )
-                })?;
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to download input `{url}` to `{path}`",
+                            url = url.display(),
+                            path = input.path
+                        )
+                    })?;
 
-            // Check that the result matches the input type
-            match (path.is_file(), input.ty) {
-                (true, IoType::Directory) => bail!(
-                    "input `{url}` was a file but the input type was `DIRECTORY`",
-                    url = url.display()
-                ),
-                (false, IoType::File) => bail!(
-                    "input `{url}` was a directory but the input type was `FILE`",
-                    url = url.display()
-                ),
-                _ => {}
+                    // Check that the result matches the input type
+                    match (path.is_file(), input.ty) {
+                        (true, IoType::Directory) => bail!(
+                            "input `{url}` was a file but the input type was `DIRECTORY`",
+                            url = url.display()
+                        ),
+                        (false, IoType::File) => bail!(
+                            "input `{url}` was a directory but the input type was `FILE`",
+                            url = url.display()
+                        ),
+                        _ => {}
+                    }
+
+                    Ok(())
+                })
+                .map(|r| r.expect("task panicked"))
+            })
+            .buffer_unordered(config.parallelism());
+
+        loop {
+            let result = downloads.next().await;
+            match result {
+                Some(r) => r?,
+                None => break,
             }
         }
 
-        Ok(())
+        anyhow::Ok(())
     };
 
+    // Perform the transfer
+    let start = Utc::now();
     let result = transfer().await;
+    let end = Utc::now();
 
-    shutdown_tx.send(()).ok();
-    handler.await.expect("failed to join events handler");
+    let stats = handler.await.expect("failed to join events handler");
+
+    // Print the statistics upon success
+    if result.is_ok() {
+        print_stats(
+            end - start,
+            files_created.load(Ordering::SeqCst) + stats.files,
+            stats.bytes,
+        );
+    }
 
     result?;
 
@@ -364,8 +449,9 @@ async fn upload_outputs(
     orchestrator_service: Url,
     tes_id: &str,
     outputs_dir: &Path,
+    cancel: CancellationToken,
 ) -> Result<()> {
-    let client = Client::new();
+    let client = HttpClient::new();
     let task_io = get_task_io(&client, &orchestrator_service, tes_id)
         .await
         .map_err(|e| {
@@ -373,21 +459,16 @@ async fn upload_outputs(
             anyhow!("failed to retrieve information for task `{tes_id}`")
         })?;
 
-    // Only handle transfer events if for a terminal to display the progress
-    let (handler, events_tx) = if std::io::stderr().is_terminal() {
-        let (events_tx, events_rx) = broadcast::channel(1000);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let handler =
-            tokio::spawn(async move { cloud::handle_events(events_rx, shutdown_rx).await });
-        (Some((shutdown_tx, handler)), Some(events_tx))
-    } else {
-        (None, None)
-    };
+    // Create an event handling task
+    let (events_tx, events_rx) = broadcast::channel(1000);
+    let c = cancel.clone();
+    let handler = tokio::spawn(async move { handle_events(events_rx, c).await });
 
-    let transfer = async move || {
+    // Transfer the outputs
+    let transfer = async || {
         let mut files = Vec::new();
         for (index, output) in task_io.outputs.iter().enumerate() {
-            let url = output.url.parse::<Url>().context("output URL is invalid")?;
+            let mut url = output.url.parse::<Url>().context("output URL is invalid")?;
             let path = outputs_dir.join(index.to_string());
             let metadata = path.metadata().with_context(|| {
                 format!(
@@ -400,38 +481,71 @@ async fn upload_outputs(
                 .to_str()
                 .with_context(|| format!("path `{path}` is not UTF-8", path = path.display()))?;
 
-            if metadata.is_file() {
-                upload_file(
-                    config.clone(),
-                    output,
-                    url,
-                    path,
-                    metadata.len(),
-                    events_tx.clone(),
-                    &mut files,
-                )
-                .await?;
-            } else {
-                upload_directory(
-                    config.clone(),
-                    output,
-                    &url,
-                    path,
-                    events_tx.clone(),
-                    &mut files,
-                )
-                .await?;
+            if metadata.is_dir() {
+                files.extend(
+                    upload_directory(
+                        config.clone(),
+                        client.clone(),
+                        output,
+                        &url,
+                        path,
+                        Some(events_tx.clone()),
+                        cancel.clone(),
+                    )
+                    .await?,
+                );
+                continue;
             }
+
+            if output.ty != IoType::File {
+                bail!(
+                    "output `{path}` exists but the output is not a file",
+                    path = output.path
+                );
+            }
+
+            // Perform the copy
+            cloud_copy::copy(
+                config.clone(),
+                client.clone(),
+                path,
+                url.clone(),
+                cancel.clone(),
+                Some(events_tx.clone()),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to upload output `{path}` to `{url}`",
+                    path = output.path,
+                    url = url.display(),
+                )
+            })?;
+
+            // Clear the query and fragment before saving the output
+            url.set_query(None);
+            url.set_fragment(None);
+
+            files.push(OutputFile {
+                url: url.as_str().to_string(),
+                path: output.path.clone(),
+                size_bytes: metadata.len().to_string(),
+            });
         }
 
-        anyhow::Ok(files)
+        Ok(files)
     };
 
+    // Perform the transfer
+    let start = Utc::now();
     let result = transfer().await;
+    let end = Utc::now();
 
-    if let Some((shutdown_tx, handler)) = handler {
-        shutdown_tx.send(()).ok();
-        handler.await.expect("failed to join events handler");
+    let stats = handler.await.expect("failed to join events handler");
+
+    // Print the statistics upon success
+    if result.is_ok() {
+        print_stats(end - start, stats.files, stats.bytes);
     }
 
     if let Err(e) = update_output_files(&client, &orchestrator_service, tes_id, &result?).await {
@@ -442,55 +556,16 @@ async fn upload_outputs(
     Ok(())
 }
 
-/// Uploads a file output.
-async fn upload_file(
-    config: Config,
-    output: &Output,
-    mut url: Url,
-    path: &str,
-    size: u64,
-    events: Option<broadcast::Sender<TransferEvent>>,
-    files: &mut Vec<OutputFile>,
-) -> Result<()> {
-    if output.ty != IoType::File {
-        bail!(
-            "output `{path}` exists but the output is not a file",
-            path = output.path
-        );
-    }
-
-    // Perform the copy
-    cloud::copy(config, path, url.clone(), events)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to upload output `{path}` to `{url}`",
-                path = output.path,
-                url = url.display(),
-            )
-        })?;
-
-    // Clear the query and fragment before saving the output
-    url.set_query(None);
-    url.set_fragment(None);
-
-    files.push(OutputFile {
-        url: url.as_str().to_string(),
-        path: output.path.clone(),
-        size_bytes: size.to_string(),
-    });
-    Ok(())
-}
-
 /// Uploads a directory output.
 async fn upload_directory(
     config: Config,
+    client: HttpClient,
     output: &Output,
     url: &Url,
     path: &str,
     events: Option<broadcast::Sender<TransferEvent>>,
-    files: &mut Vec<OutputFile>,
-) -> Result<()> {
+    cancel: CancellationToken,
+) -> Result<Vec<OutputFile>> {
     if output.ty != IoType::Directory {
         bail!(
             "output `{path}` exists but the output is not a directory",
@@ -507,6 +582,7 @@ async fn upload_directory(
             None
         };
 
+    let mut files = Vec::new();
     for entry in WalkDir::new(path) {
         let entry = entry
             .with_context(|| format!("failed to read directory `{path}`", path = output.path))?;
@@ -560,14 +636,21 @@ async fn upload_directory(
         }
 
         // Perform the copy
-        cloud::copy(config.clone(), entry.path(), url.clone(), events.clone())
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to upload output `{container_path}` to `{url}`",
-                    url = url.display(),
-                )
-            })?;
+        cloud_copy::copy(
+            config.clone(),
+            client.clone(),
+            entry.path(),
+            url.clone(),
+            cancel.clone(),
+            events.clone(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to upload output `{container_path}` to `{url}`",
+                url = url.display(),
+            )
+        })?;
 
         // Clear the query and fragment before saving the output
         url.set_query(None);
@@ -580,12 +663,12 @@ async fn upload_directory(
         });
     }
 
-    Ok(())
+    Ok(files)
 }
 
 #[cfg(unix)]
 /// An async function that waits for a termination signal.
-async fn terminate() {
+async fn terminate(cancel: CancellationToken) {
     use tokio::select;
     use tokio::signal::unix::SignalKind;
     use tokio::signal::unix::signal;
@@ -600,11 +683,12 @@ async fn terminate() {
     };
 
     info!("received {signal} signal: initiating shutdown");
+    cancel.cancel();
 }
 
 #[cfg(windows)]
 /// An async function that waits for a termination signal.
-async fn terminate() {
+async fn terminate(cancel: CancellationToken) {
     use tokio::signal::windows::ctrl_c;
     use tracing::info;
 
@@ -612,10 +696,11 @@ async fn terminate() {
     signal.await;
 
     info!("received Ctrl-C signal: initiating shutdown");
+    cancel.cancel();
 }
 
 /// Runs the program.
-async fn run() -> Result<()> {
+async fn run(cancel: CancellationToken) -> Result<()> {
     let args = Args::parse();
 
     match std::env::var("RUST_LOG") {
@@ -664,10 +749,13 @@ async fn run() -> Result<()> {
     };
 
     let config = Config {
+        link_to_cache: false,
         block_size: args.block_size,
         parallelism: args.parallelism,
         retries: args.retries,
+        azure: AzureConfig { use_azurite: false },
         s3: S3Config {
+            use_localstack: false,
             region: args.aws_default_region,
             auth: s3_auth,
         },
@@ -682,6 +770,7 @@ async fn run() -> Result<()> {
                 &args.tes_id,
                 &args.inputs_dir.expect("option should be present"),
                 &args.outputs_dir,
+                cancel,
             )
             .await
         }
@@ -691,29 +780,39 @@ async fn run() -> Result<()> {
                 args.orchestrator_service,
                 &args.tes_id,
                 &args.outputs_dir,
+                cancel,
             )
             .await
         }
     }
 }
 
-/// The main method.
 #[tokio::main]
-pub async fn main() {
-    tokio::select! {
-        _ = terminate() => return,
-        r = run() => {
-            if let Err(e) = r {
-                eprintln!(
-                    "{error}: {e:?}",
-                    error = if std::io::stderr().is_terminal() {
-                        "error".red().bold()
-                    } else {
-                        "error".normal()
-                    }
-                );
+async fn main() {
+    let cancel = CancellationToken::new();
 
-                std::process::exit(1);
+    let run = run(cancel.clone());
+    pin!(run);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = terminate(cancel.clone()) => continue,
+            r = &mut run => {
+                if let Err(e) = r {
+                    eprintln!(
+                        "{error}: {e:?}",
+                        error = if std::io::stderr().is_terminal() {
+                            "error".red().bold()
+                        } else {
+                            "error".normal()
+                        }
+                    );
+
+                    std::process::exit(1);
+                }
+
+                break;
             }
         }
     }

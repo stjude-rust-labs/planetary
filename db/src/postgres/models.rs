@@ -5,6 +5,7 @@ use std::io::Write;
 
 use chrono::DateTime;
 use chrono::Utc;
+use cloud_copy::Alphanumeric;
 use diesel::FromSqlRow;
 use diesel::deserialize;
 use diesel::expression::AsExpression;
@@ -25,8 +26,6 @@ use tes::v1::types::task::Executor;
 use tes::v1::types::task::Input;
 use tes::v1::types::task::Output;
 use tes::v1::types::task::Resources;
-
-use crate::generator::Alphanumeric;
 
 /// Represents the state of a task.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, diesel_derive_enum::DbEnum)]
@@ -305,7 +304,7 @@ impl<'a> NewTask<'a> {
 
         Self {
             state: TaskState::Unknown,
-            tes_id: format!("{}", Alphanumeric::new(20)),
+            tes_id: format!("{:#}", Alphanumeric::new(20)),
             name: task.name.as_deref(),
             description: task.description.as_deref(),
             inputs: task.inputs.as_deref().map(|i| Json(i.into())),
@@ -650,4 +649,17 @@ impl From<FullPod> for ExecutorLog {
             exit_code: pod.exit_code.expect("should have exit code"),
         }
     }
+}
+
+/// Used to insert a new error into the errors table.
+#[derive(Insertable)]
+#[diesel(table_name = super::schema::errors)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewError<'a> {
+    /// The source of the error.
+    pub source: &'a str,
+    /// The task id related to the error.
+    pub task_id: Option<i32>,
+    /// The error message.
+    pub message: &'a str,
 }

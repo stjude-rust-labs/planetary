@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Added statistics printed upon a successful transfer ([#15](https://github.com/stjude-rust-labs/planetary/pull/15)).
 * Added support for Google Cloud Storage as a storage backend ([#12](https://github.com/stjude-rust-labs/planetary/pull/12)).
 * Added support for S3 as a storage backend ([#11](https://github.com/stjude-rust-labs/planetary/pull/11)).
 * Added signal handling ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).
@@ -22,4 +23,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Changed
 
+* Removed dependency on `cloud` in favor of `cloud-copy` ([#15](https://github.com/stjude-rust-labs/planetary/pull/15)).
 * Refactored progress event handling to the `cloud` crate ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).

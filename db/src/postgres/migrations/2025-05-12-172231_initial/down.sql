@@ -1,3 +1,4 @@
+DROP TABLE errors;
 DROP TABLE pods;
 DROP TYPE pod_state;
 DROP TYPE pod_kind;

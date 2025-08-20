@@ -9,10 +9,20 @@ homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["postgres"]
+postgres = [
+    "dep:diesel",
+    "dep:diesel-async",
+    "dep:diesel-derive-enum",
+    "dep:diesel_migrations",
+]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+cloud-copy.workspace = true
 diesel = { workspace = true, optional = true }
 diesel-async = { workspace = true, optional = true }
 diesel-derive-enum = { workspace = true, optional = true }
@@ -21,14 +31,10 @@ rand.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 tes.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 
 [lints]
 workspace = true
-
-[features]
-default = ["postgres"]
-postgres = ["dep:diesel", "dep:diesel-async", "dep:diesel-derive-enum", "dep:diesel_migrations"]

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Log errors to the database ([#15](https://github.com/stjude-rust-labs/planetary/pull/15)).
 * Added endpoints for getting task I/O and updating a task's outputs, which is
   now used from the transporter ([#13](https://github.com/stjude-rust-labs/planetary/pull/13)).
 * Added support for Google Cloud Storage as a storage backend ([#12](https://github.com/stjude-rust-labs/planetary/pull/12)).

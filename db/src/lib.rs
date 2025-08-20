@@ -22,11 +22,8 @@ use tes::v1::types::task::Output;
 use tes::v1::types::task::Resources;
 use tes::v1::types::task::State;
 
-mod generator;
 #[cfg(feature = "postgres")]
 pub mod postgres;
-
-pub use generator::*;
 
 /// Represents a database error.
 #[derive(Debug, thiserror::Error)]
@@ -271,6 +268,14 @@ pub trait Database: Send + Sync + 'static {
         &self,
         tes_id: &str,
         files: &[OutputFile],
+    ) -> DatabaseResult<()>;
+
+    /// Inserts an internal system error with the database.
+    async fn insert_error(
+        &self,
+        source: &str,
+        tes_id: Option<&str>,
+        message: &str,
     ) -> DatabaseResult<()>;
 }
 
