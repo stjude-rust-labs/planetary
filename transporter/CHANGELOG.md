@@ -17,11 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fixed
 
+* Fixed a hang in the transporter related to event handling ([#16](https://github.com/stjude-rust-labs/planetary/pull/16)).
 * The transporter now communicates with the orchestrator service instead of
   making direct database connections ([#13](https://github.com/stjude-rust-labs/planetary/pull/13)).
 * Fixed incorrect upload URLs when uploading an output directory ([#8](https://github.com/stjude-rust-labs/planetary/pull/8)).
 
 #### Changed
 
+* Updated `tes` and `cloud-copy` dependencies to latest ([#16](https://github.com/stjude-rust-labs/planetary/pull/16)).
 * Removed dependency on `cloud` in favor of `cloud-copy` ([#15](https://github.com/stjude-rust-labs/planetary/pull/15)).
 * Refactored progress event handling to the `cloud` crate ([#9](https://github.com/stjude-rust-labs/planetary/pull/9)).
