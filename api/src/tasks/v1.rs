@@ -310,7 +310,9 @@ pub async fn list_tasks(
         )));
     }
 
-    if params.tag_values.len() > params.tag_keys.len() {
+    if params.tag_values.as_ref().map(|v| v.len()).unwrap_or(0)
+        > params.tag_keys.as_ref().map(|k| k.len()).unwrap_or(0)
+    {
         return Err(Error::bad_request(
             "the number of tag values cannot exceed the number of tag keys",
         ));

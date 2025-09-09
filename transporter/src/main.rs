@@ -323,7 +323,7 @@ async fn download_inputs(
     let files_created = Arc::new(AtomicUsize::new(0));
 
     let created = files_created.clone();
-    let transfer = async || {
+    let transfer = async move || {
         let mut downloads = stream::iter(task_io.inputs.into_iter().enumerate())
             .map(|(index, input)| {
                 let path = inputs_dir.join(index.to_string());
@@ -541,6 +541,7 @@ async fn upload_outputs(
     let result = transfer().await;
     let end = Utc::now();
 
+    drop(events_tx);
     let stats = handler.await.expect("failed to join events handler");
 
     // Print the statistics upon success
@@ -750,6 +751,7 @@ async fn run(cancel: CancellationToken) -> Result<()> {
 
     let config = Config {
         link_to_cache: false,
+        overwrite: false,
         block_size: args.block_size,
         parallelism: args.parallelism,
         retries: args.retries,
