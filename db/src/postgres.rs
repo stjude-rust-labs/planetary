@@ -466,7 +466,10 @@ impl Database for PostgresDatabase {
         };
 
         // Add the tags to the query
-        for (k, v) in zip_longest(params.tag_keys, params.tag_values) {
+        for (k, v) in zip_longest(
+            params.tag_keys.unwrap_or_default(),
+            params.tag_values.unwrap_or_default(),
+        ) {
             if !v.is_empty() {
                 query = query.filter(
                     schema::tasks::tags.contains(models::Json(models::TagFilter::new(k, v))),
@@ -482,7 +485,7 @@ impl Database for PostgresDatabase {
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        match params.view {
+        match params.view.unwrap_or_default() {
             View::Minimal => {
                 let tasks = query
                     .select(models::MinimalTask::as_select())
