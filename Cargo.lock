@@ -612,8 +612,9 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
 name = "cloud-copy"
-version = "0.1.0"
-source = "git+https://github.com/peterhuene/cloud-copy?branch=remote-overwrite#810529fd8ea4fb9bba01168a1e67bdb5434edbcc"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89c198e206f659693ba0bf8064f64d003a9ccbfae1883287a42e053cfb94bf6"
 dependencies = [
  "anyhow",
  "base64",
@@ -640,7 +641,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.16",
  "tokio",
- "tokio-retry2",
+ "tokio-retry2 0.6.0",
  "tokio-util",
  "tracing",
  "tracing-indicatif",
@@ -2500,7 +2501,7 @@ dependencies = [
  "serde_json",
  "tes",
  "tokio",
- "tokio-retry2",
+ "tokio-retry2 0.5.8",
  "tower",
  "tower-http",
  "tracing",
@@ -2624,7 +2625,7 @@ dependencies = [
  "secrecy",
  "tes",
  "tokio",
- "tokio-retry2",
+ "tokio-retry2 0.5.8",
  "tokio-util",
  "tracing",
  "tracing-indicatif",
@@ -3691,6 +3692,16 @@ name = "tokio-retry2"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a0a122635e32bd827df297f311ca5e0292636bbd82f67ff84a4bedeab06dbeb"
+dependencies = [
+ "pin-project",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-retry2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7de2537bbad4f8b2d4237cdab9e7c4948a1f74744e45f54144eeccd05d3ad955"
 dependencies = [
  "pin-project",
  "tokio",
