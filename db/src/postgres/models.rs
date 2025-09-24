@@ -98,105 +98,6 @@ impl From<tes::v1::types::task::State> for TaskState {
     }
 }
 
-/// Represents the kind of a pod.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, diesel_derive_enum::DbEnum)]
-#[db_enum(
-    existing_type_path = "crate::postgres::schema::sql_types::PodKind",
-    value_style = "SCREAMING_SNAKE_CASE"
-)]
-pub enum PodKind {
-    /// The pod is for downloading inputs for a task.
-    Inputs,
-    /// The pod is for an executor of a task.
-    Executor,
-    /// The pod is for uploading outputs for a task.
-    Outputs,
-}
-
-impl From<PodKind> for crate::PodKind {
-    fn from(kind: PodKind) -> Self {
-        match kind {
-            PodKind::Inputs => Self::Inputs,
-            PodKind::Executor => Self::Executor,
-            PodKind::Outputs => Self::Outputs,
-        }
-    }
-}
-
-impl From<crate::PodKind> for PodKind {
-    fn from(kind: crate::PodKind) -> Self {
-        use crate::PodKind::*;
-
-        match kind {
-            Inputs => Self::Inputs,
-            Executor => Self::Executor,
-            Outputs => Self::Outputs,
-        }
-    }
-}
-
-/// Represents the state of a pod.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, diesel_derive_enum::DbEnum)]
-#[db_enum(
-    existing_type_path = "crate::postgres::schema::sql_types::PodState",
-    value_style = "SCREAMING_SNAKE_CASE"
-)]
-pub enum PodState {
-    /// The pod is in an unknown state.
-    Unknown,
-    /// The pod is waiting.
-    Waiting,
-    /// The pod is initializing.
-    Initializing,
-    /// The pod is running.
-    Running,
-    /// The pod has succeeded.
-    Succeeded,
-    /// The pod has failed.
-    Failed,
-    /// The pod failed to pull its image.
-    ImagePullError,
-}
-
-impl PodState {
-    /// Gets the pod states that are considering an "executing" pod.
-    pub fn executing() -> &'static [Self] {
-        &[Self::Waiting, Self::Initializing, Self::Running]
-    }
-}
-
-impl From<PodState> for crate::PodState {
-    fn from(state: PodState) -> Self {
-        use PodState::*;
-
-        match state {
-            Unknown => Self::Unknown,
-            Waiting => Self::Waiting,
-            Running => Self::Running,
-            Initializing => Self::Initializing,
-            Succeeded => Self::Succeeded,
-            Failed => Self::Failed,
-            ImagePullError => Self::ImagePullError,
-        }
-    }
-}
-
-impl From<crate::PodState> for PodState {
-    fn from(state: crate::PodState) -> Self {
-        use crate::PodState::*;
-
-        match state {
-            Unknown => Self::Unknown,
-            Waiting => Self::Waiting,
-            Running => Self::Running,
-            Initializing => Self::Initializing,
-            Succeeded => Self::Succeeded,
-            Failed => Self::Failed,
-            ImagePullError => Self::ImagePullError,
-        }
-    }
-}
-
 /// Represents a JSON serializable value.
 #[derive(Debug, FromSqlRow, AsExpression)]
 #[diesel(sql_type = diesel::sql_types::Jsonb)]
@@ -562,91 +463,149 @@ impl From<FullTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
     }
 }
 
-/// Used to insert a new pod into the pods table.
-#[derive(Insertable)]
-#[diesel(table_name = super::schema::pods)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct NewPod<'a> {
-    /// The task id of the pod.
-    pub task_id: i32,
-    /// The name of the pod.
-    pub name: &'a str,
-    /// The kind of pod.
-    pub kind: PodKind,
-    /// The state of the pod.
-    pub state: PodState,
-    /// The executor index for the pod.
-    pub executor_index: Option<i32>,
+/// Represents the kind of a container.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, diesel_derive_enum::DbEnum)]
+#[db_enum(
+    existing_type_path = "crate::postgres::schema::sql_types::ContainerKind",
+    value_style = "SCREAMING_SNAKE_CASE"
+)]
+pub enum ContainerKind {
+    /// The container is for downloading a task's inputs.
+    Inputs,
+    /// The container is a task executor.
+    Executor,
+    /// The container is for uploading a task's outputs.
+    Outputs,
 }
 
-/// Represents a pod relating to a task.
-#[derive(Queryable, Selectable, Identifiable, Associations, Debug, PartialEq)]
-#[diesel(belongs_to(BasicTask, foreign_key = task_id))]
-#[diesel(table_name = super::schema::pods)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct BasicPod {
-    /// The primary id of the pod.
-    pub id: i32,
-    /// The task id of the pod.
-    pub task_id: i32,
-    /// The kind of pod.
-    pub kind: PodKind,
-    /// The executor index for the pod.
-    pub executor_index: Option<i32>,
-    /// The start time for the pod.
-    pub start_time: Option<DateTime<Utc>>,
-    /// The end time for the pod.
-    pub end_time: Option<DateTime<Utc>>,
-    /// The exit code of the pod.
-    pub exit_code: Option<i32>,
-}
-
-impl From<BasicPod> for ExecutorLog {
-    fn from(pod: BasicPod) -> Self {
-        Self {
-            start_time: pod.start_time,
-            end_time: pod.end_time,
-            stdout: None,
-            stderr: None,
-            exit_code: pod.exit_code.expect("should have exit code"),
+impl From<ContainerKind> for crate::ContainerKind {
+    fn from(kind: ContainerKind) -> Self {
+        match kind {
+            ContainerKind::Inputs => Self::Inputs,
+            ContainerKind::Executor => Self::Executor,
+            ContainerKind::Outputs => Self::Outputs,
         }
     }
 }
 
-/// Represents a pod relating to a task.
-#[derive(Queryable, Selectable, Identifiable, Associations, Debug, PartialEq)]
-#[diesel(belongs_to(FullTask, foreign_key = task_id))]
-#[diesel(table_name = super::schema::pods)]
-#[diesel(check_for_backend(diesel::pg::Pg))]
-pub struct FullPod {
-    /// The primary id of the pod.
-    pub id: i32,
-    /// The task id of the pod.
-    pub task_id: i32,
-    /// The kind of pod.
-    pub kind: PodKind,
-    /// The executor index for the pod.
-    pub executor_index: Option<i32>,
-    /// The start time for the pod.
-    pub start_time: Option<DateTime<Utc>>,
-    /// The end time for the pod.
-    pub end_time: Option<DateTime<Utc>>,
-    /// The stdout of the pod.
-    pub stdout: Option<String>,
-    /// The stderr of the pod.
-    pub stderr: Option<String>,
-    /// The exit code of the pod.
-    pub exit_code: Option<i32>,
+impl From<crate::ContainerKind> for ContainerKind {
+    fn from(kind: crate::ContainerKind) -> Self {
+        use crate::ContainerKind::*;
+
+        match kind {
+            Inputs => Self::Inputs,
+            Executor => Self::Executor,
+            Outputs => Self::Outputs,
+        }
+    }
 }
 
-impl From<FullPod> for ExecutorLog {
-    fn from(pod: FullPod) -> Self {
+/// Used to insert a new container into the containers table.
+#[derive(Insertable)]
+#[diesel(table_name = super::schema::containers)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewContainer<'a> {
+    /// The task id of the container.
+    pub task_id: i32,
+    /// The name of the container.
+    pub kind: ContainerKind,
+    /// The executor index of the container.
+    ///
+    /// This is `NULL` for input and output containers.
+    pub executor_index: Option<i32>,
+    /// The start time for the container.
+    pub start_time: DateTime<Utc>,
+    /// The end time for the container.
+    pub end_time: DateTime<Utc>,
+    /// The stdout contents of the container.
+    pub stdout: Option<Cow<'a, str>>,
+    /// The stderr contents of the container.
+    pub stderr: Option<Cow<'a, str>>,
+    /// The exit code of the container.
+    pub exit_code: i32,
+}
+
+impl<'a> NewContainer<'a> {
+    /// Constructs a new container from information relating to a terminated
+    /// container.
+    pub fn new(task_id: i32, container: crate::TerminatedContainer<'a>) -> Self {
         Self {
-            start_time: pod.start_time,
-            end_time: pod.end_time,
-            stdout: pod.stdout,
-            stderr: pod.stderr,
-            exit_code: pod.exit_code.expect("should have exit code"),
+            task_id,
+            kind: container.kind.into(),
+            executor_index: container.executor_index,
+            start_time: container.start_time,
+            end_time: container.end_time,
+            stdout: container.stdout,
+            stderr: container.stderr,
+            exit_code: container.exit_code,
+        }
+    }
+}
+
+/// Represents a container relating to a task.
+///
+/// This does not retrieve the container's logs.
+#[derive(Queryable, Selectable, Identifiable, Associations, Debug, PartialEq)]
+#[diesel(belongs_to(BasicTask, foreign_key = task_id))]
+#[diesel(table_name = super::schema::containers)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct BasicContainer {
+    /// The primary id of the container.
+    pub id: i32,
+    /// The task id of the container.
+    pub task_id: i32,
+    /// The start time for the container.
+    pub start_time: DateTime<Utc>,
+    /// The end time for the container.
+    pub end_time: DateTime<Utc>,
+    /// The exit code of the container.
+    pub exit_code: i32,
+}
+
+impl From<BasicContainer> for ExecutorLog {
+    fn from(container: BasicContainer) -> Self {
+        Self {
+            start_time: Some(container.start_time),
+            end_time: Some(container.end_time),
+            stdout: None,
+            stderr: None,
+            exit_code: container.exit_code,
+        }
+    }
+}
+
+/// Represents a container relating to a task.
+///
+/// This retrieves the container's logs.
+#[derive(Queryable, Selectable, Identifiable, Associations, Debug, PartialEq)]
+#[diesel(belongs_to(FullTask, foreign_key = task_id))]
+#[diesel(table_name = super::schema::containers)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct FullContainer {
+    /// The primary id of the container.
+    pub id: i32,
+    /// The task id of the container.
+    pub task_id: i32,
+    /// The start time for the container.
+    pub start_time: DateTime<Utc>,
+    /// The end time for the container.
+    pub end_time: DateTime<Utc>,
+    /// The stdout of the container.
+    pub stdout: Option<String>,
+    /// The stderr of the container.
+    pub stderr: Option<String>,
+    /// The exit code of the container.
+    pub exit_code: i32,
+}
+
+impl From<FullContainer> for ExecutorLog {
+    fn from(container: FullContainer) -> Self {
+        Self {
+            start_time: Some(container.start_time),
+            end_time: Some(container.end_time),
+            stdout: container.stdout,
+            stderr: container.stderr,
+            exit_code: container.exit_code,
         }
     }
 }

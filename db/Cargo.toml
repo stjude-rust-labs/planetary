@@ -27,6 +27,7 @@ diesel = { workspace = true, optional = true }
 diesel-async = { workspace = true, optional = true }
 diesel-derive-enum = { workspace = true, optional = true }
 diesel_migrations = { workspace = true, optional = true }
+futures.workspace = true
 rand.workspace = true
 secrecy.workspace = true
 serde.workspace = true

@@ -12,6 +12,7 @@ use planetary_db::Database;
 use planetary_orchestrator::Server;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
+use secrecy::SecretString;
 use tracing_log::AsTrace as _;
 use tracing_subscriber::EnvFilter;
 use url::Url;
@@ -35,13 +36,33 @@ pub struct Args {
     #[clap(long, env)]
     service_url: Url,
 
+    /// The service API key
+    #[clap(long, env, hide_env_values(true))]
+    service_api_key: SecretString,
+
     /// The verbosity level.
     #[command(flatten)]
     verbose: Verbosity<WarnLevel>,
 
-    /// The Planetary database URL to use.
+    /// The Planetary database user name to use.
+    #[clap(long, env)]
+    database_user: String,
+
+    /// The Planetary database password to use.
     #[clap(long, env, hide_env_values(true))]
-    database_url: secrecy::SecretString,
+    database_password: SecretString,
+
+    /// The Planetary database host to use.
+    #[clap(long, env)]
+    database_host: String,
+
+    /// The Planetary database port to use.
+    #[clap(long, env, default_value_t = 5432)]
+    database_port: i32,
+
+    /// The Planetary database name to use.
+    #[clap(long, env, default_value = "planetary")]
+    database_name: String,
 
     /// The Kubernetes storage class to use for tasks.
     #[clap(long, env)]
@@ -78,7 +99,17 @@ impl Args {
     async fn database(&self) -> Result<Arc<dyn Database>> {
         cfg_if::cfg_if! {
             if #[cfg(feature = "postgres")] {
-                Ok(Arc::new(planetary_db::postgres::PostgresDatabase::new(self.database_url.clone())?))
+                let url = planetary_db::postgres::format_database_url(
+                    &self.database_user,
+                    &self.database_password,
+                    &self.database_host,
+                    self.database_port,
+                    &self.database_name,
+                    &self.pod_name,
+                );
+                Ok(Arc::new(planetary_db::postgres::PostgresDatabase::new(
+                    url.into(),
+                )?))
             } else {
                 compile_error!("no database feature was enabled");
             }
@@ -142,6 +173,7 @@ pub async fn main() -> anyhow::Result<()> {
         .maybe_transporter_image(args.transporter_image)
         .pod_name(args.pod_name)
         .service_url(args.service_url)
+        .service_api_key(args.service_api_key)
         .maybe_tasks_namespace(args.tasks_namespace)
         .maybe_transporter_cpu(args.transporter_cpu)
         .maybe_transporter_memory(args.transporter_memory)

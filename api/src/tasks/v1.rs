@@ -15,6 +15,8 @@ use planetary_server::Json;
 use planetary_server::Path;
 use planetary_server::Query;
 use planetary_server::ServerResponse;
+use reqwest::header;
+use secrecy::ExposeSecret;
 use tes::v1::types::requests::DEFAULT_PAGE_SIZE;
 use tes::v1::types::requests::GetTaskParams;
 use tes::v1::types::requests::ListTasksParams;
@@ -196,8 +198,8 @@ fn validate_task(task: &RequestTask) -> Result<()> {
         if let Some(disk) = resources.disk_gb {
             let disk = disk.ceil();
 
-            if disk <= 0. {
-                bail!("task resource disk must be greater than zero");
+            if disk < 0.0 {
+                bail!("task resource disk cannot be less than zero");
             }
 
             if disk > u64::MAX as f64 {
@@ -277,9 +279,17 @@ pub async fn create_task(
                 .client
                 .post(
                     state
-                        .orchestrator_service
+                        .orchestrator
+                        .url
                         .join(&format!("/v1/tasks/{id}"))
                         .expect("URL should join"),
+                )
+                .header(
+                    header::AUTHORIZATION,
+                    format!(
+                        "Bearer {token}",
+                        token = state.orchestrator.api_key.expose_secret()
+                    ),
                 )
                 .send()
                 .await
@@ -351,6 +361,7 @@ pub async fn cancel_task(
             id,
             TesState::Canceling,
             &[&format_log_message!("canceling task `{id}`")],
+            None,
         )
         .await?
     {
@@ -370,9 +381,17 @@ pub async fn cancel_task(
                 .client
                 .delete(
                     state
-                        .orchestrator_service
+                        .orchestrator
+                        .url
                         .join(&format!("/v1/tasks/{id}"))
                         .expect("URL should join"),
+                )
+                .header(
+                    header::AUTHORIZATION,
+                    format!(
+                        "Bearer {token}",
+                        token = state.orchestrator.api_key.expose_secret()
+                    ),
                 )
                 .send()
                 .await

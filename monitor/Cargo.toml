@@ -29,6 +29,7 @@ postgres = ["planetary-db/postgres"]
 anyhow.workspace = true
 bon.workspace = true
 cfg-if = { workspace = true, optional = true }
+chrono.workspace = true
 clap = { workspace = true, optional = true }
 clap-verbosity-flag = { workspace = true, optional = true }
 futures.workspace = true
@@ -38,6 +39,7 @@ planetary-db = { version = "0.1.0", path = "../db" }
 planetary-server = { version = "0.1.0", path = "../server" }
 reqwest.workspace = true
 secrecy.workspace = true
+tes.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true

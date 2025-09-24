@@ -2,14 +2,17 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bon::Builder;
 use planetary_db::Database;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
+use secrecy::SecretString;
 use url::Url;
 
 use crate::monitor::Monitor;
+use crate::monitor::OrchestratorServiceInfo;
 
 mod monitor;
 
@@ -40,9 +43,19 @@ pub struct Server {
     #[builder(into)]
     tasks_namespace: Option<String>,
 
+    /// The interval for which the monitor should check the cluster state.
+    ///
+    /// Defaults to 60 seconds.
+    #[builder(into)]
+    interval: Duration,
+
     /// The Planetary orchestrator service URL.
     #[builder(into)]
     orchestrator_url: Url,
+
+    /// The Planetary orchestrator service API key.
+    #[builder(into)]
+    orchestrator_api_key: SecretString,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -75,9 +88,13 @@ impl Server {
         // Spawn the monitor
         let monitor = Monitor::spawn(
             self.database,
-            self.orchestrator_url,
+            OrchestratorServiceInfo {
+                url: self.orchestrator_url,
+                api_key: self.orchestrator_api_key,
+            },
             self.planetary_namespace,
             self.tasks_namespace,
+            self.interval,
         )
         .await?;
 

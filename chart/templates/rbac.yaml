@@ -8,13 +8,13 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  verbs: ["create", "get", "list", "watch", "patch"]
 - apiGroups: [""]
   resources: ["pods/log"]
   verbs: ["get"]
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
-  verbs: ["create", "delete"]
+  verbs: ["create", "patch"]
 ---
 # Service account for the orchestrator
 apiVersion: v1
@@ -61,7 +61,10 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["get"]
+  verbs: ["list", "deletecollection", "patch"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["deletecollection", "patch"]
 ---
 # Service account for the monitor
 apiVersion: v1

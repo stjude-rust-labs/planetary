@@ -1,27 +1,21 @@
-# Default deny ingress and egress for executor pods
+# Default deny ingress and egress for task pods
 kind: NetworkPolicy
 apiVersion: networking.k8s.io/v1
 metadata:
   name: default-deny-all
   namespace: {{ .Values.tasks.namespace }}
 spec:
-  podSelector:
-    matchLabels:
-      planetary/pod-kind: executor
   policyTypes:
     - Ingress
     - Egress
 ---
-# Allow egress traffic to the public Internet from executor pods
+# Allow egress traffic to the public Internet from task pods
 kind: NetworkPolicy
 apiVersion: networking.k8s.io/v1
 metadata:
   name: allow-internet-only
   namespace: {{ .Values.tasks.namespace }}
 spec:
-  podSelector:
-    matchLabels:
-      planetary/pod-kind: executor
   policyTypes:
   - Egress
   egress:
@@ -37,6 +31,17 @@ spec:
       - port: 53
         protocol: UDP
       - port: 53
+        protocol: TCP
+  # Allow TCP to the orchestrator
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: orchestrator
+    ports:
+      - port: {{ .Values.orchestrator.service.port }}
         protocol: TCP
   # Allow public Internet traffic
   - to:

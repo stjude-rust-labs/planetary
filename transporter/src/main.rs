@@ -23,8 +23,10 @@
 //! Likewise, if the `--outputs` option is used with `--targets /mnt/outputs`,
 //! it will access `/mnt/outputs/0`, `/mnt/outputs/1`, etc.
 
+use std::fs::Permissions;
 use std::io::IsTerminal;
 use std::io::stderr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -63,12 +65,15 @@ use futures::stream;
 use glob::Pattern;
 use planetary_db::TaskIo;
 use reqwest::Url;
+use reqwest::header;
+use secrecy::ExposeSecret;
 use secrecy::SecretString;
 use tes::v1::types::responses::OutputFile;
 use tes::v1::types::task::IoType;
 use tes::v1::types::task::Output;
 use tokio::fs::File;
 use tokio::fs::create_dir_all;
+use tokio::fs::set_permissions;
 use tokio::pin;
 use tokio::sync::broadcast;
 use tokio_retry2::Retry;
@@ -155,12 +160,24 @@ impl FromStr for Mode {
     }
 }
 
+/// Represents information about the orchestrator service.
+struct OrchestratorServiceInfo {
+    /// The URL of the orchestrator service.
+    url: Url,
+    /// The orchestrator service API key.
+    api_key: SecretString,
+}
+
 /// A tool for transporting Planetary task's inputs and outputs.
 #[derive(Parser)]
 struct Args {
     /// The URL for the orchestrator service.
     #[clap(long, env)]
-    orchestrator_service: Url,
+    orchestrator_url: Url,
+
+    /// The Planetary orchestrator service API key.
+    #[clap(long, env, hide_env_values(true))]
+    orchestrator_api_key: SecretString,
 
     /// The mode of operation.
     #[arg(long)]
@@ -229,14 +246,25 @@ struct Args {
 }
 
 /// Gets the inputs and outputs for the given task.
-async fn get_task_io(client: &HttpClient, service: &Url, tes_id: &str) -> Result<TaskIo> {
+async fn get_task_io(
+    client: &HttpClient,
+    orchestrator: &OrchestratorServiceInfo,
+    tes_id: &str,
+) -> Result<TaskIo> {
     Ok(Retry::spawn_notify(
         retry_durations(),
         || async {
             // Retry the operation is there is a problem sending the request to the server
             // Don't retry if the service returned an error response
             client
-                .get(format!("{service}v1/tasks/{tes_id}/io"))
+                .get(format!("{url}v1/tasks/{tes_id}/io", url = orchestrator.url))
+                .header(
+                    header::AUTHORIZATION,
+                    format!(
+                        "Bearer {token}",
+                        token = orchestrator.api_key.expose_secret()
+                    ),
+                )
                 .send()
                 .await
                 .map_err(RetryError::transient)?
@@ -254,7 +282,7 @@ async fn get_task_io(client: &HttpClient, service: &Url, tes_id: &str) -> Result
 /// Updates a task's output files.
 async fn update_output_files(
     client: &HttpClient,
-    service: &Url,
+    orchestrator: &OrchestratorServiceInfo,
     tes_id: &str,
     outputs: &[OutputFile],
 ) -> Result<()> {
@@ -264,7 +292,17 @@ async fn update_output_files(
             // Retry the operation is there is a problem sending the request to the server
             // Don't retry if the service returned an error response
             client
-                .put(format!("{service}v1/tasks/{tes_id}/outputs"))
+                .put(format!(
+                    "{url}v1/tasks/{tes_id}/outputs",
+                    url = orchestrator.url
+                ))
+                .header(
+                    header::AUTHORIZATION,
+                    format!(
+                        "Bearer {token}",
+                        token = orchestrator.api_key.expose_secret()
+                    ),
+                )
                 .json(outputs)
                 .send()
                 .await
@@ -285,14 +323,14 @@ async fn update_output_files(
 /// directory.
 async fn download_inputs(
     config: Config,
-    orchestrator_service: Url,
+    orchestrator: &OrchestratorServiceInfo,
     tes_id: &str,
     inputs_dir: &Path,
     outputs_dir: &Path,
     cancel: CancellationToken,
 ) -> Result<()> {
     let client = HttpClient::new();
-    let task_io = get_task_io(&client, &orchestrator_service, tes_id)
+    let task_io = get_task_io(&client, orchestrator, tes_id)
         .await
         .map_err(|e| {
             error!("failed to retrieve inputs and outputs of task `{tes_id}`: {e:#}");
@@ -333,13 +371,14 @@ async fn download_inputs(
                 let events_tx = events_tx.clone();
                 let created = created.clone();
                 tokio::spawn(async move {
-                    // Write the contents if directly given
-                    if let Some(contents) = &input.content {
-                        assert_eq!(
-                            input.ty,
-                            IoType::File,
-                            "cannot create content for a directory"
-                        );
+                    let permissions = if let Some(contents) = &input.content {
+                        // Write the contents if directly given
+                        if input.ty != IoType::File {
+                            bail!(
+                                "cannot create content for a directory input `{path}`",
+                                path = input.path
+                            );
+                        }
 
                         info!(
                             "creating input file `{path}` with specified contents",
@@ -351,45 +390,69 @@ async fn download_inputs(
                         })?;
 
                         created.fetch_add(1, Ordering::SeqCst);
-                        return anyhow::Ok(());
-                    }
+                        0o444
+                    } else {
+                        // Perform the cloud copy for a URL
+                        let url = input
+                            .url
+                            .context("input is missing a URL")?
+                            .parse::<Url>()
+                            .context("input URL is invalid")?;
 
-                    let url = input
-                        .url
-                        .context("input is missing a URL")?
-                        .parse::<Url>()
-                        .context("input URL is invalid")?;
-
-                    // Perform the copy
-                    cloud_copy::copy(
-                        config,
-                        client.clone(),
-                        url.clone(),
-                        &path,
-                        cancel,
-                        Some(events_tx),
-                    )
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to download input `{url}` to `{path}`",
-                            url = url.display(),
-                            path = input.path
+                        cloud_copy::copy(
+                            config,
+                            client.clone(),
+                            url.clone(),
+                            &path,
+                            cancel,
+                            Some(events_tx),
                         )
-                    })?;
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to download input `{url}` to `{path}`",
+                                url = url.display(),
+                                path = input.path
+                            )
+                        })?;
 
-                    // Check that the result matches the input type
-                    match (path.is_file(), input.ty) {
-                        (true, IoType::Directory) => bail!(
-                            "input `{url}` was a file but the input type was `DIRECTORY`",
-                            url = url.display()
-                        ),
-                        (false, IoType::File) => bail!(
-                            "input `{url}` was a directory but the input type was `FILE`",
-                            url = url.display()
-                        ),
-                        _ => {}
-                    }
+                        // Check that the result matches the input type
+                        match input.ty {
+                            IoType::Directory => {
+                                if path.is_file() {
+                                    bail!(
+                                        "input `{url}` was a file but the input type was \
+                                         `DIRECTORY`",
+                                        url = url.display()
+                                    );
+                                }
+
+                                0o555
+                            }
+                            IoType::File => {
+                                if !path.is_file() {
+                                    bail!(
+                                        "input `{url}` was a directory but the input type was \
+                                         `FILE`",
+                                        url = url.display()
+                                    );
+                                }
+
+                                0o444
+                            }
+                        }
+                    };
+
+                    // Set the permissions (world-readable) so any user an executor container runs
+                    // as will be able to read the input
+                    set_permissions(&path, Permissions::from_mode(permissions))
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to set permissions for input `{path}`",
+                                path = input.path
+                            )
+                        })?;
 
                     Ok(())
                 })
@@ -416,7 +479,9 @@ async fn download_inputs(
     let stats = handler.await.expect("failed to join events handler");
 
     // Print the statistics upon success
-    if result.is_ok() {
+    if result.is_ok()
+        && let Some(stats) = stats
+    {
         print_stats(
             end - start,
             files_created.load(Ordering::SeqCst) + stats.files,
@@ -429,15 +494,33 @@ async fn download_inputs(
     // We also need to create any file outputs so that Kubernetes will mount them as
     // files and not directories
     for (index, output) in task_io.outputs.into_iter().enumerate() {
-        if output.ty == IoType::File {
-            let path = outputs_dir.join(index.to_string());
-            File::create(&path).await.with_context(|| {
+        let path = outputs_dir.join(index.to_string());
+        let permissions = if output.ty == IoType::File {
+            // Create the file
+            File::create(&path)
+                .await
+                .with_context(|| format!("failed to create output `{path}`", path = output.path))?;
+
+            0o666
+        } else {
+            // Create the directory
+            create_dir_all(&path)
+                .await
+                .with_context(|| format!("failed to create output `{path}`", path = output.path))?;
+
+            0o777
+        };
+
+        // Set the permissions (world-writable) so any user an executor container runs
+        // as will be able to write to the output.
+        set_permissions(&path, Permissions::from_mode(permissions))
+            .await
+            .with_context(|| {
                 format!(
-                    "failed to create output file `{path}`",
-                    path = path.display()
+                    "failed to set permissions for output `{path}`",
+                    path = output.path
                 )
             })?;
-        }
     }
 
     Ok(())
@@ -446,13 +529,13 @@ async fn download_inputs(
 /// Uploads outputs from the specified outputs directory.
 async fn upload_outputs(
     config: Config,
-    orchestrator_service: Url,
+    orchestrator: &OrchestratorServiceInfo,
     tes_id: &str,
     outputs_dir: &Path,
     cancel: CancellationToken,
 ) -> Result<()> {
     let client = HttpClient::new();
-    let task_io = get_task_io(&client, &orchestrator_service, tes_id)
+    let task_io = get_task_io(&client, orchestrator, tes_id)
         .await
         .map_err(|e| {
             error!("failed to retrieve inputs and outputs of task `{tes_id}`: {e:#}");
@@ -545,11 +628,13 @@ async fn upload_outputs(
     let stats = handler.await.expect("failed to join events handler");
 
     // Print the statistics upon success
-    if result.is_ok() {
+    if result.is_ok()
+        && let Some(stats) = stats
+    {
         print_stats(end - start, stats.files, stats.bytes);
     }
 
-    if let Err(e) = update_output_files(&client, &orchestrator_service, tes_id, &result?).await {
+    if let Err(e) = update_output_files(&client, orchestrator, tes_id, &result?).await {
         error!("failed to update output files for task `{tes_id}`: {e:#}");
         bail!("failed to update output files for task `{tes_id}`")
     }
@@ -764,11 +849,16 @@ async fn run(cancel: CancellationToken) -> Result<()> {
         google: GoogleConfig { auth: google_auth },
     };
 
+    let orchestrator = OrchestratorServiceInfo {
+        url: args.orchestrator_url,
+        api_key: args.orchestrator_api_key,
+    };
+
     match args.mode {
         Mode::Inputs => {
             download_inputs(
                 config,
-                args.orchestrator_service,
+                &orchestrator,
                 &args.tes_id,
                 &args.inputs_dir.expect("option should be present"),
                 &args.outputs_dir,
@@ -779,7 +869,7 @@ async fn run(cancel: CancellationToken) -> Result<()> {
         Mode::Outputs => {
             upload_outputs(
                 config,
-                args.orchestrator_service,
+                &orchestrator,
                 &args.tes_id,
                 &args.outputs_dir,
                 cancel,
