@@ -8,6 +8,7 @@
 //! that do not have associated Kubernetes resources; it will abort any running
 //! tasks where a task pod has been deleted without an associated orchestrator.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
@@ -15,15 +16,27 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use futures::FutureExt;
+use chrono::Utc;
+use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
 use kube::Client;
 use kube::ResourceExt;
+use kube::api::DeleteParams;
+use kube::api::ListParams;
+use kube::api::ObjectMeta;
+use kube::api::Patch;
+use kube::api::PatchParams;
+use kube::runtime::reflector::Lookup;
 use planetary_db::Database;
-use planetary_db::ExecutingPod;
+use planetary_db::format_log_message;
+use reqwest::header;
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
+use tes::v1::types::task::State;
 use tokio::select;
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -40,11 +53,32 @@ const PLANETARY_TASKS_NAMESPACE: &str = "planetary-tasks";
 /// The orchestrator id label.
 const PLANETARY_ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
 
-/// The default interval for the monitoring service.
-const MONITORING_INTERVAL: Duration = Duration::from_secs(60);
-
 /// The error source for the monitor.
 const MONITOR_ERROR_SOURCE: &str = "monitor";
+
+/// The annotation for the task's TES id.
+const PLANETARY_TES_ID_ANNOTATION: &str = "planetary/tes-id";
+
+/// A label applied to resources that are ready for garbage collection.
+const PLANETARY_GC_LABEL: &str = "planetary/gc";
+
+/// The amount of time after a task has been created for which we will consider
+/// it to be in-progress.
+///
+/// Effectively, this is the maximum amount of time we're giving an orchestrator
+/// to create a pod after a database entry for the task was inserted.
+///
+/// Setting this too low may cause the monitor to abort a task before it even
+/// has a chance to start.
+const TASK_CREATION_DELTA: Duration = Duration::from_secs(60);
+
+/// Represents information about the orchestrator service.
+pub struct OrchestratorServiceInfo {
+    /// The URL of the orchestrator service.
+    pub url: Url,
+    /// The orchestrator service API key.
+    pub api_key: SecretString,
+}
 
 /// Represents the task monitor.
 pub struct Monitor {
@@ -60,9 +94,10 @@ impl Monitor {
     /// This method will spawn Tokio tasks for monitoring cluster state.
     pub async fn spawn(
         database: Arc<dyn Database>,
-        orchestrator_url: Url,
+        orchestrator: OrchestratorServiceInfo,
         planetary_namespace: Option<String>,
         tasks_namespace: Option<String>,
+        monitoring_interval: Duration,
     ) -> Result<Self> {
         let client = Client::try_default()
             .await
@@ -73,9 +108,10 @@ impl Monitor {
             shutdown.clone(),
             database,
             client,
-            orchestrator_url.into(),
+            orchestrator,
             planetary_namespace,
             tasks_namespace,
+            monitoring_interval,
         ));
         Ok(Self { shutdown, handle })
     }
@@ -91,9 +127,10 @@ impl Monitor {
         shutdown: CancellationToken,
         database: Arc<dyn Database>,
         client: Client,
-        orchestrator_url: Arc<Url>,
+        orchestrator: OrchestratorServiceInfo,
         planetary_namespace: Option<String>,
         tasks_namespace: Option<String>,
+        monitoring_interval: Duration,
     ) {
         info!("task monitor has started");
 
@@ -109,28 +146,54 @@ impl Monitor {
                 .as_deref()
                 .unwrap_or(PLANETARY_TASKS_NAMESPACE),
         );
+        let task_pvcs: Api<PersistentVolumeClaim> = Api::namespaced(
+            client.clone(),
+            tasks_namespace
+                .as_deref()
+                .unwrap_or(PLANETARY_TASKS_NAMESPACE),
+        );
 
-        let mut interval = interval(MONITORING_INTERVAL);
         let client = reqwest::Client::new();
+        let mut interval = interval(monitoring_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
             select! {
                 biased;
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    debug!("querying the database for the currently executing pods");
+                    // Start by getting the current pod map
+                    let pod_map = match Self::get_task_pod_map(&task_pods).await {
+                        Ok(map) => Some(map),
+                        Err(e) => {
+                            let message = format!("failed to drain executing pods: {e:#}");
+                            error!("{message}");
+                            let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
+                            None
+                        }
+                    };
 
-                    let client = client.clone();
-                    let planetary_pods = planetary_pods.clone();
-                    let task_pods = task_pods.clone();
-                    let orchestrator_url = orchestrator_url.clone();
+                    if let Some(pod_map) = pod_map {
+                        // Check for orphaned tasks
+                        if let Err(e) = Self::check_orphaned_tasks(&client, &orchestrator, &planetary_pods, &pod_map).await {
+                            let message = format!("failed to check for orphaned pods: {e:#}");
+                            error!("{message}");
+                            let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
+                        }
 
-                    if let Err(e) = database.drain_executing_pods(Box::new(|executing| { async move {
-                        Self::check_executing_pods(&client, &orchestrator_url, &planetary_pods, &task_pods, executing).await
-                    }.boxed() })).await {
+                        // Check for missing task resources
+                        if let Err(e) = Self::check_missing_resources(database.as_ref(), &task_pods, &task_pvcs, &pod_map).await {
+                            let message = format!("failed to check for missing resources: {e:#}");
+                            error!("{message}");
+                            let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
+                        }
+                    }
+
+                    // Perform a GC
+                    if let Err(e) = Self::gc(&task_pods, &task_pvcs).await {
                         let message = format!("failed to drain executing pods: {e:#}");
                         error!("{message}");
-                        database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await.ok();
+                        let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
                     }
                 }
             }
@@ -139,100 +202,200 @@ impl Monitor {
         info!("task monitor has shut down");
     }
 
-    /// Checks the executing pods for being "missing" or "orphaned".
+    /// Gets a map of currently running task pods.
     ///
-    /// An executing pod is "missing" when the pod doesn't exist in the
-    /// Kubernetes cluster.
-    ///
-    /// An executing pod is "orphaned" when the orchestrator managing the pod
-    /// doesn't exist in the Kubernetes cluster.
-    async fn check_executing_pods(
-        client: &reqwest::Client,
-        orchestrator_url: &Url,
-        planetary_pods: &Api<Pod>,
-        task_pods: &Api<Pod>,
-        executing: Vec<ExecutingPod>,
-    ) -> anyhow::Result<Vec<ExecutingPod>> {
-        // The map of orchestrators we've checked for existence
-        let mut orchestrators = HashMap::new();
-        let mut drained = Vec::new();
+    /// The key of the map is the TES identifier.
+    async fn get_task_pod_map(task_pods: &Api<Pod>) -> Result<HashMap<String, Pod>> {
+        let mut map = HashMap::new();
+        for pod in task_pods
+            .list(&ListParams::default().labels(&format!("{PLANETARY_GC_LABEL}!=true")))
+            .await?
+        {
+            // Don't include nameless pods
+            if pod.name().is_none() {
+                continue;
+            }
 
-        for pod in executing {
-            // Check to see if the task pod still exists
-            debug!(
-                "checking for existence of task pod `{name}` (task `{tes_id}`)",
-                name = pod.name(),
-                tes_id = pod.tes_id(),
-            );
-
-            let Some(mut metadata) =
-                task_pods
-                    .get_metadata_opt(pod.name())
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "failed to retrieve task pod `{name}` (task `{tes_id}`)",
-                            name = pod.name(),
-                            tes_id = pod.tes_id()
-                        )
-                    })?
-            else {
-                info!(
-                    "aborting task pod `{name}` (task `{tes_id}`) because it no longer exists",
-                    name = pod.name(),
-                    tes_id = pod.tes_id(),
-                );
-                drained.push(pod);
+            // Only include pods with a TES ID annotation
+            let Some(tes_id) = pod.annotations().get(PLANETARY_TES_ID_ANNOTATION) else {
                 continue;
             };
 
-            if let Some(id) = metadata.labels_mut().remove(PLANETARY_ORCHESTRATOR_LABEL) {
-                // Check to see if the orchestrator pod exists
+            map.insert(tes_id.clone(), pod);
+        }
+
+        Ok(map)
+    }
+
+    /// Checks for orphaned tasks.
+    ///
+    /// A task is "orphaned" when the orchestrator managing its pod no longer
+    /// exists.
+    async fn check_orphaned_tasks(
+        client: &reqwest::Client,
+        orchestrator: &OrchestratorServiceInfo,
+        planetary_pods: &Api<Pod>,
+        pod_map: &HashMap<String, Pod>,
+    ) -> Result<()> {
+        let mut orchestrators = HashMap::new();
+        for (tes_id, pod) in pod_map {
+            let orchestrator_id = pod
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(PLANETARY_ORCHESTRATOR_LABEL));
+
+            if let Some(id) = orchestrator_id {
+                // Check to see if the associated orchestrator pod exists
                 let entry = match orchestrators.entry(id) {
                     Entry::Occupied(e) => e,
                     Entry::Vacant(e) => {
+                        // Get the orchestrator's metadata; if we fail to get the metadata, assume
+                        // the orchestrator exists for now
                         let exists = planetary_pods
                             .get_metadata_opt(e.key())
                             .await
-                            .with_context(|| {
-                                format!("failed to retrieve orchestrator pod `{id}`", id = e.key())
-                            })?
-                            .is_some();
+                            .map(|m| m.is_some())
+                            .unwrap_or(true);
 
                         e.insert_entry(exists)
                     }
                 };
 
+                // If the orchestrator doesn't exist, attempt to adopt it
                 if !*entry.get() {
+                    // SAFETY: we don't include pods in the map that do not have names
+                    let name = pod.name().expect("missing pod name");
+
                     info!(
                         "orchestrator pod `{id}` that managed task pod `{name}` (task `{tes_id}`) \
                          no longer exists: requesting another orchestrator to adopt the pod",
                         id = entry.key(),
-                        name = pod.name(),
-                        tes_id = pod.tes_id()
                     );
 
                     // Request that a running orchestrator adopt the pod
                     let response = client
                         .patch(
-                            orchestrator_url
-                                .join(&format!("/v1/pods/{name}", name = pod.name()))
+                            orchestrator
+                                .url
+                                .join(&format!("/v1/pods/{name}"))
                                 .expect("URL should join"),
+                        )
+                        .header(
+                            header::AUTHORIZATION,
+                            format!(
+                                "Bearer {token}",
+                                token = orchestrator.api_key.expose_secret()
+                            ),
                         )
                         .send()
                         .await?;
 
                     response.error_for_status().with_context(|| {
-                        format!(
-                            "failed to adopt pod `{name}` (task `{tes_id}`)",
-                            name = pod.name(),
-                            tes_id = pod.tes_id()
-                        )
+                        format!("failed to adopt pod `{name}` (task `{tes_id}`)")
                     })?;
                 }
             }
         }
 
-        Ok(drained)
+        Ok(())
+    }
+
+    /// Checks for missing K8s resources for "in-progress" tasks.
+    async fn check_missing_resources(
+        database: &dyn Database,
+        task_pods: &Api<Pod>,
+        task_pvcs: &Api<PersistentVolumeClaim>,
+        pod_map: &HashMap<String, Pod>,
+    ) -> Result<()> {
+        // Query for ids for in-progress tasks that have existed since before the
+        // creation delta
+        for id in database
+            .get_in_progress_tasks(Utc::now() - TASK_CREATION_DELTA)
+            .await?
+        {
+            let Some(pod) = pod_map.get(&id) else {
+                continue;
+            };
+
+            // Transition the task to a system error state
+            if database
+                .update_task_state(
+                    &id,
+                    State::SystemError,
+                    &[&format_log_message!(
+                        "task `{id}` was aborted by the system"
+                    )],
+                    None,
+                )
+                .await
+                .with_context(|| format!("failed to update state for task `{id}`"))?
+            {
+                let name = pod.name().expect("should have pod name");
+
+                // Mark the pod for GC
+                task_pods
+                    .patch(
+                        &name,
+                        &PatchParams::default(),
+                        &Patch::Merge(Pod {
+                            metadata: ObjectMeta {
+                                labels: Some(BTreeMap::from_iter([(
+                                    PLANETARY_GC_LABEL.to_string(),
+                                    "true".to_string(),
+                                )])),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .with_context(|| format!("failed to mark pod `{name}` for GC"))?;
+
+                // Mark the PVC for GC
+                task_pvcs
+                    .patch(
+                        &name,
+                        &PatchParams::default(),
+                        &Patch::Merge(Pod {
+                            metadata: ObjectMeta {
+                                labels: Some(BTreeMap::from_iter([(
+                                    PLANETARY_GC_LABEL.to_string(),
+                                    "true".to_string(),
+                                )])),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .with_context(|| format!("failed to mark PVC `{name}` for GC"))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Performs a GC for task resources.
+    async fn gc(pods: &Api<Pod>, pvcs: &Api<PersistentVolumeClaim>) -> Result<()> {
+        debug!("performing garbage collection");
+
+        let label = format!("{PLANETARY_GC_LABEL}=true");
+
+        // Delete task pods
+        pods.delete_collection(
+            &DeleteParams::default(),
+            &ListParams::default().labels(&label),
+        )
+        .await?;
+
+        // Delete task PVCs
+        pvcs.delete_collection(
+            &DeleteParams::default(),
+            &ListParams::default().labels(&label),
+        )
+        .await?;
+
+        Ok(())
     }
 }

@@ -1,14 +1,13 @@
 //! Implementation of a TES database using PostgreSQL.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use chrono::DateTime;
+use chrono::Utc;
 use diesel::Connection;
-use diesel::dsl::now;
 use diesel_async::AsyncConnection;
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
@@ -18,6 +17,7 @@ use diesel_migrations::EmbeddedMigrations;
 use diesel_migrations::HarnessWithOutput;
 use diesel_migrations::MigrationHarness;
 use diesel_migrations::embed_migrations;
+use futures::future::BoxFuture;
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
 use tes::v1::types::requests::DEFAULT_PAGE_SIZE;
@@ -30,22 +30,16 @@ use tes::v1::types::responses::OutputFile;
 use tes::v1::types::responses::Task;
 use tes::v1::types::responses::TaskLog;
 use tes::v1::types::responses::TaskResponse;
-use tes::v1::types::task::Executor;
 use tes::v1::types::task::Input;
 use tes::v1::types::task::Output;
-use tes::v1::types::task::Resources;
 use tes::v1::types::task::State;
 use tracing::debug;
 use tracing::info;
 
 use super::Database;
 use super::DatabaseResult;
-use super::FinishedPod;
-use super::PodKind;
-use super::PodState;
 use super::TaskIo;
-use crate::ExecutingPod;
-use crate::format_log_message;
+use crate::TerminatedContainer;
 
 pub(crate) mod models;
 #[allow(clippy::missing_docs_in_private_items)]
@@ -86,6 +80,21 @@ where
     })
 }
 
+/// Formats the Postgres database URL.
+pub fn format_database_url(
+    user: &str,
+    password: &SecretString,
+    host: &str,
+    port: i32,
+    database_name: &str,
+    app_name: &str,
+) -> String {
+    format!(
+        "postgres://{user}:{password}@{host}:{port}/{database_name}?application_name={app_name}",
+        password = password.expose_secret(),
+    )
+}
+
 /// Represents a PostgreSQL database error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -93,7 +102,7 @@ pub enum Error {
     #[error("task `{0}` was not found")]
     TaskNotFound(String),
     /// A diesel connection pool error occurred.
-    #[error("a connection could not be established to the database server: {0}")]
+    #[error(transparent)]
     Pool(#[from] diesel_async::pooled_connection::deadpool::PoolError),
     /// A diesel error occurred.
     #[error(transparent)]
@@ -101,13 +110,13 @@ pub enum Error {
 }
 
 /// Converts a task model into a TES task.
-fn into_task<T, P>(task: T, task_pods: Vec<P>) -> Task
+fn into_task<T, C>(task: T, containers: Vec<C>) -> Task
 where
     T: Into<(Task, Vec<OutputFile>, Vec<String>)>,
-    P: Into<ExecutorLog>,
+    C: Into<ExecutorLog>,
 {
     let (mut task, outputs, system_logs) = task.into();
-    let executor_logs: Vec<_> = task_pods.into_iter().map(Into::into).collect();
+    let executor_logs: Vec<_> = containers.into_iter().map(Into::into).collect();
 
     if !outputs.is_empty() || !executor_logs.is_empty() || !system_logs.is_empty() {
         let start_time = executor_logs.first().and_then(|e| e.start_time);
@@ -195,152 +204,6 @@ impl PostgresDatabase {
 
         Ok(())
     }
-
-    /// Updates the state of a pod using the given connection.
-    ///
-    /// Returns `Ok(true)` if the status was updated or `Ok(false)` if the
-    /// task's current state cannot be transitioned to the given state.
-    async fn update_pod_state(
-        &self,
-        conn: &mut AsyncPgConnection,
-        name: &str,
-        state: PodState,
-        finished: Option<FinishedPod<'_>>,
-    ) -> DatabaseResult<bool> {
-        use diesel::*;
-        use diesel_async::RunQueryDsl;
-
-        // Determine the allowed previous state for the pod.
-        let previous = match state {
-            // Unknown has no previous state
-            PodState::Unknown => {
-                return Ok(false);
-            }
-            // [Unknown] -> Waiting
-            PodState::Waiting => &[models::PodState::Unknown] as &[models::PodState],
-            // [Unknown | Waiting] -> Initializing
-            PodState::Initializing => &[models::PodState::Unknown, models::PodState::Waiting],
-            // [Unknown | Waiting | Initializing] -> Running
-            PodState::Running => &[
-                models::PodState::Unknown,
-                models::PodState::Waiting,
-                models::PodState::Initializing,
-            ],
-            // [Unknown | Queued | Initializing | Running] -> [Succeeded | Failed]
-            PodState::Succeeded | PodState::Failed => &[
-                models::PodState::Unknown,
-                models::PodState::Waiting,
-                models::PodState::Initializing,
-                models::PodState::Running,
-            ],
-            // [Unknown | Waiting | Initializing] => ImagePullError
-            PodState::ImagePullError => &[
-                models::PodState::Unknown,
-                models::PodState::Waiting,
-                models::PodState::Initializing,
-            ],
-        };
-
-        // Only update if the exit code is still null
-        let updated = diesel::update(schema::pods::table)
-            .filter(
-                schema::pods::name
-                    .eq(name)
-                    .and(schema::pods::state.eq_any(previous))
-                    .and(schema::pods::exit_code.is_null()),
-            )
-            .set((
-                schema::pods::state.eq(models::PodState::from(state)),
-                schema::pods::start_time.eq(finished.and_then(|f| f.start_time)),
-                schema::pods::end_time.eq(finished.and_then(|f| f.end_time)),
-                schema::pods::exit_code.eq(finished.map(|f| f.exit_code)),
-                schema::pods::stdout.eq(finished.and_then(|f| f.stdout)),
-                schema::pods::stderr.eq(finished.and_then(|f| f.stderr)),
-            ))
-            .execute(conn)
-            .await
-            .map_err(Error::Diesel)?;
-
-        Ok(updated == 1)
-    }
-
-    /// Updates the state of a task using the given connection.
-    ///
-    /// The provided message is added to the task's system log if the task is
-    /// transitioned to the given state.
-    ///
-    /// Returns `Ok(true)` if the status was updated or `Ok(false)` if the
-    /// task's current state cannot be transitioned to the given state.
-    async fn update_task_state(
-        &self,
-        conn: &mut AsyncPgConnection,
-        tes_id: &str,
-        state: State,
-        messages: &[&str],
-    ) -> DatabaseResult<bool> {
-        use diesel::pg::sql_types::Array;
-        use diesel::sql_types::Text;
-        use diesel::*;
-        use diesel_async::RunQueryDsl;
-        use models::TaskState;
-
-        // Determine the allowed previous state for the task.
-        let previous = match state {
-            // Unknown has no previous state and paused isn't supported
-            State::Unknown | State::Paused => {
-                return Ok(false);
-            }
-            // Unknown -> Queued
-            State::Queued => &[TaskState::Unknown] as &[TaskState],
-            // [Unknown | Queued] -> Initializing
-            State::Initializing => &[TaskState::Unknown, TaskState::Queued],
-            // [Unknown | Queued | Initializing] -> Running
-            State::Running => &[
-                TaskState::Unknown,
-                TaskState::Queued,
-                TaskState::Initializing,
-            ],
-            // [Unknown | Queued | Initializing | Running] -> [Complete | ExecutorError]
-            State::Complete | State::ExecutorError => &[
-                TaskState::Unknown,
-                TaskState::Queued,
-                TaskState::Initializing,
-                TaskState::Running,
-            ],
-            // [Unknown | Queued | Initializing | Running] -> [SystemError | Canceling]
-            State::SystemError | State::Canceling => &[
-                TaskState::Unknown,
-                TaskState::Queued,
-                TaskState::Initializing,
-                TaskState::Running,
-            ],
-            // Canceling -> Canceled
-            State::Canceled => &[TaskState::Canceling],
-            // [Unknown | Queued | Initializing | Running] -> Preempted
-            State::Preempted => &[
-                TaskState::Unknown,
-                TaskState::Queued,
-                TaskState::Initializing,
-                TaskState::Running,
-            ],
-        };
-
-        // TODO: currently diesel hasn't released support for the PostgreSQL
-        // `array_cat` function; remove the raw query when diesel supports it
-        let updated = sql_query(
-            "UPDATE tasks SET state = $1, system_logs = array_cat(system_logs, $2) WHERE tes_id = \
-             $3 AND state = ANY ($4)",
-        )
-        .bind::<schema::sql_types::TaskState, _>(TaskState::from(state))
-        .bind::<Array<Text>, _>(messages)
-        .bind::<Text, _>(tes_id)
-        .bind::<Array<schema::sql_types::TaskState>, _>(previous)
-        .execute(conn)
-        .await
-        .map_err(Error::Diesel)?;
-
-        Ok(updated == 1)
-    }
 }
 
 #[async_trait::async_trait]
@@ -389,19 +252,15 @@ impl Database for PostgresDatabase {
                     .map_err(Error::Diesel)?
                     .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
 
-                let task_pods = models::BasicPod::belonging_to(&task)
-                    .select(models::BasicPod::as_select())
-                    .filter(
-                        schema::pods::kind
-                            .eq(models::PodKind::Executor)
-                            .and(schema::pods::exit_code.is_not_null()),
-                    )
-                    .order_by(schema::pods::executor_index)
+                let containers = models::BasicContainer::belonging_to(&task)
+                    .select(models::BasicContainer::as_select())
+                    .filter(schema::containers::executor_index.is_not_null())
+                    .order_by(schema::containers::executor_index)
                     .load(&mut conn)
                     .await
                     .map_err(Error::Diesel)?;
 
-                Ok(TaskResponse::Basic(into_task(task, task_pods)))
+                Ok(TaskResponse::Basic(into_task(task, containers)))
             }
             View::Full => {
                 let task = schema::tasks::table
@@ -413,19 +272,15 @@ impl Database for PostgresDatabase {
                     .map_err(Error::Diesel)?
                     .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
 
-                let task_pods = models::FullPod::belonging_to(&task)
-                    .select(models::FullPod::as_select())
-                    .filter(
-                        schema::pods::kind
-                            .eq(models::PodKind::Executor)
-                            .and(schema::pods::exit_code.is_not_null()),
-                    )
-                    .order_by(schema::pods::executor_index)
+                let containers = models::FullContainer::belonging_to(&task)
+                    .select(models::FullContainer::as_select())
+                    .filter(schema::containers::executor_index.is_not_null())
+                    .order_by(schema::containers::executor_index)
                     .load(&mut conn)
                     .await
                     .map_err(Error::Diesel)?;
 
-                Ok(TaskResponse::Full(into_task(task, task_pods)))
+                Ok(TaskResponse::Full(into_task(task, containers)))
             }
         }
     }
@@ -523,21 +378,17 @@ impl Database for PostgresDatabase {
                 };
 
                 Ok((
-                    models::BasicPod::belonging_to(&tasks)
-                        .select(models::BasicPod::as_select())
-                        .filter(
-                            schema::pods::kind
-                                .eq(models::PodKind::Executor)
-                                .and(schema::pods::exit_code.is_not_null()),
-                        )
-                        .order_by(schema::pods::executor_index)
+                    models::BasicContainer::belonging_to(&tasks)
+                        .select(models::BasicContainer::as_select())
+                        .filter(schema::containers::executor_index.is_not_null())
+                        .order_by(schema::containers::executor_index)
                         .load(&mut conn)
                         .await
                         .map_err(Error::Diesel)?
                         .grouped_by(&tasks)
                         .into_iter()
                         .zip(tasks)
-                        .map(|(task_pods, task)| TaskResponse::Basic(into_task(task, task_pods)))
+                        .map(|(containers, task)| TaskResponse::Basic(into_task(task, containers)))
                         .collect(),
                     token,
                 ))
@@ -558,21 +409,17 @@ impl Database for PostgresDatabase {
                 };
 
                 Ok((
-                    models::FullPod::belonging_to(&tasks)
-                        .select(models::FullPod::as_select())
-                        .filter(
-                            schema::pods::kind
-                                .eq(models::PodKind::Executor)
-                                .and(schema::pods::exit_code.is_not_null()),
-                        )
-                        .order_by(schema::pods::executor_index)
+                    models::FullContainer::belonging_to(&tasks)
+                        .select(models::FullContainer::as_select())
+                        .filter(schema::containers::executor_index.is_not_null())
+                        .order_by(schema::containers::executor_index)
                         .load(&mut conn)
                         .await
                         .map_err(Error::Diesel)?
                         .grouped_by(&tasks)
                         .into_iter()
                         .zip(tasks)
-                        .map(|(task_pods, task)| TaskResponse::Full(into_task(task, task_pods)))
+                        .map(|(containers, task)| TaskResponse::Full(into_task(task, containers)))
                         .collect(),
                     token,
                 ))
@@ -586,18 +433,11 @@ impl Database for PostgresDatabase {
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        let (inputs, outputs, volumes, size_gb): (
+        let (inputs, outputs): (
             Option<models::Json<Vec<Input>>>,
             Option<models::Json<Vec<Output>>>,
-            Option<Vec<Option<String>>>,
-            Option<f64>,
         ) = schema::tasks::table
-            .select((
-                schema::tasks::inputs,
-                schema::tasks::outputs,
-                schema::tasks::volumes,
-                schema::tasks::disk_gb,
-            ))
+            .select((schema::tasks::inputs, schema::tasks::outputs))
             .filter(schema::tasks::tes_id.eq(tes_id))
             .first(&mut conn)
             .await
@@ -608,264 +448,147 @@ impl Database for PostgresDatabase {
         Ok(TaskIo {
             inputs: inputs.map(models::Json::into_inner).unwrap_or_default(),
             outputs: outputs.map(models::Json::into_inner).unwrap_or_default(),
-            volumes: volumes
-                .unwrap_or_default()
-                .into_iter()
-                .map(Option::unwrap)
-                .collect(),
-            size_gb,
         })
     }
 
-    async fn get_task_executor(
-        &self,
-        tes_id: &str,
-        executor_index: usize,
-    ) -> DatabaseResult<Option<(Executor, Resources)>> {
+    async fn get_in_progress_tasks(&self, before: DateTime<Utc>) -> DatabaseResult<Vec<String>> {
+        use diesel::pg::sql_types::Timestamptz;
         use diesel::*;
         use diesel_async::RunQueryDsl;
+        use models::TaskState;
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        let (executor, cpu_cores, preemptible, ram_gb, disk_gb): (
-            Option<models::Json<Executor>>,
-            Option<i32>,
-            Option<bool>,
-            Option<f64>,
-            Option<f64>,
-        ) = schema::tasks::table
-            .select((
-                schema::tasks::executors
-                    .retrieve_as_object(
-                        i32::try_from(executor_index).expect("executor index is out of range"),
-                    )
-                    .nullable(),
-                schema::tasks::cpu_cores,
-                schema::tasks::preemptible,
-                schema::tasks::ram_gb,
-                schema::tasks::disk_gb,
-            ))
-            .filter(schema::tasks::tes_id.eq(tes_id))
-            .first(&mut conn)
-            .await
-            .optional()
-            .map_err(Error::Diesel)?
-            .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
-
-        Ok(executor.map(|e| {
-            (
-                e.into_inner(),
-                Resources {
-                    cpu_cores,
-                    preemptible,
-                    ram_gb,
-                    disk_gb,
-                    ..Default::default()
-                },
+        Ok(schema::tasks::table
+            .select(schema::tasks::tes_id)
+            .filter(
+                schema::tasks::state
+                    .eq_any(&[
+                        TaskState::Unknown,
+                        TaskState::Queued,
+                        TaskState::Initializing,
+                        TaskState::Running,
+                    ])
+                    .and(schema::tasks::creation_time.le(before.into_sql::<Timestamptz>())),
             )
-        }))
+            .get_results(&mut conn)
+            .await
+            .map_err(Error::Diesel)?)
     }
 
-    async fn update_task_state(
+    async fn update_task_state<'a>(
         &self,
         tes_id: &str,
         state: State,
         messages: &[&str],
+        containers: Option<BoxFuture<'a, Result<Vec<TerminatedContainer<'a>>>>>,
     ) -> DatabaseResult<bool> {
-        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
-        self.update_task_state(&mut conn, tes_id, state, messages)
-            .await
-    }
-
-    async fn insert_pod(
-        &self,
-        tes_id: &str,
-        name: &str,
-        kind: PodKind,
-        executor_index: Option<usize>,
-    ) -> DatabaseResult<bool> {
+        use diesel::pg::sql_types::Array;
+        use diesel::sql_types::Text;
         use diesel::*;
         use diesel_async::RunQueryDsl;
+        use models::TaskState;
+
+        /// Helper for getting the id for an updated task.
+        /// This is required because `sql_query` returns data by name, not
+        /// index.
+        #[derive(QueryableByName)]
+        #[diesel(table_name = schema::tasks)]
+        #[diesel(check_for_backend(diesel::pg::Pg))]
+        struct UpdatedTask {
+            /// The id of the updated task.
+            id: i32,
+        }
+
+        // Determine the allowed previous state for the task.
+        let previous: &[TaskState] = match state {
+            // Unknown has no previous state and paused isn't supported
+            State::Unknown | State::Paused => {
+                return Ok(false);
+            }
+            // Unknown -> Queued
+            State::Queued => &[TaskState::Unknown],
+            // [Unknown | Queued] -> Initializing
+            State::Initializing => &[TaskState::Unknown, TaskState::Queued],
+            // [Unknown | Queued | Initializing] -> Running
+            State::Running => &[
+                TaskState::Unknown,
+                TaskState::Queued,
+                TaskState::Initializing,
+            ],
+            // [Unknown | Queued | Initializing | Running] -> [Complete | ExecutorError]
+            State::Complete | State::ExecutorError => &[
+                TaskState::Unknown,
+                TaskState::Queued,
+                TaskState::Initializing,
+                TaskState::Running,
+            ],
+            // [Unknown | Queued | Initializing | Running] -> [SystemError | Canceling]
+            State::SystemError | State::Canceling => &[
+                TaskState::Unknown,
+                TaskState::Queued,
+                TaskState::Initializing,
+                TaskState::Running,
+            ],
+            // Canceling -> Canceled
+            State::Canceled => &[TaskState::Canceling],
+            // [Unknown | Queued | Initializing | Running] -> Preempted
+            State::Preempted => &[
+                TaskState::Unknown,
+                TaskState::Queued,
+                TaskState::Initializing,
+                TaskState::Running,
+            ],
+        };
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        let transaction = conn.transaction(|conn| {
-            async move {
-                // Find the task and its state
-                let task = schema::tasks::table
-                    .select(models::MinimalTask::as_select())
-                    .filter(schema::tasks::tes_id.eq(tes_id))
-                    .for_update()
-                    .first(conn)
+        let updated = conn
+            .transaction(|conn| {
+                async move {
+                    // TODO: currently diesel hasn't released support for the PostgreSQL
+                    // `array_cat` function; remove the raw query when diesel supports it
+                    let updated: Option<UpdatedTask> = sql_query(
+                        "UPDATE tasks SET state = $1, system_logs = array_cat(system_logs, $2) \
+                         WHERE tes_id = $3 AND state = ANY ($4) RETURNING id",
+                    )
+                    .bind::<schema::sql_types::TaskState, _>(TaskState::from(state))
+                    .bind::<Array<Text>, _>(messages)
+                    .bind::<Text, _>(tes_id)
+                    .bind::<Array<schema::sql_types::TaskState>, _>(previous)
+                    .get_result(conn)
                     .await
                     .optional()
-                    .map_err(Error::Diesel)?
-                    .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
-
-                match task.state {
-                    models::TaskState::Canceling
-                    | models::TaskState::Canceled
-                    | models::TaskState::SystemError => {
-                        return Ok::<_, Error>(false);
-                    }
-                    _ => {}
-                }
-
-                // Insert the pod
-                diesel::insert_into(schema::pods::table)
-                    .values(models::NewPod {
-                        task_id: task.id,
-                        name,
-                        kind: kind.into(),
-                        state: PodState::Unknown.into(),
-                        executor_index: executor_index
-                            .map(|i| i.try_into().expect("executor index is out of range")),
-                    })
-                    .execute(conn)
-                    .await
                     .map_err(Error::Diesel)?;
 
-                Ok(true)
-            }
-            .scope_boxed()
-        });
+                    match updated {
+                        Some(UpdatedTask { id }) => {
+                            if let Some(containers) = containers {
+                                // Insert the containers
+                                let containers = containers.await?;
+                                diesel::insert_into(schema::containers::table)
+                                    .values(
+                                        containers
+                                            .into_iter()
+                                            .map(|c| models::NewContainer::new(id, c))
+                                            .collect::<Vec<_>>(),
+                                    )
+                                    .on_conflict_do_nothing()
+                                    .execute(conn)
+                                    .await
+                                    .map_err(Error::Diesel)?;
+                            }
 
-        let inserted = transaction.await?;
-        Ok(inserted)
-    }
-
-    async fn update_pod_state(
-        &self,
-        name: &str,
-        state: PodState,
-        finished: Option<FinishedPod<'_>>,
-    ) -> DatabaseResult<bool> {
-        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
-        self.update_pod_state(&mut conn, name, state, finished)
-            .await
-    }
-
-    async fn find_executing_pod(&self, tes_id: &str) -> DatabaseResult<Option<String>> {
-        use diesel::*;
-        use diesel_async::RunQueryDsl;
-
-        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
-
-        // Find the task
-        let task_id: i32 = schema::tasks::table
-            .select(schema::tasks::id)
-            .filter(schema::tasks::tes_id.eq(tes_id))
-            .first(&mut conn)
-            .await
-            .optional()
-            .map_err(Error::Diesel)?
-            .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
-
-        let name = schema::pods::table
-            .select(schema::pods::name)
-            .filter(
-                schema::pods::task_id
-                    .eq(task_id)
-                    .and(schema::pods::state.eq_any(models::PodState::executing())),
-            )
-            .order_by(schema::pods::id.desc())
-            .first(&mut conn)
-            .await
-            .optional()
-            .map_err(Error::Diesel)?;
-
-        Ok(name)
-    }
-
-    async fn drain_executing_pods(
-        &self,
-        cb: Box<
-            dyn FnOnce(
-                    Vec<ExecutingPod>,
-                )
-                    -> Pin<Box<dyn Future<Output = Result<Vec<ExecutingPod>>> + Send + 'static>>
-                + Send,
-        >,
-    ) -> DatabaseResult<()> {
-        use diesel::dsl::IntervalDsl;
-        use diesel::pg::sql_types::Timestamptz;
-        use diesel::*;
-        use diesel_async::RunQueryDsl;
-
-        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
-
-        let transaction = conn.transaction(|conn| {
-            async move {
-                // Query the set of pods that haven't terminated yet
-                // Only include pods that are older than 5 minutes
-                // We must lock the rows for updating while we're performing the drain
-                let pods: Vec<(String, String)> = schema::pods::table
-                    .inner_join(schema::tasks::table)
-                    .select((schema::tasks::tes_id, schema::pods::name))
-                    .filter(
-                        schema::pods::state
-                            .eq_any(&[
-                                models::PodState::Unknown,
-                                models::PodState::Waiting,
-                                models::PodState::Initializing,
-                                models::PodState::Running,
-                            ])
-                            .and(
-                                schema::pods::creation_time
-                                    .le(now.into_sql::<Timestamptz>() - 5.minutes()),
-                            ),
-                    )
-                    .for_update()
-                    .load(conn)
-                    .await?;
-
-                if pods.is_empty() {
-                    return anyhow::Ok(());
+                            anyhow::Ok(true)
+                        }
+                        None => Ok(false),
+                    }
                 }
+                .scope_boxed()
+            })
+            .await?;
 
-                let drained = cb(pods
-                    .into_iter()
-                    .map(|(tes_id, name)| ExecutingPod { name, tes_id })
-                    .collect())
-                .await?;
-
-                // Terminate the drained pods
-                for pod in drained {
-                    // Update the pod to failed
-                    self.update_pod_state(
-                        conn,
-                        &pod.name,
-                        PodState::Failed,
-                        Some(FinishedPod {
-                            exit_code: 1,
-                            start_time: None,
-                            end_time: None,
-                            stdout: None,
-                            stderr: Some("pod was deleted"),
-                        }),
-                    )
-                    .await?;
-
-                    // Update the task to system error
-                    self.update_task_state(
-                        conn,
-                        &pod.tes_id,
-                        State::SystemError,
-                        &[&format_log_message!(
-                            "task `{id}` was aborted by the system",
-                            id = pod.tes_id
-                        )],
-                    )
-                    .await?;
-                }
-
-                Ok(())
-            }
-            .scope_boxed()
-        });
-
-        transaction.await?;
-        Ok(())
+        Ok(updated)
     }
 
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()> {

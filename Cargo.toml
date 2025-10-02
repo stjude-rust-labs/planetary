@@ -21,7 +21,7 @@ rust-version = "1.89.0"
 anyhow = "1.0.99"
 async-trait = "0.1.88"
 axum = { version = "0.8.4", features = ["macros"] }
-axum-extra = { version = "0.10.1", features = ["query"] }
+axum-extra = { version = "0.10.1", features = ["query", "typed-header"] }
 base64 = "0.22.1"
 bon = "3.7.0"
 byte-unit = "5.1.6"
@@ -30,7 +30,7 @@ cfg-if = "1.0.1"
 chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.45", features = ["derive", "env"] }
 clap-verbosity-flag = { version = "3.0.3", features = ["tracing"] }
-cloud-copy = { version = "0.2.0", features = ["cli"] }
+cloud-copy = { version = "0.3.0", features = ["cli"] }
 colored = "3.0.0"
 crc64fast-nvme = "1.2.0"
 diesel = { version = "2.2.12", features = ["postgres", "pq-src", "chrono"] }

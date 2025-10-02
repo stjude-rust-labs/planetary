@@ -38,6 +38,80 @@ src="./assets/repo-header.png" />
 Planetary is an implementation of the [GA4GH Task Execution Service (TES) API](https://github.com/ga4gh/task-execution-schemas)
 that executes tasks in a [Kubernetes](https://kubernetes.io/) cluster.
 
+### ⚠️ Security Notice
+
+Though we've made a best-effort attempt to incorporate security best practices
+into Planetary and its associated Helm chart where possible, Planetary itself
+does not claim to be include an end-to-end, fully secure application and
+deployment.
+
+Ensuring a high level of security is inherently contextual, and requirements
+vary significantly depending on your environment and operational policies. As
+such, several additional steps are needed to effectively deploy and secure your
+Kubernetes environment, the Planetary Helm chart, and the Planetary application.
+
+**It is your responsibility** to implement, verify, and continuously monitor all
+aspects of security to ensure they meet your standards and adequately protect
+your environment.
+
+As a starting point, we recommend you review the following aspects of your
+deployment and the Helm chart. Keep in mind that this list is non-exhaustive, so
+you should do your own research to create a complete list of concerns to
+consider in your situation.
+
+- **Ingress and external exposure.** The services provided by Planetary
+  include **no authentication or authorization at all and will accept and
+  execute unauthenticated requests if you do not take action to secure them
+  further**. It is imperitive that you restrict these services using external
+  authentication and authorization mechanisms. Further, we encourage you to
+  review any Services or Ingress resources included in the chart to confirm they
+  are exposed only as needed. Ensure TLS termination, authentication,
+  authorization, and rate-limiting are configured according to your policies,
+  and integrate the service with a web application firewall.
+- **RBAC permissions.** We've scoped roles and bindings according to what we
+  believe to be least-privilege access. Review these to ensure they align with
+  your internal access control policies and compliance standards.
+- **Pod security contexts.** We’ve configured workloads to run as non-root
+  and use read-only file systems where possible. These measures help limit
+  container privileges and reduce the attack surface. Confirm these settings
+  meet your container hardening requirements for all deployments and containers.
+- **Network policies.** We include policies to restrict pod-to-pod ingress
+  and egress traffic, balancing security with ease of configuration. Validate
+  that these meet your segmentation, isolation, and ingress/egress control
+  goals.
+- **Secrets management.** We've defined Kubernetes Secrets where needed and
+  structured their use for secure injection. Verify these secrets meet your
+  standards for confidentiality, access control, and rotation.
+- **Credentials.** This chart does not provide default passwords or API
+  keys. You must set secure, unique credentials for all components before
+  deployment.
+- **Resource limits and requests.** We've set default CPU and memory
+  constraints to encourage efficient scheduling and prevent resource exhaustion.
+  Adjust these for your expected workloads.
+- **Container images and supply chain security.** We use version-pinned
+  images from known registries. Review these to ensure they come from sources
+  you trust, are vulnerability-scanned, and, where appropriate, have verified
+  signatures.
+- **Monitoring, logging, and alerting.** Implement robust observability for
+  timely incident detection and response. Configure logging to avoid exposing
+  sensitive information, and ensure log retention complies with your policies.
+- **Automated compliance scanning.** Use automated Kubernetes security
+  scanners to verify compliance with your organizational policies.
+- **Upgrades and patch management.** Keep Planetary and its dependencies
+  up-to-date. We may publish chart updates in response to vulnerabilities, but
+  you are responsible for monitoring for published updates and applying them
+  promptly.
+- **Cluster environment assumptions.** This chart assumes it is deployed
+  into a hardened Kubernetes cluster (e.g., restricted API server access,
+  encrypted etcd, secure CSI drivers). Ensure your cluster meets these
+  prerequisites.
+- **Backups and disaster recovery.** If Planetary stores persistent state in
+  your environment, implement a tested backup and restore process.
+
+We recommend regularly auditing your deployment to ensure continued security and
+operational integrity. Default settings may not be sufficient for all use
+cases—review and customize configurations as appropriate for your environment.
+
 ### Architecture
 
 Planetary is made up of five components:
@@ -80,91 +154,63 @@ There are currently four images created for use with Planetary:
 Planetary supports the following cloud storage services:
 
 * [Azure Blob Storage](https://azure.microsoft.com/en-us/products/storage/blobs/)
-  : authentication is performed via the client sending input and outputs URLs 
-  with SAS tokens; no configuration is required for Planetary to support Azure 
+  : authentication is performed via the client sending input and outputs URLs
+  with SAS tokens; no configuration is required for Planetary to support Azure
   Blob Storage.
 
-* [AWS S3](https://aws.amazon.com/s3/) - authentication is performed via signed 
+* [AWS S3](https://aws.amazon.com/s3/) - authentication is performed via signed
   requests using an AWS Access Key Id and AWS Secret Access Key.
 
-* [Google Cloud Storage](https://cloud.google.com/storage) - authentication is 
+* [Google Cloud Storage](https://cloud.google.com/storage) - authentication is
   performed via signed requests using an [HMAC Access Key and HMAC Secret](https://cloud.google.com/storage/docs/authentication/hmackeys).
 
 See the [Helm chart values](./chart/values.yaml) for configuring a Planetary deployment.
 
-## ⚠️ Security Notice
+### Task Execution
 
-Though we've made a best-effort attempt to incorporate security best practices
-into Planetary and its associated Helm chart where possible, Planetary itself
-does not claim to be include an end-to-end, fully secure application and
-deployment.
+Planetary runs each TES task by scheduling a single Kubernetes pod for the task.
 
-Ensuring a high level of security is inherently contextual, and requirements
-vary significantly depending on your environment and operational policies. As
-such, several additional steps are needed to effectively deploy and secure your
-Kubernetes environment, the Planetary Helm chart, and the Planetary application.
+The task pod consists of several containers:
 
-**It is your responsibility** to implement, verify, and continuously monitor all
-aspects of security to ensure they meet your standards and adequately protect
-your environment.
+* An _init container_ for downloading inputs.
+* An _init container_ for each TES task executor.
+* A _main container_ for uploading outputs.
 
-As a starting point, we recommend you review the following aspects of your
-deployment and the Helm chart. Keep in mind that this list is non-exhaustive, so
-you should do your own research to create a complete list of concerns to
-consider in your situation.
+Because [TES task executors are expected to be run sequentially on the same node](https://github.com/ga4gh/task-execution-schemas/issues/208#issuecomment-2341853166),
+the executors cannot be sidecar or main containers of the pod as they run
+in parallel.
 
-- [ ] **Ingress and external exposure.** The services provided by Planetary
-  include **no authentication or authorization at all and will accept and
-  execute unauthenticated requests if you do not take action to secure them
-  further**. It is imperitive that you restrict these services using external
-  authentication and authorization mechanisms. Further, we encourage you to
-  review any Services or Ingress resources included in the chart to confirm they
-  are exposed only as needed. Ensure TLS termination, authentication,
-  authorization, and rate-limiting are configured according to your policies,
-  and integrate the service with a web application firewall.
-- [ ] **RBAC permissions.** We've scoped roles and bindings according to what we
-  believe to be least-privilege access. Review these to ensure they align with
-  your internal access control policies and compliance standards.
-- [ ] **Pod security contexts.** We’ve configured workloads to run as non-root
-  and use read-only file systems where possible. These measures help limit
-  container privileges and reduce the attack surface. Confirm these settings
-  meet your container hardening requirements for all deployments and containers.
-- [ ] **Network policies.** We include policies to restrict pod-to-pod ingress
-  and egress traffic, balancing security with ease of configuration. Validate
-  that these meet your segmentation, isolation, and ingress/egress control
-  goals.
-- [ ] **Secrets management.** We've defined Kubernetes Secrets where needed and
-  structured their use for secure injection. Verify these secrets meet your
-  standards for confidentiality, access control, and rotation.
-- [ ] **Credentials.** This chart does not provide default passwords or API
-  keys. You must set secure, unique credentials for all components before
-  deployment.
-- [ ] **Resource limits and requests.** We've set default CPU and memory
-  constraints to encourage efficient scheduling and prevent resource exhaustion.
-  Adjust these for your expected workloads.
-- [ ] **Container images and supply chain security.** We use version-pinned
-  images from known registries. Review these to ensure they come from sources
-  you trust, are vulnerability-scanned, and, where appropriate, have verified
-  signatures.
-- [ ] **Monitoring, logging, and alerting.** Implement robust observability for
-  timely incident detection and response. Configure logging to avoid exposing
-  sensitive information, and ensure log retention complies with your policies.
-- [ ] **Automated compliance scanning.** Use automated Kubernetes security
-  scanners to verify compliance with your organizational policies.
-- [ ] **Upgrades and patch management.** Keep Planetary and its dependencies
-  up-to-date. We may publish chart updates in response to vulnerabilities, but
-  you are responsible for monitoring for published updates and applying them
-  promptly.
-- [ ] **Cluster environment assumptions.** This chart assumes it is deployed
-  into a hardened Kubernetes cluster (e.g., restricted API server access,
-  encrypted etcd, secure CSI drivers). Ensure your cluster meets these
-  prerequisites.
-- [ ] **Backups and disaster recovery.** If Planetary stores persistent state in
-  your environment, implement a tested backup and restore process.
+As a result of running executors as _init containers_, a TES task state may be
+incongruent with the Kubernetes pod state.
 
-We recommend regularly auditing your deployment to ensure continued security and
-operational integrity. Default settings may not be sufficient for all use
-cases—review and customize configurations as appropriate for your environment.
+If you run `kubectl get pods -n planetary-tasks`, you may see task pods in one
+of the following states:
+
+* `Pending` - this state means the TES task is `QUEUED`.
+* `Init:0/N` - this state means the TES task is `INITIALIZING` and the inputs
+  init container may be running.
+* `Init:X/N` (where `X` >= 1) - this state means the TES task is `RUNNING` and
+  one of the executor init containers may be running.
+* `Running` - this state means the TES task is `RUNNING` and the outputs
+  container is executing.
+* `Completed` - this state means the TES task is in the `COMPLETED` state.
+* `Failed` - this state means the TES task is likely in the `EXECUTOR_ERROR` or
+  `SYSTEM_ERROR` state.
+
+Running a TES task as a single pod has some performance benefits:
+
+* Fewer Kubernetes resources are created to execute the task, reducing load on
+  the Kubernetes control plane.
+* A task's execution is "atomic" in the sense that the task is scheduled to a
+  single node and runs its executors immediately one after the other in
+  sequence.
+* Because a persistent volume must be shared between the input, executors, and
+  output containers, using a single pod greatly reduces the load on a Container
+  Storage Interface (CSI) driver that may be responsible for provisioning
+  volumes via cloud storage APIs.
+* By attaching a volume at most once to a node for a task, a pod being
+  scheduled on one node doesn't need to wait for the same volume to detach from
+  a node where a task pod was executing previously.
 
 ## 🚀 Getting Started
 
@@ -227,8 +273,7 @@ test cluster.
 To install PostgreSQL into your local cluster, run the following command:
 
 ```bash
-helm repo add bitnami https://charts.bitnami.com/bitnami
-helm install --create-namespace -n planetary planetary-database bitnami/postgresql
+helm install --create-namespace -n planetary planetary-database oci://registry-1.docker.io/bitnamicharts/postgresql --set image.repository=bitnamilegacy/postgresql --set image.tag=latest
 ```
 
 If you wish to interact with the database from outside of the cluster, forward the PostgreSQL port:

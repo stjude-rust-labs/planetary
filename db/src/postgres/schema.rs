@@ -2,16 +2,30 @@
 
 pub mod sql_types {
     #[derive(diesel::query_builder::QueryId, Clone, diesel::sql_types::SqlType)]
-    #[diesel(postgres_type(name = "pod_kind"))]
-    pub struct PodKind;
-
-    #[derive(diesel::query_builder::QueryId, Clone, diesel::sql_types::SqlType)]
-    #[diesel(postgres_type(name = "pod_state"))]
-    pub struct PodState;
+    #[diesel(postgres_type(name = "container_kind"))]
+    pub struct ContainerKind;
 
     #[derive(diesel::query_builder::QueryId, Clone, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "task_state"))]
     pub struct TaskState;
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    use super::sql_types::ContainerKind;
+
+    containers (id) {
+        id -> Int4,
+        task_id -> Int4,
+        kind -> ContainerKind,
+        executor_index -> Nullable<Int4>,
+        start_time -> Timestamptz,
+        end_time -> Timestamptz,
+        stdout -> Nullable<Text>,
+        stderr -> Nullable<Text>,
+        exit_code -> Int4,
+        creation_time -> Timestamptz,
+    }
 }
 
 diesel::table! {
@@ -20,27 +34,6 @@ diesel::table! {
         source -> Text,
         task_id -> Nullable<Int4>,
         message -> Text,
-        creation_time -> Timestamptz,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::*;
-    use super::sql_types::PodKind;
-    use super::sql_types::PodState;
-
-    pods (id) {
-        id -> Int4,
-        task_id -> Int4,
-        name -> Text,
-        kind -> PodKind,
-        state -> PodState,
-        executor_index -> Nullable<Int4>,
-        start_time -> Nullable<Timestamptz>,
-        end_time -> Nullable<Timestamptz>,
-        stdout -> Nullable<Text>,
-        stderr -> Nullable<Text>,
-        exit_code -> Nullable<Int4>,
         creation_time -> Timestamptz,
     }
 }
@@ -73,7 +66,7 @@ diesel::table! {
     }
 }
 
+diesel::joinable!(containers -> tasks (task_id));
 diesel::joinable!(errors -> tasks (task_id));
-diesel::joinable!(pods -> tasks (task_id));
 
-diesel::allow_tables_to_appear_in_same_query!(errors, pods, tasks,);
+diesel::allow_tables_to_appear_in_same_query!(containers, errors, tasks,);

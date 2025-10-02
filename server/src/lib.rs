@@ -107,6 +107,14 @@ impl Error {
         }
     }
 
+    /// Returns a "forbidden" JSON error response.
+    pub fn forbidden() -> Error {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: StatusCode::FORBIDDEN.to_string(),
+        }
+    }
+
     /// Returns an "internal server error" JSON error response.
     pub fn internal() -> Error {
         Self {

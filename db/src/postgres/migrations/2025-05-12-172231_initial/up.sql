@@ -47,45 +47,31 @@ CREATE INDEX idx_tasks_state ON tasks (state);
 -- Create an index on the `tags` column for list operations.
 CREATE INDEX idx_tasks_tags ON tasks USING gin (tags);
 
--- An enumeration for pod kind.
-CREATE TYPE pod_kind AS ENUM(
+-- An enumeration for container kind.
+CREATE TYPE container_kind AS ENUM(
     'INPUTS',
     'EXECUTOR',
     'OUTPUTS'
 );
 
--- An enumeration for pod state.
-CREATE TYPE pod_state AS ENUM(
-    'UNKNOWN',
-    'WAITING',
-    'INITIALIZING',
-    'RUNNING',
-    'SUCCEEDED',
-    'FAILED',
-    'IMAGE_PULL_ERROR'
-);
-
--- The pods table.
--- This table keeps track of the pods that run as part of a task.
-CREATE TABLE pods (
+-- The containers table.
+-- This table keeps track of the individual containers used to run a task.
+-- An entry is inserted into this table when the container has completed.
+CREATE TABLE containers (
     id SERIAL PRIMARY KEY,
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    kind pod_kind NOT NULL,
-    state pod_state NOT NULL,
+    kind container_kind NOT NULL,
     executor_index INTEGER NULL,
-    start_time TIMESTAMPTZ NULL,
-    end_time TIMESTAMPTZ NULL,
+    start_time TIMESTAMPTZ NOT NULL,
+    end_time TIMESTAMPTZ NOT NULL,
     stdout TEXT NULL,
     stderr TEXT NULL,
-    exit_code INTEGER NULL,
-    creation_time TIMESTAMPTZ NOT NULL DEFAULT (now() at time zone 'utc'),
-    CONSTRAINT pods_name_unique UNIQUE (name)
+    exit_code INTEGER NOT NULL,
+    creation_time TIMESTAMPTZ NOT NULL DEFAULT (now() at time zone 'utc')
 );
 
--- Create an index on the `state` column for list operations.
-CREATE INDEX idx_pods_task_id ON pods (task_id);
-CREATE INDEX idx_pods_state ON pods (state);
+-- Create an index of the `task id` column.
+CREATE INDEX idx_containers_task_id ON containers (task_id);
 
 -- Table for internal system errors encountered.
 CREATE TABLE errors (

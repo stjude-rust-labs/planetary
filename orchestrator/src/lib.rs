@@ -4,20 +4,31 @@ use std::future::Future;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::Request;
 use axum::extract::State as ExtractState;
+use axum::middleware;
+use axum::middleware::Next;
+use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::routing::delete;
 use axum::routing::get;
 use axum::routing::patch;
 use axum::routing::post;
 use axum::routing::put;
+use axum_extra::TypedHeader;
+use axum_extra::headers::Authorization;
+use axum_extra::headers::authorization::Bearer;
 use bon::Builder;
 use planetary_db::Database;
 use planetary_db::TaskIo;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
+use planetary_server::Error;
 use planetary_server::Json;
 use planetary_server::Path;
 use planetary_server::ServerResponse;
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 use tes::v1::types::responses::OutputFile;
 use url::Url;
 
@@ -27,11 +38,27 @@ use crate::orchestrator::TransporterInfo;
 
 mod orchestrator;
 
+/// Middleware function to perform bearer token auth against the service's API
+/// key.
+async fn auth(
+    axum::extract::State(state): axum::extract::State<Arc<State>>,
+    TypedHeader(authorization): TypedHeader<Authorization<Bearer>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if authorization.token() != state.service_api_key.expose_secret() {
+        return Error::forbidden().into_response();
+    }
+
+    next.run(request).await
+}
+
 /// The state for the server.
-#[derive(Clone)]
 struct State {
+    /// The API key of the service.
+    service_api_key: SecretString,
     /// The task orchestrator.
-    orchestrator: Arc<TaskOrchestrator>,
+    orchestrator: TaskOrchestrator,
 }
 
 /// The task orchestrator server.
@@ -52,6 +79,10 @@ pub struct Server {
     /// The URL of the orchestrator service.
     #[builder(into)]
     service_url: Url,
+
+    /// The API key of the orchestrator service.
+    #[builder(into)]
+    service_api_key: SecretString,
 
     /// The TES database to use for the server.
     #[builder(name = "shared_database")]
@@ -108,21 +139,9 @@ impl Server {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let server = planetary_server::Server::builder()
-            .address(self.address)
-            .port(self.port)
-            .routers(bon::vec![
-                Router::new()
-                    .route("/v1/tasks/{tes_id}", post(Self::start_task))
-                    .route("/v1/tasks/{tes_id}", delete(Self::cancel_task))
-                    .route("/v1/tasks/{tes_id}/io", get(Self::get_task_io))
-                    .route("/v1/tasks/{tes_id}/outputs", put(Self::put_task_outputs))
-                    .route("/v1/pods/{name}", patch(Self::adopt_pod))
-            ])
-            .build();
-
-        let orchestrator = Arc::new(
-            TaskOrchestrator::new(
+        let state = Arc::new(State {
+            service_api_key: self.service_api_key,
+            orchestrator: TaskOrchestrator::new(
                 self.database,
                 self.pod_name,
                 self.service_url,
@@ -135,13 +154,27 @@ impl Server {
                 },
             )
             .await?,
-        );
+        });
+
+        let server = planetary_server::Server::builder()
+            .address(self.address)
+            .port(self.port)
+            .routers(bon::vec![
+                Router::new()
+                    .route("/v1/tasks/{tes_id}", post(Self::start_task))
+                    .route("/v1/tasks/{tes_id}", delete(Self::cancel_task))
+                    .route("/v1/tasks/{tes_id}/io", get(Self::get_task_io))
+                    .route("/v1/tasks/{tes_id}/outputs", put(Self::put_task_outputs))
+                    .route("/v1/pods/{name}", patch(Self::adopt_pod))
+                    .layer(middleware::from_fn_with_state(state.clone(), auth))
+            ])
+            .build();
 
         // Spawn the monitor
-        let monitor = Monitor::spawn(orchestrator.clone());
+        let monitor = Monitor::spawn(state.clone());
 
         // Run the server to completion
-        server.run(State { orchestrator }, shutdown).await?;
+        server.run(state, shutdown).await?;
 
         // Finally, shutdown the monitor
         monitor.shutdown().await;
@@ -152,8 +185,8 @@ impl Server {
     ///
     /// This endpoint is used by the TES API service.
     async fn start_task(
+        ExtractState(state): ExtractState<Arc<State>>,
         Path(tes_id): Path<String>,
-        ExtractState(state): ExtractState<State>,
     ) -> ServerResponse<()> {
         tokio::spawn(async move {
             state.orchestrator.start_task(&tes_id).await;
@@ -166,8 +199,8 @@ impl Server {
     ///
     /// This endpoint is used by the TES API service.
     async fn cancel_task(
+        ExtractState(state): ExtractState<Arc<State>>,
         Path(tes_id): Path<String>,
-        ExtractState(state): ExtractState<State>,
     ) -> ServerResponse<()> {
         tokio::spawn(async move {
             state.orchestrator.cancel_task(&tes_id).await;
@@ -180,8 +213,8 @@ impl Server {
     ///
     /// This endpoint is used by the transporter.
     async fn get_task_io(
+        ExtractState(state): ExtractState<Arc<State>>,
         Path(tes_id): Path<String>,
-        ExtractState(state): ExtractState<State>,
     ) -> ServerResponse<Json<TaskIo>> {
         Ok(Json(
             state.orchestrator.database().get_task_io(&tes_id).await?,
@@ -192,7 +225,7 @@ impl Server {
     ///
     /// This endpoint is used by the transporter.
     async fn put_task_outputs(
-        ExtractState(state): ExtractState<State>,
+        ExtractState(state): ExtractState<Arc<State>>,
         Path(tes_id): Path<String>,
         Json(files): Json<Vec<OutputFile>>,
     ) -> ServerResponse<()> {
@@ -208,8 +241,8 @@ impl Server {
     ///
     /// This endpoint is used by the monitor.
     async fn adopt_pod(
+        ExtractState(state): ExtractState<Arc<State>>,
         Path(name): Path<String>,
-        ExtractState(state): ExtractState<State>,
     ) -> ServerResponse<()> {
         state.orchestrator.adopt_pod(&name).await?;
         Ok(())

@@ -9,6 +9,7 @@ use planetary_db::Database;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
 use reqwest::Client;
+use secrecy::SecretString;
 use tes::v1::types::responses::ServiceInfo;
 use tokio_retry2::strategy::ExponentialFactorBackoff;
 use tokio_retry2::strategy::MaxInterval;
@@ -41,6 +42,14 @@ fn notify_retry(e: &reqwest::Error, duration: Duration) {
     );
 }
 
+/// Represents information about the orchestrator service.
+struct OrchestratorServiceInfo {
+    /// The URL of the orchestrator service.
+    url: Url,
+    /// The orchestrator service API key.
+    api_key: SecretString,
+}
+
 /// The state for the server.
 #[derive(Clone)]
 struct State {
@@ -53,19 +62,27 @@ struct State {
     /// The TES database.
     database: Arc<dyn Database>,
 
-    /// The orchestrator service URL.
-    orchestrator_service: Arc<Url>,
+    /// The orchestrator service information.
+    orchestrator: Arc<OrchestratorServiceInfo>,
 }
 
 impl State {
     /// Constructs a new state given the service info, database, and
     /// orchestrator service sender.
-    pub fn new(info: ServiceInfo, database: Arc<dyn Database>, orchestrator_service: Url) -> Self {
+    pub fn new(
+        info: ServiceInfo,
+        database: Arc<dyn Database>,
+        orchestrator_url: Url,
+        orchestrator_api_key: SecretString,
+    ) -> Self {
         Self {
             client: Arc::new(Client::new()),
             info: Arc::new(info),
             database: database.clone(),
-            orchestrator_service: Arc::new(orchestrator_service),
+            orchestrator: Arc::new(OrchestratorServiceInfo {
+                url: orchestrator_url,
+                api_key: orchestrator_api_key,
+            }),
         }
     }
 }
@@ -92,6 +109,10 @@ pub struct Server {
     /// The Planetary orchestrator service URL.
     #[builder(into)]
     orchestrator_url: Url,
+
+    /// The Planetary orchestrator service API key.
+    #[builder(into)]
+    orchestrator_api_key: SecretString,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -122,7 +143,12 @@ impl Server {
             .routers(bon::vec![info::router(), tasks::router()])
             .build();
 
-        let state = State::new(self.info, self.database, self.orchestrator_url);
+        let state = State::new(
+            self.info,
+            self.database,
+            self.orchestrator_url,
+            self.orchestrator_api_key,
+        );
         server.run(state, shutdown).await?;
         Ok(())
     }

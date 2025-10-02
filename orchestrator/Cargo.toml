@@ -28,6 +28,7 @@ postgres = ["planetary-db/postgres"]
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+axum-extra.workspace = true
 bon.workspace = true
 cfg-if = { workspace = true, optional = true }
 chrono.workspace = true

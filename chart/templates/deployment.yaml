@@ -72,10 +72,13 @@ spec:
             value: "{{ .Values.database.port }}"
           - name: DATABASE_NAME
             value: {{ .Values.database.name }}
-          - name: DATABASE_URL
-            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?application_name=$(POD_NAME)
           - name: ORCHESTRATOR_URL
             value: "http://planetary-orchestrator:{{ .Values.orchestrator.service.port }}"
+          - name: ORCHESTRATOR_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: orchestrator-auth
+                key: api-key
 ---
 # Deployment for the Planetary orchestrator service
 apiVersion: apps/v1
@@ -141,6 +144,11 @@ spec:
                 fieldPath: metadata.name
           - name: SERVICE_URL
             value: "http://planetary-orchestrator.{{ .Release.Namespace }}:8080"
+          - name: SERVICE_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: orchestrator-auth
+                key: api-key
           - name: DATABASE_USER
             value: {{ .Values.database.user }}
           - name: DATABASE_PASSWORD
@@ -154,8 +162,6 @@ spec:
             value: "{{ .Values.database.port }}"
           - name: DATABASE_NAME
             value: {{ .Values.database.name }}
-          - name: DATABASE_URL
-            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?application_name=$(POD_NAME)
           - name: TRANSPORTER_IMAGE
             value: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
           - name: TASKS_NAMESPACE
@@ -230,11 +236,14 @@ spec:
             value: "{{ .Values.database.port }}"
           - name: DATABASE_NAME
             value: {{ .Values.database.name }}
-          - name: DATABASE_URL
-            value: postgres://$(DATABASE_USER):$(DATABASE_PASSWORD)@$(DATABASE_HOST):$(DATABASE_PORT)/$(DATABASE_NAME)?application_name=$(POD_NAME)
           - name: PLANETARY_NAMESPACE
             value: "{{ .Release.Namespace }}"
           - name: TASKS_NAMESPACE
             value: {{ .Values.tasks.namespace }}
           - name: ORCHESTRATOR_URL
             value: "http://planetary-orchestrator:{{ .Values.orchestrator.service.port }}"
+          - name: ORCHESTRATOR_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: orchestrator-auth
+                key: api-key
