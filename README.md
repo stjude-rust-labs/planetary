@@ -227,7 +227,7 @@ test cluster.
 To install PostgreSQL into your local cluster, run the following command:
 
 ```bash
-helm install -n planetary planetary-database oci://registry-1.docker.io/bitnamicharts/postgresql --set image.repository=bitnamilegacy/postgresql --set image.tag=latest
+helm install --create-namespace -n planetary planetary-database oci://registry-1.docker.io/bitnamicharts/postgresql --set image.repository=bitnamilegacy/postgresql --set image.tag=latest
 ```
 
 If you wish to interact with the database from outside of the cluster, forward the PostgreSQL port:
