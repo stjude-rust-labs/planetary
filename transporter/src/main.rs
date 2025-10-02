@@ -372,12 +372,13 @@ async fn download_inputs(
                 let created = created.clone();
                 tokio::spawn(async move {
                     let permissions = if let Some(contents) = &input.content {
-                        // Write the contents if directly given
-                        if input.ty != IoType::File {
-                            bail!(
-                                "cannot create content for a directory input `{path}`",
+                        // Write the contents if directly given, but only if the input is a file
+                        match input.ty {
+                            IoType::File => {}
+                            IoType::Directory => bail!(
+                                "cannot create content for directory input `{path}`",
                                 path = input.path
-                            );
+                            ),
                         }
 
                         info!(
