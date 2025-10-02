@@ -1377,9 +1377,9 @@ pub struct Monitor {
 
 impl Monitor {
     /// Spawns the monitor with the given orchestrator.
-    pub fn spawn(orchestrator: Arc<TaskOrchestrator>) -> Self {
+    pub fn spawn(state: Arc<crate::State>) -> Self {
         let shutdown = CancellationToken::new();
-        let handle = tokio::spawn(Self::monitor_events(orchestrator.clone(), shutdown.clone()));
+        let handle = tokio::spawn(Self::monitor_events(state.clone(), shutdown.clone()));
         Self { shutdown, handle }
     }
 
@@ -1390,15 +1390,15 @@ impl Monitor {
     }
 
     /// Monitors Kubernetes task pod events.
-    async fn monitor_events(orchestrator: Arc<TaskOrchestrator>, shutdown: CancellationToken) {
+    async fn monitor_events(state: Arc<crate::State>, shutdown: CancellationToken) {
         info!("cluster event processing has started");
 
         let stream = watcher(
-            orchestrator.pods.as_ref().clone(),
+            state.orchestrator.pods.as_ref().clone(),
             watcher::Config {
                 label_selector: Some(format!(
                     "{PLANETARY_ORCHESTRATOR_LABEL}={id}",
-                    id = orchestrator.id
+                    id = state.orchestrator.id
                 )),
                 ..Default::default()
             },
@@ -1424,19 +1424,19 @@ impl Monitor {
                                 continue;
                             }
 
-                            let orchestrator = orchestrator.clone();
+                            let state = state.clone();
                             tokio::spawn(async move {
                                 let Ok(tes_id) = pod.tes_id() else { return };
 
-                                if let Err(e) = orchestrator.update_task(tes_id, &pod).await {
-                                    orchestrator
+                                if let Err(e) = state.orchestrator.update_task(tes_id, &pod).await {
+                                    state.orchestrator
                                         .log_error(
                                             Some(tes_id),
                                             &format!("error while updating task `{tes_id}`: {e:#}"),
                                         )
                                         .await;
 
-                                    let _ = orchestrator
+                                    let _ = state.orchestrator
                                         .database
                                         .update_task_state(
                                             tes_id,
@@ -1449,7 +1449,7 @@ impl Monitor {
                                         )
                                         .await;
 
-                                    orchestrator.mark_gc_ready(tes_id).await;
+                                    state.orchestrator.mark_gc_ready(tes_id).await;
                                 }
                             });
                         }
@@ -1464,19 +1464,19 @@ impl Monitor {
                             }
 
                             // Otherwise, treat this as a preemption
-                            let orchestrator = orchestrator.clone();
+                            let state = state.clone();
                             tokio::spawn(async move {
                                 let Ok(tes_id) = pod.tes_id() else { return };
 
-                                if let Err(e) = orchestrator.handle_pod_deleted(tes_id, &pod).await {
-                                    orchestrator
+                                if let Err(e) = state.orchestrator.handle_pod_deleted(tes_id, &pod).await {
+                                    state.orchestrator
                                         .log_error(
                                             Some(tes_id),
                                             &format!("error while handling pod deletion for task `{tes_id}`: {e:#}"),
                                         )
                                         .await;
 
-                                    let _ = orchestrator
+                                    let _ = state.orchestrator
                                         .database
                                         .update_task_state(
                                             tes_id,
@@ -1490,7 +1490,7 @@ impl Monitor {
                                         .await;
                                 }
 
-                                orchestrator.mark_gc_ready(tes_id).await;
+                                state.orchestrator.mark_gc_ready(tes_id).await;
                             });
                         }
                         Some(Ok(Event::Init | Event::InitDone | Event::InitApply(_))) => continue,
@@ -1500,7 +1500,7 @@ impl Monitor {
                             // resource version, so don't bother logging the error
                         }
                         Some(Err(e)) => {
-                            orchestrator.log_error(None, &format!("error while streaming Kubernetes pod events: {e:#}")).await;
+                            state.orchestrator.log_error(None, &format!("error while streaming Kubernetes pod events: {e:#}")).await;
                         }
                         None => break,
                     }

@@ -193,7 +193,7 @@ of the following states:
   one of the executor init containers may be running.
 * `Running` - this state means the TES task is `RUNNING` and the outputs
   container is executing.
-* `Complete` - this state means the TES task is in the `COMPLETED` state.
+* `Completed` - this state means the TES task is in the `COMPLETED` state.
 * `Failed` - this state means the TES task is likely in the `EXECUTOR_ERROR` or
   `SYSTEM_ERROR` state.
 
