@@ -36,7 +36,7 @@ pub struct Args {
     #[clap(long, env)]
     service_url: Url,
 
-    /// The service API key
+    /// The service API key.
     #[clap(long, env, hide_env_values(true))]
     service_api_key: SecretString,
 
