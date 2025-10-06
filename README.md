@@ -42,7 +42,7 @@ that executes tasks in a [Kubernetes](https://kubernetes.io/) cluster.
 
 Though we've made a best-effort attempt to incorporate security best practices
 into Planetary and its associated Helm chart where possible, Planetary itself
-does not claim to be include an end-to-end, fully secure application and
+does not claim to be an end-to-end, fully secure application and
 deployment.
 
 Ensuring a high level of security is inherently contextual, and requirements
