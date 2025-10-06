@@ -2583,6 +2583,7 @@ dependencies = [
  "tes",
  "thiserror 2.0.16",
  "tokio",
+ "tokio-retry2 0.5.8",
  "tokio-stream",
  "tokio-util",
  "tower",
