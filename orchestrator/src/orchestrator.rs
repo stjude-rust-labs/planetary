@@ -58,12 +58,17 @@ use tes::v1::types::task::State;
 use tokio::pin;
 use tokio::select;
 use tokio::task::JoinHandle;
+use tokio_retry2::Retry;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
 use url::Url;
+
+use crate::into_retry_error;
+use crate::notify_retry;
+use crate::retry_durations;
 
 /// The default namespace for planetary tasks.
 const PLANETARY_TASKS_NAMESPACE: &str = "planetary-tasks";
@@ -494,7 +499,13 @@ impl TaskOrchestrator {
         let cancel = async {
             // Get the pod information so we can record the terminated containers as it was
             // canceled.
-            let pod = self.pods.get(tes_id).await.ok();
+            let pod = Retry::spawn_notify(
+                retry_durations(),
+                || async { self.pods.get_opt(tes_id).await.map_err(into_retry_error) },
+                notify_retry,
+            )
+            .await?;
+
             let containers = pod
                 .as_ref()
                 .map(|p| self.get_terminated_containers(p).boxed());
@@ -543,22 +554,30 @@ impl TaskOrchestrator {
         debug!("adopting task pod `{name}`");
 
         // Patch the pod's orchestrator label to be this orchestrator
-        self.pods
-            .patch(
-                name,
-                &PatchParams::default(),
-                &Patch::Merge(Pod {
-                    metadata: ObjectMeta {
-                        labels: Some(BTreeMap::from_iter([(
-                            PLANETARY_ORCHESTRATOR_LABEL.to_string(),
-                            self.id.clone(),
-                        )])),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            )
-            .await?;
+        Retry::spawn_notify(
+            retry_durations(),
+            || async {
+                self.pods
+                    .patch(
+                        name,
+                        &PatchParams::default(),
+                        &Patch::Merge(Pod {
+                            metadata: ObjectMeta {
+                                labels: Some(BTreeMap::from_iter([(
+                                    PLANETARY_ORCHESTRATOR_LABEL.to_string(),
+                                    self.id.clone(),
+                                )])),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .map_err(into_retry_error)
+            },
+            notify_retry,
+        )
+        .await?;
 
         Ok(())
     }
@@ -569,44 +588,52 @@ impl TaskOrchestrator {
 
         debug!("initializing storage for task `{tes_id}`");
 
-        self.pvc
-            .create(
-                &PostParams::default(),
-                &PersistentVolumeClaim {
-                    metadata: ObjectMeta {
-                        name: Some(tes_id.clone()),
-                        namespace: Some(
-                            self.tasks_namespace
-                                .as_deref()
-                                .unwrap_or(PLANETARY_TASKS_NAMESPACE)
-                                .into(),
-                        ),
-                        ..Default::default()
-                    },
-                    spec: Some(PersistentVolumeClaimSpec {
-                        access_modes: Some(vec!["ReadWriteOnce".into()]),
-                        resources: Some(VolumeResourceRequirements {
-                            limits: None,
-                            requests: Some(BTreeMap::from_iter([(
-                                K8S_KEY_STORAGE.to_string(),
-                                Quantity(format!(
-                                    "{disk}G",
-                                    disk = task
-                                        .resources
-                                        .as_ref()
-                                        .and_then(|r| r.disk_gb)
-                                        .unwrap_or(0.0)
-                                        .max(DEFAULT_STORAGE_SIZE)
-                                )),
-                            )])),
-                        }),
-                        storage_class_name: self.storage_class.clone(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await?;
+        Retry::spawn_notify(
+            retry_durations(),
+            || async {
+                self.pvc
+                    .create(
+                        &PostParams::default(),
+                        &PersistentVolumeClaim {
+                            metadata: ObjectMeta {
+                                name: Some(tes_id.clone()),
+                                namespace: Some(
+                                    self.tasks_namespace
+                                        .as_deref()
+                                        .unwrap_or(PLANETARY_TASKS_NAMESPACE)
+                                        .into(),
+                                ),
+                                ..Default::default()
+                            },
+                            spec: Some(PersistentVolumeClaimSpec {
+                                access_modes: Some(vec!["ReadWriteOnce".into()]),
+                                resources: Some(VolumeResourceRequirements {
+                                    limits: None,
+                                    requests: Some(BTreeMap::from_iter([(
+                                        K8S_KEY_STORAGE.to_string(),
+                                        Quantity(format!(
+                                            "{disk}G",
+                                            disk = task
+                                                .resources
+                                                .as_ref()
+                                                .and_then(|r| r.disk_gb)
+                                                .unwrap_or(0.0)
+                                                .max(DEFAULT_STORAGE_SIZE)
+                                        )),
+                                    )])),
+                                }),
+                                storage_class_name: self.storage_class.clone(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(into_retry_error)
+            },
+            notify_retry,
+        )
+        .await?;
 
         Ok(())
     }
@@ -789,7 +816,18 @@ impl TaskOrchestrator {
             ..Default::default()
         };
 
-        self.pods.create(&PostParams::default(), &pod).await?;
+        Retry::spawn_notify(
+            retry_durations(),
+            || async {
+                self.pods
+                    .create(&PostParams::default(), &pod)
+                    .await
+                    .map_err(into_retry_error)
+            },
+            notify_retry,
+        )
+        .await?;
+
         Ok(())
     }
 
@@ -1233,32 +1271,39 @@ impl TaskOrchestrator {
             .filter_map(|(k, i, s)| Some((k, i, s.state.as_ref()?.terminated.as_ref()?)))
         {
             // Get the container's output
-            let mut output = match self
-                .pods
-                .logs(
-                    tes_id,
-                    &LogParams {
-                        container: Some(format_container_name(kind, executor_index)),
-                        tail_lines: match kind {
-                            ContainerKind::Inputs | ContainerKind::Outputs => {
-                                // For an inputs and outputs pod, read all the log
-                                None
-                            }
-                            ContainerKind::Executor => Some(MAX_EXECUTOR_LOG_LINES),
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await
-            {
-                Ok(output) => output,
-                Err(kube::Error::Api(ErrorResponse { code: 404, .. }))
-                | Err(kube::Error::Api(ErrorResponse { code: 400, .. })) => {
-                    // The pod or container no longer exists; treat as empty output
-                    String::new()
-                }
-                Err(e) => return Err(e.into()),
-            };
+            let mut output = Retry::spawn_notify(
+                retry_durations(),
+                || async {
+                    match self
+                        .pods
+                        .logs(
+                            tes_id,
+                            &LogParams {
+                                container: Some(format_container_name(kind, executor_index)),
+                                tail_lines: match kind {
+                                    ContainerKind::Inputs | ContainerKind::Outputs => {
+                                        // For an inputs and outputs pod, read all the log
+                                        None
+                                    }
+                                    ContainerKind::Executor => Some(MAX_EXECUTOR_LOG_LINES),
+                                },
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                    {
+                        Ok(output) => Ok(output),
+                        Err(kube::Error::Api(ErrorResponse { code: 404, .. }))
+                        | Err(kube::Error::Api(ErrorResponse { code: 400, .. })) => {
+                            // The pod or container no longer exists; treat as empty output
+                            Ok(String::new())
+                        }
+                        Err(e) => Err(into_retry_error(e)),
+                    }
+                },
+                notify_retry,
+            )
+            .await?;
 
             // For executors, extract the real error code which is printed at the end of the
             // output
@@ -1298,63 +1343,79 @@ impl TaskOrchestrator {
 
     /// Marks Kubernetes resources related to a task as ready for GC.
     async fn mark_gc_ready(&self, tes_id: &str) {
-        match self
-            .pods
-            .patch(
-                tes_id,
-                &PatchParams::default(),
-                &Patch::Merge(Pod {
-                    metadata: ObjectMeta {
-                        labels: Some(BTreeMap::from_iter([(
-                            PLANETARY_GC_LABEL.to_string(),
-                            "true".to_string(),
-                        )])),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            )
-            .await
+        if let Err(e) = Retry::spawn_notify(
+            retry_durations(),
+            || async {
+                match self
+                    .pods
+                    .patch(
+                        tes_id,
+                        &PatchParams::default(),
+                        &Patch::Merge(Pod {
+                            metadata: ObjectMeta {
+                                labels: Some(BTreeMap::from_iter([(
+                                    PLANETARY_GC_LABEL.to_string(),
+                                    "true".to_string(),
+                                )])),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(()),
+                    Err(e) => Err(into_retry_error(e)),
+                }
+            },
+            notify_retry,
+        )
+        .await
         {
-            Ok(_) => {}
-            Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
-            Err(e) => {
-                self.log_error(
-                    Some(tes_id),
-                    &format!("failed to mark pod `{tes_id}` for GC: {e:#}"),
-                )
-                .await;
-            }
+            self.log_error(
+                Some(tes_id),
+                &format!("failed to mark pod `{tes_id}` for GC: {e:#}"),
+            )
+            .await;
         }
 
         // Add a label to the PVC to mark it ready for GC
-        match self
-            .pvc
-            .patch(
-                tes_id,
-                &PatchParams::default(),
-                &Patch::Merge(PersistentVolumeClaim {
-                    metadata: ObjectMeta {
-                        labels: Some(BTreeMap::from_iter([(
-                            PLANETARY_GC_LABEL.to_string(),
-                            "true".to_string(),
-                        )])),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            )
-            .await
+        if let Err(e) = Retry::spawn_notify(
+            retry_durations(),
+            || async {
+                match self
+                    .pvc
+                    .patch(
+                        tes_id,
+                        &PatchParams::default(),
+                        &Patch::Merge(PersistentVolumeClaim {
+                            metadata: ObjectMeta {
+                                labels: Some(BTreeMap::from_iter([(
+                                    PLANETARY_GC_LABEL.to_string(),
+                                    "true".to_string(),
+                                )])),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(()),
+                    Err(e) => Err(into_retry_error(e)),
+                }
+            },
+            notify_retry,
+        )
+        .await
         {
-            Ok(_) => {}
-            Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
-            Err(e) => {
-                self.log_error(
-                    Some(tes_id),
-                    &format!("failed to mark PVC `{tes_id}` for GC: {e:#}"),
-                )
-                .await;
-            }
+            self.log_error(
+                Some(tes_id),
+                &format!("failed to mark PVC `{tes_id}` for GC: {e:#}"),
+            )
+            .await;
         }
     }
 
