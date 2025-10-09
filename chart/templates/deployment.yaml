@@ -170,6 +170,16 @@ spec:
           - name: STORAGE_CLASS
             value: "{{- . }}"
           {{- end }}
+          {{- with .Values.orchestrator.preemptible }}
+          {{- with .nodeSelector }}
+          - name: PREEMPTIBLE_NODE_SELECTOR
+            value: "{{- . }}"
+          {{- end }}
+          {{- with .taint }}
+          - name: PREEMPTIBLE_TAINT
+            value: "{{- . }}"
+          {{- end }}
+          {{- end }}
 ---
 # Deployment for the Planetary task monitor
 apiVersion: apps/v1
