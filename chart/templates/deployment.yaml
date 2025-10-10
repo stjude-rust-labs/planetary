@@ -247,3 +247,56 @@ spec:
               secretKeyRef:
                 name: orchestrator-auth
                 key: api-key
+---
+{{- if .Values.postgresql.enabled }}
+# Deployment for the PostgreSQL database
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planetary-database
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "chart.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        {{- include "chart.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: database
+    spec:
+      containers:
+        - name: postgresql
+          image: {{ .Values.postgresql.image.name }}:{{ .Values.postgresql.image.tag }}
+          securityContext:
+            runAsUser: 1000
+            runAsNonRoot: true
+          ports:
+            - containerPort: {{ .Values.database.port }}
+              name: postgresql
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.database.name }}
+            - name: POSTGRES_USER
+              value: {{ .Values.database.user }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.passwordSecret }}
+                  key: {{ .Values.database.passwordSecretKey }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: planetary-database-pvc
+{{- end }}

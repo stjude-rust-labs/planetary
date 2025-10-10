@@ -279,13 +279,13 @@ helm install --create-namespace -n planetary planetary-database oci://registry-1
 If you wish to interact with the database from outside of the cluster, forward the PostgreSQL port:
 
 ```bash
-kubectl port-forward -n planetary svc/planetary-database-postgresql 5432:5432
+kubectl port-forward -n planetary svc/planetary-database 5432:5432
 ```
 
 The database password is available as a secret:
 
 ```bash
-kubectl get secret -n planetary planetary-database-postgresql -o jsonpath="{.data.postgres-password}" | base64 --decode && echo
+kubectl get secret -n planetary planetary-database -o jsonpath="{.data.password}" | base64 --decode && echo
 ```
 
 ### Installing `diesel`
