@@ -1,4 +1,13 @@
-1. Get the API service URL by running these commands:
+1. Database migration job is running in the background. This job will:
+     - Wait for the database to be ready (up to 10 minutes)
+     - Create the database if it doesn't exist
+     - Run any pending migrations
+
+   You can check the migration status with:
+     kubectl get jobs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=migration
+     kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=migration --tail=-1
+
+2. Get the API service URL by running these commands:
 {{- if contains "NodePort" .Values.api.service.type }}
   export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" svc planetary-api)
   export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")

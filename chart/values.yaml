@@ -7,22 +7,56 @@ tasks:
   namespace: planetary-tasks
 
 # Configuration relating to the Planetary database.
+#
+# This configuration applies whether you're using the pod-based Postgres
+# database _or_ an external database.
 database:
   # The default service name for the Postgres database.
   # Assumes that the database service is in the same namespace as Planetary.
-  host: planetary-database-postgresql
+  host: planetary-database
   # The port to use for the accessing the database.
   port: 5432
   # The database user.
   user: postgres
   # The database name.
   name: planetary
-  # The name of the Kubernetes secret that stores the PostgreSQL database password
-  # The default value corresponds to the secret created by bitnami/postgresql Helm chart
-  passwordSecret: planetary-database-postgresql
-  # The key within the Kubernetes secret containing the PostgreSQL database password
-  # The default value corresponds to the secret created by bitnami/postgresql Helm chart
-  passwordSecretKey: postgres-password
+  # The name of the Kubernetes secret that stores the PostgreSQL database
+  # password.
+  passwordSecret: planetary-database
+  # The key within the Kubernetes secret containing the PostgreSQL database
+  # password.
+  passwordSecretKey: password
+
+# Configuration for an included PostgreSQL instance.
+#
+# This configuration is specific to the pod-based Postgres database.
+postgresql:
+  # Whether to deploy a PostgreSQL instance as part of this chart.
+  # Set to `false` if you want to use an external database.
+  # Set to `true` if you want to use a pod-based database.
+  enabled: false
+  # The password for the PostgreSQL database.
+  # Required if `postgresql.enabled` is true.
+  password: null
+  # The PostgreSQL image to use.
+  image:
+    name: postgres
+    tag: "16"
+  # The service type for the database.
+  service:
+    type: ClusterIP
+    port: 5432
+  resources:
+    requests:
+      cpu: 2000m
+    limits:
+      memory: 4Gi
+  # Storage configuration for PostgreSQL data.
+  storage:
+    # The size of the persistent volume for PostgreSQL data.
+    size: 8Gi
+    # The storage class to use. If `null`, uses the default storage class.
+    storageClass: null
 
 # Configuration relating to the service responsible for
 # implementing the TES API.
@@ -106,3 +140,9 @@ transporter:
     #   # The Google Cloud Storage HMAC secret to use for authentication.
     #   # Required if `hmacAccessKey` is set.
     #   hmacSecret: "<secret>"
+
+# Configuration relating to database migrations.
+migration:
+  image:
+    name: stjude-rust-labs/planetary-migration
+    tag: null
