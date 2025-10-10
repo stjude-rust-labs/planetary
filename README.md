@@ -259,34 +259,11 @@ To crate a local Kubernetes cluster using `kind`, run the following command:
 kind create cluster --config kind-config.yml
 ```
 
-This guide will be installing Planetary and its database server into a
-Kubernetes namespace named `planetary`.
+This guide will be installing Planetary into a Kubernetes namespace named
+`planetary`.
 
 The installation of Planetary will also create a Kubernetes namespace named
 `planetary-tasks` for managing resources relating to executing TES tasks.
-
-### Installing PostgreSQL
-
-For local development, it is best to install a small PostgreSQL server into the
-test cluster.
-
-To install PostgreSQL into your local cluster, run the following command:
-
-```bash
-helm install --create-namespace -n planetary planetary-database oci://registry-1.docker.io/bitnamicharts/postgresql --set image.repository=bitnamilegacy/postgresql --set image.tag=latest
-```
-
-If you wish to interact with the database from outside of the cluster, forward the PostgreSQL port:
-
-```bash
-kubectl port-forward -n planetary svc/planetary-database 5432:5432
-```
-
-The database password is available as a secret:
-
-```bash
-kubectl get secret -n planetary planetary-database -o jsonpath="{.data.password}" | base64 --decode && echo
-```
 
 ### Installing `diesel`
 
@@ -295,14 +272,6 @@ kubectl get secret -n planetary planetary-database -o jsonpath="{.data.password}
 It has commands for setting up a database and performing migrations.
 
 To install `diesel`, please consult the [installation instructions](https://diesel.rs/guides/getting-started#installing-diesel-cli) for your operating system.
-
-### Setting Up the Planetary Database
-
-To create the Planetary database, run the following command, replacing `$PASSWORD` with the database server password retrieved from the secret above:
-
-```bash
-DATABASE_URL=postgres://postgres:$PASSWORD@localhost/planetary diesel setup
-```
 
 ## 🏗️ Building Planetary
 
@@ -346,14 +315,61 @@ kind load docker-image -n planetary stjude-rust-labs/planetary-api:staging stjud
 
 ## ✨ Deploying Planetary
 
-To deploy Planetary into a local Kubernetes cluster, run the following command:
+> [!NOTE]  
+> The Planetary Helm chart includes an optional pod-based PostgreSQL database for
+> local development and testing (enabled below with `postgresql.enabled=true`). In
+> this guide, we'll deploy Planetary using this ephemeral database. **This is for
+> demonstration purposes only—for anything other than local testing, we recommend
+> using an external managed database service that is backed up rather than the
+> included pod-based database.**
+
+To deploy Planetary with the included PostgreSQL database into a local
+Kubernetes cluster, run the following command:
 
 ```bash
 cd chart
-helm install -n planetary planetary . --set api.image.tag=staging --set orchestrator.image.tag=staging --set monitor.image.tag=staging --set transporter.image.tag=staging
+helm install --create-namespace -n planetary planetary . \
+  --set api.image.tag=staging \
+  --set orchestrator.image.tag=staging \
+  --set monitor.image.tag=staging \
+  --set transporter.image.tag=staging \
+  --set postgresql.enabled=true \
+  --set postgresql.password=mypassword # Replace with a secure password!
+
 ```
 
-Check the status of a `planetary-api` pod to see if it is `Running`:
+**Note:** Replace `mypassword` with a secure password of your choice.
+
+
+### Setting Up the Planetary Database Schema
+
+Wait for the PostgreSQL database to be ready:
+
+```bash
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=database -n planetary --timeout=300s
+```
+
+Forward the PostgreSQL port to access it locally:
+
+```bash
+kubectl port-forward -n planetary svc/planetary-database 5432:5432
+```
+
+Retrieve the database password from the Kubernetes secret:
+
+```bash
+PASSWORD=$(kubectl get secret -n planetary planetary-database -o jsonpath="{.data.password}" | base64 --decode)
+```
+
+Create the Planetary database schema using `diesel`:
+
+```bash
+DATABASE_URL=postgres://postgres:$PASSWORD@localhost/planetary diesel setup
+```
+
+### Verifying the Deployment
+
+Check the status of the Planetary pods to see if they are `Running`:
 
 ```bash
 kubectl get pods -n planetary
