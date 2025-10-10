@@ -460,12 +460,16 @@ pub struct PreemptibleConfig {
 impl PreemptibleConfig {
     /// Attempts to parse the node selector from the configuration.
     fn node_selector(&self) -> Result<NodeSelector> {
-        self.node_selector.parse().or_else(|_| bail!("invalid node selector: `{}`", self.node_selector))
+        self.node_selector
+            .parse()
+            .or_else(|_| bail!("invalid node selector: `{}`", self.node_selector))
     }
 
     /// Attempts to parse the tain from the configuration.
     fn taint(&self) -> Result<Taint> {
-        self.taint.parse().or_else(|_| bail!("invalid taint: `{}`", self.taint))
+        self.taint
+            .parse()
+            .or_else(|_| bail!("invalid taint: `{}`", self.taint))
     }
 }
 
@@ -829,13 +833,16 @@ impl TaskOrchestrator {
                 let mut node_selector = BTreeMap::new();
                 node_selector.insert(selector.key, selector.value);
 
-                (Some(node_selector), Some(vec![Toleration {
-                    key: Some(taint.key),
-                    operator: Some(TOLERATION_OPERATOR_EQUAL.to_string()),
-                    value: Some(taint.value),
-                    effect: Some(taint.effect),
-                    ..Default::default()
-                }]))
+                (
+                    Some(node_selector),
+                    Some(vec![Toleration {
+                        key: Some(taint.key),
+                        operator: Some(TOLERATION_OPERATOR_EQUAL.to_string()),
+                        value: Some(taint.value),
+                        effect: Some(taint.effect),
+                        ..Default::default()
+                    }]),
+                )
             } else {
                 (None, None)
             }
