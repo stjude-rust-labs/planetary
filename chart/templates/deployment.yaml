@@ -269,6 +269,8 @@ spec:
         {{- include "chart.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: database
     spec:
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: postgresql
           image: {{ .Values.postgresql.image.name }}:{{ .Values.postgresql.image.tag }}
