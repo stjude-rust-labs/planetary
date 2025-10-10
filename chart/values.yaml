@@ -140,3 +140,9 @@ transporter:
     #   # The Google Cloud Storage HMAC secret to use for authentication.
     #   # Required if `hmacAccessKey` is set.
     #   hmacSecret: "<secret>"
+
+# Configuration relating to database migrations.
+migration:
+  image:
+    name: stjude-rust-labs/planetary-migration
+    tag: null

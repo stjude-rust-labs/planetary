@@ -265,14 +265,6 @@ This guide will be installing Planetary into a Kubernetes namespace named
 The installation of Planetary will also create a Kubernetes namespace named
 `planetary-tasks` for managing resources relating to executing TES tasks.
 
-### Installing `diesel`
-
-[`diesel`](https://diesel.rs) is a ORM used by Planetary for storing and retrieving data from PostgreSQL.
-
-It has commands for setting up a database and performing migrations.
-
-To install `diesel`, please consult the [installation instructions](https://diesel.rs/guides/getting-started#installing-diesel-cli) for your operating system.
-
 ## 🏗️ Building Planetary
 
 ### Building the Container Images
@@ -305,12 +297,24 @@ run the following command:
 docker build . --target planetary-transporter --tag stjude-rust-labs/planetary-transporter:staging
 ```
 
+To build the `stjude-rust-labs/planetary-migration` container image (for database migrations),
+run the following command:
+
+```bash
+docker build . --target planetary-migration --tag stjude-rust-labs/planetary-migration:staging
+```
+
 ### Loading the Container Images
 
 As `kind` cluster nodes run isolated from the host system, local container images must be explicitly loaded onto the nodes. To load the images, run the following command:
 
 ```bash
-kind load docker-image -n planetary stjude-rust-labs/planetary-api:staging stjude-rust-labs/planetary-orchestrator:staging stjude-rust-labs/planetary-monitor:staging stjude-rust-labs/planetary-transporter:staging
+kind load docker-image -n planetary \
+  stjude-rust-labs/planetary-api:staging \
+  stjude-rust-labs/planetary-orchestrator:staging \
+  stjude-rust-labs/planetary-monitor:staging \
+  stjude-rust-labs/planetary-transporter:staging \
+  stjude-rust-labs/planetary-migration:staging
 ```
 
 ## ✨ Deploying Planetary
@@ -328,44 +332,26 @@ Kubernetes cluster, run the following command:
 
 ```bash
 cd chart
-helm install --create-namespace -n planetary planetary . \
+helm upgrade --install --create-namespace -n planetary planetary . \
   --set api.image.tag=staging \
   --set orchestrator.image.tag=staging \
   --set monitor.image.tag=staging \
   --set transporter.image.tag=staging \
+  --set migration.image.tag=staging \
   --set postgresql.enabled=true \
-  --set postgresql.password=mypassword # Replace with a secure password!
-
+  # Set a secure password here!
+  --set postgresql.password=mypassword \
+  # You may also need to reduce the resources for a local installation.
+  --set api.resources.limits.memory=1Gi \
+  --set orchestrator.resources.limits.memory=1Gi \
+  --set monitor.resources.limits.memory=1Gi \
+  --set postgresql.resources.limits.memory=1Gi
+cd ..
 ```
 
 **Note:** Replace `mypassword` with a secure password of your choice.
 
-
-### Setting Up the Planetary Database Schema
-
-Wait for the PostgreSQL database to be ready:
-
-```bash
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/component=database -n planetary --timeout=300s
-```
-
-Forward the PostgreSQL port to access it locally:
-
-```bash
-kubectl port-forward -n planetary svc/planetary-database 5432:5432
-```
-
-Retrieve the database password from the Kubernetes secret:
-
-```bash
-PASSWORD=$(kubectl get secret -n planetary planetary-database -o jsonpath="{.data.password}" | base64 --decode)
-```
-
-Create the Planetary database schema using `diesel`:
-
-```bash
-DATABASE_URL=postgres://postgres:$PASSWORD@localhost/planetary diesel setup
-```
+The database schema will be automatically set up by a post-install Helm hook that runs after the chart is deployed. The migration job waits for the database to be ready (up to 10 minutes) and then runs the necessary migrations.
 
 ### Verifying the Deployment
 
