@@ -42,9 +42,9 @@ jobs:
             --no-git-commit \
             -y
 
-          FILE=$(git ls-files '**/Cargo.toml' Cargo.toml \
-            | xargs -I{} sh -c 'grep -qE "^version = \"+.*\"" "{}" && echo "{}"' \
-            | head -n1)
+          FILES=$(git ls-files '**/Cargo.toml' Cargo.toml \
+            | xargs -I{} sh -c 'grep -qE "^version = \"+.*\"" "{}" && echo "{}"')
+          FILE=$(echo $FILES | head -n1)
 
           NEW_VERSION_NO_V=$(grep -m1 -E '^version = "' "$FILE" | awk -F\" '{print $2}')
           echo "Changes version to v${NEW_VERSION_NO_V}."
