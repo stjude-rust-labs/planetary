@@ -76,10 +76,15 @@ jobs:
       - uses: actions/checkout@v5
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Install `cargo-edit`
-        run: cargo install cargo-edit
-      - name: Bump `Cargo.toml` versions
-        run: cargo set-version --workspace ${{ needs.calculate-version.outputs.new_version_no_v }}
+      - name: Install `cargo-workspaces`
+        run: cargo install cargo-workspaces
+      - name: Bump versions across workspace
+        env:
+          NEW_VERSION_NO_V: ${{ needs.calculate-version.outputs.new_version_no_v }}
+        run: |
+          cargo workspaces version --all --no-git-commit --exact -y ${NEW_VERSION_NO_V}
+          # Refresh lockfile
+          cargo update -w
       - name: Bump `Chart.yaml` version and `appVersion`
         run: |
           sed -i "s|^version: .*|version: ${{ needs.calculate-version.outputs.new_version_no_v }}|g" chart/Chart.yaml
@@ -88,7 +93,6 @@ jobs:
         run: |
           DATE=$(date +%Y-%m-%d)
           find . -name "CHANGELOG.md" -type f -not -path "*/target/*" -not -path "*/node_modules/*" | while read changelog; do
-            # Replace "## Unreleased" with the version and date, then add a new "## Unreleased" section at the top.
             sed -i "s|## Unreleased|## ${{ needs.calculate-version.outputs.new_version }} (${DATE})|g" "$changelog"
             sed -i "/^# /a\\\n## Unreleased\n" "$changelog"
           done
@@ -190,12 +194,10 @@ jobs:
           VERSION="${{ needs.calculate-version.outputs.new_version }}"
           COMBINED_CHANGELOG=""
 
-          # Extract changelog from each component.
           for changelog in chart/CHANGELOG.md api/CHANGELOG.md orchestrator/CHANGELOG.md monitor/CHANGELOG.md transporter/CHANGELOG.md server/CHANGELOG.md db/CHANGELOG.md; do
             if [ -f "$changelog" ]; then
               COMPONENT=$(dirname "$changelog")
               CONTENT=$(awk "/## ${VERSION}/,/^## [^${VERSION}]/ {if (/^## ${VERSION}/) next; if (/^## /) exit; print}" "$changelog" 2>/dev/null || echo "")
-
               if [ -n "$CONTENT" ]; then
                 COMBINED_CHANGELOG="${COMBINED_CHANGELOG}
           ### ${COMPONENT}
