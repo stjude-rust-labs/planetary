@@ -1,0 +1,78 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: planetary-db-migration-job-{{ randAlphaNum 10 | lower }}
+  labels:
+    {{- include "chart.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+spec:
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "chart.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-db
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z ${DATABASE_HOST} ${DATABASE_PORT}; do
+                echo "Waiting for database at ${DATABASE_HOST}:${DATABASE_PORT}..."
+                sleep 10
+              done
+              echo "Database is ready!"
+          env:
+            - name: DATABASE_HOST
+              value: {{ .Values.database.host }}
+            - name: DATABASE_PORT
+              value: "{{ .Values.database.port }}"
+      containers:
+        - name: migration
+          image: "{{ .Values.migration.image.name }}:{{ .Values.migration.image.tag | default .Chart.AppVersion }}"
+          securityContext:
+            runAsUser: 1001
+            runAsNonRoot: true
+          env:
+            - name: DATABASE_USER
+              value: {{ .Values.database.user }}
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.passwordSecret }}
+                  key: {{ .Values.database.passwordSecretKey }}
+            - name: DATABASE_HOST
+              value: {{ .Values.database.host }}
+            - name: DATABASE_PORT
+              value: "{{ .Values.database.port }}"
+            - name: DATABASE_NAME
+              value: {{ .Values.database.name }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              export PGPASSWORD="${DATABASE_PASSWORD}"
+              export DATABASE_URL="postgres://${DATABASE_USER}:${DATABASE_PASSWORD}@${DATABASE_HOST}:${DATABASE_PORT}/${DATABASE_NAME}"
+
+              echo "Checking if database '${DATABASE_NAME}' exists..."
+              if [ "$(psql -h ${DATABASE_HOST} -p ${DATABASE_PORT} -U ${DATABASE_USER} -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DATABASE_NAME}'" 2>/dev/null)" != "1" ]; then
+                echo "Database does not exist, running setup and migrations..."
+                diesel setup --database-url="${DATABASE_URL}"
+                echo "Database setup and migrations completed successfully"
+              else
+                echo "Database already exists, running database migrations..."
+                diesel migration run --database-url="${DATABASE_URL}"
+                echo "Database migrations completed successfully"
+              fi
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+  backoffLimit: 1

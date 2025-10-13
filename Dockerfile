@@ -114,3 +114,39 @@ ENTRYPOINT ["/usr/local/bin/planetary-transporter"]
 
 # Set the default arguments.
 CMD []
+
+#####################################
+# Database Migration Image (Diesel) #
+#####################################
+
+FROM ubuntu:latest AS planetary-migration
+
+# Install necessary packages for diesel CLI and PostgreSQL.
+RUN apt-get update && apt-get install -y curl libpq-dev pkg-config build-essential libssl-dev postgresql-client && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create and switch to `diesel` user.
+RUN useradd -m -u 1001 -s /bin/bash diesel
+USER diesel
+WORKDIR /home/diesel
+
+# Install Rust.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal
+
+# Add `cargo` to the path.
+ENV PATH=/home/diesel/.cargo/bin:$PATH
+
+# Install the `diesel` CLI.
+RUN cargo install diesel_cli --no-default-features --features postgres
+
+# Set the working directory.
+WORKDIR /app
+
+# Copy the database crate and diesel config.
+COPY --chown=diesel:diesel ./db ./db
+COPY --chown=diesel:diesel ./diesel.toml ./diesel.toml
+
+# Set the entrypoint.
+ENTRYPOINT ["/home/diesel/.cargo/bin/diesel"]
+CMD []
