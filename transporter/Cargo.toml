@@ -1,7 +1,7 @@
 [package]
 name = "planetary-transporter"
 description = "The task input and output transporter used by Planetary."
-version = "0.0.0"
+version = "0.1.0"
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -24,7 +24,7 @@ cloud-copy.workspace = true
 colored.workspace = true
 futures.workspace = true
 glob.workspace = true
-planetary-db = { version = "0.0.0", path = "../db" }
+planetary-db = { version = "0.1.0", path = "../db" }
 reqwest.workspace = true
 reqwest-middleware.workspace = true
 secrecy.workspace = true
