@@ -38,6 +38,7 @@ use tracing::warn;
 use url::Url;
 
 use crate::orchestrator::Monitor;
+use crate::orchestrator::PreemptibleConfig;
 use crate::orchestrator::TaskOrchestrator;
 use crate::orchestrator::TransporterInfo;
 
@@ -158,6 +159,14 @@ pub struct Server {
     /// Defaults to `1.07374182` GB (i.e 1 GiB).
     #[builder(into)]
     transporter_memory: Option<f64>,
+
+    /// The node selector to apply to preemptible tasks.
+    #[builder(into)]
+    preemptible_node_selector: Option<String>,
+
+    /// The taint to apply to preemptible tasks.
+    #[builder(into)]
+    preemptible_taint: Option<String>,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -182,6 +191,18 @@ impl Server {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        // Build the preemptible config if both fields are present
+        let preemptible_config = match (self.preemptible_node_selector, self.preemptible_taint) {
+            (Some(node_selector), Some(taint)) => {
+                Some(PreemptibleConfig::new(node_selector, taint)?)
+            }
+            (None, None) => None,
+            _ => anyhow::bail!(
+                "preemptive task execution requires both the node selector and taint to be \
+                 configured"
+            ),
+        };
+
         let state = Arc::new(State {
             service_api_key: self.service_api_key,
             orchestrator: TaskOrchestrator::new(
@@ -195,6 +216,7 @@ impl Server {
                     cpu: self.transporter_cpu,
                     memory: self.transporter_memory,
                 },
+                preemptible_config,
             )
             .await?,
         });

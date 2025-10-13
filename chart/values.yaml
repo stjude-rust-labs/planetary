@@ -95,6 +95,18 @@ orchestrator:
     limits:
       memory: 4Gi
   log: info
+  # Configuration for scheduling preemptible tasks.
+  preemptible: null
+  #   # The node selector to apply to preemptible tasks.
+  #   #
+  #   # - For Azure Kubernetes Service (AKS), this should be
+  #   #   "kubernetes.azure.com/scalesetpriority=spot".
+  #   nodeSelector: "kubernetes.azure.com/scalesetpriority=spot"
+  #   # The taint to apply to preemptible tasks.
+  #   #
+  #   # - For Azure Kubernetes Service (AKS), this should be
+  #   #   "kubernetes.azure.com/scalesetpriority=spot:NoSchedule".
+  #   taint: "kubernetes.azure.com/scalesetpriority=spot:NoSchedule"
 
 # Configuration relating to the monitor service that is responsible
 # for ensuring tasks do not become orphaned.

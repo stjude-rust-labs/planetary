@@ -29,6 +29,7 @@ use k8s_openapi::api::core::v1::PodSpec;
 use k8s_openapi::api::core::v1::ResourceRequirements;
 use k8s_openapi::api::core::v1::SecretEnvSource;
 use k8s_openapi::api::core::v1::SecretKeySelector;
+use k8s_openapi::api::core::v1::Toleration;
 use k8s_openapi::api::core::v1::Volume;
 use k8s_openapi::api::core::v1::VolumeMount;
 use k8s_openapi::api::core::v1::VolumeResourceRequirements;
@@ -154,6 +155,9 @@ const ORCHESTRATOR_AUTH_SECRET_KEY: &str = "api-key";
 /// representation of the executor run by that container records the original
 /// exit code.
 const EXIT_PREFIX: &str = "exit: ";
+
+/// The toleration operator for equal matching.
+const TOLERATION_OPERATOR_EQUAL: &str = "Equal";
 
 /// Formats a container name given the container kind.
 fn format_container_name(kind: ContainerKind, executor_index: Option<usize>) -> String {
@@ -386,6 +390,103 @@ pub struct TransporterInfo {
     pub memory: Option<f64>,
 }
 
+/// A node selector.
+#[derive(Clone)]
+pub struct NodeSelector {
+    /// The label key for node selection.
+    pub key: String,
+    /// The label value for node selection.
+    pub value: String,
+}
+
+impl std::str::FromStr for NodeSelector {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts = s.split('=').collect::<Vec<_>>();
+
+        if parts.len() != 2 {
+            return Err(());
+        }
+
+        Ok(NodeSelector {
+            key: parts[0].to_string(),
+            value: parts[1].to_string(),
+        })
+    }
+}
+
+/// A taint.
+#[derive(Clone)]
+pub struct Taint {
+    /// The taint key.
+    pub key: String,
+    /// The taint value.
+    pub value: String,
+    /// The taint effect (e.g., "NoSchedule").
+    pub effect: String,
+}
+
+impl std::str::FromStr for Taint {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts = s.split(':').collect::<Vec<_>>();
+
+        if parts.len() != 2 {
+            return Err(());
+        }
+
+        let key_value: Vec<&str> = parts[0].split('=').collect();
+        if key_value.len() != 2 {
+            return Err(());
+        }
+
+        Ok(Taint {
+            key: key_value[0].to_string(),
+            value: key_value[1].to_string(),
+            effect: parts[1].to_string(),
+        })
+    }
+}
+
+/// Preemptible task configuration within the orchestrator.
+#[derive(Clone)]
+pub struct PreemptibleConfig {
+    /// The node selector to apply to preemptible tasks.
+    node_selector: NodeSelector,
+    /// The taint to apply to preemptible tasks.
+    taint: Taint,
+}
+
+impl PreemptibleConfig {
+    /// Creates a new `PreemptibleConfig`, validating the inputs.
+    pub fn new(node_selector: String, taint: String) -> Result<Self> {
+        let node_selector = node_selector
+            .parse::<NodeSelector>()
+            .or_else(|_| bail!("invalid node selector: `{}`", node_selector))?;
+
+        let taint = taint
+            .parse::<Taint>()
+            .or_else(|_| bail!("invalid taint: `{}`", taint))?;
+
+        Ok(Self {
+            node_selector,
+            taint,
+        })
+    }
+
+    /// Gets the node selector.
+    fn node_selector(&self) -> &NodeSelector {
+        &self.node_selector
+    }
+
+    /// Gets the taint.
+    fn taint(&self) -> &Taint {
+        &self.taint
+    }
+}
+
 /// Implements the task orchestrator.
 #[derive(Clone)]
 pub struct TaskOrchestrator {
@@ -405,6 +506,8 @@ pub struct TaskOrchestrator {
     storage_class: Option<String>,
     /// Information about the transporter to use.
     transporter: TransporterInfo,
+    /// Configuration for preemptible instance scheduling.
+    preemptible_config: Option<PreemptibleConfig>,
 }
 
 impl TaskOrchestrator {
@@ -416,6 +519,7 @@ impl TaskOrchestrator {
         tasks_namespace: Option<String>,
         storage_class: Option<String>,
         transporter: TransporterInfo,
+        preemptible_config: Option<PreemptibleConfig>,
     ) -> Result<Self> {
         let ns = tasks_namespace
             .as_deref()
@@ -428,6 +532,10 @@ impl TaskOrchestrator {
         let pods = Arc::new(Api::namespaced(client.clone(), ns));
         let pvc = Arc::new(Api::namespaced(client, ns));
 
+        if preemptible_config.is_some() {
+            info!("preemptible task scheduling is enabled");
+        }
+
         Ok(Self {
             id,
             service_url,
@@ -437,6 +545,7 @@ impl TaskOrchestrator {
             pvc,
             storage_class,
             transporter,
+            preemptible_config,
         })
     }
 
@@ -724,6 +833,37 @@ impl TaskOrchestrator {
             init_containers.push(Self::create_executor_container_spec(task, i)?);
         }
 
+        let is_preemptible = task
+            .resources
+            .as_ref()
+            .and_then(|r| r.preemptible)
+            .unwrap_or(false);
+
+        let (node_selector, tolerations) = if is_preemptible {
+            if let Some(preemptible_config) = &self.preemptible_config {
+                let selector = preemptible_config.node_selector();
+                let taint = preemptible_config.taint();
+
+                let mut node_selector = BTreeMap::new();
+                node_selector.insert(selector.key.clone(), selector.value.clone());
+
+                (
+                    Some(node_selector),
+                    Some(vec![Toleration {
+                        key: Some(taint.key.clone()),
+                        operator: Some(TOLERATION_OPERATOR_EQUAL.to_string()),
+                        value: Some(taint.value.clone()),
+                        effect: Some(taint.effect.clone()),
+                        ..Default::default()
+                    }]),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
         let pod = Pod {
             metadata: ObjectMeta {
                 namespace: Some(
@@ -738,6 +878,8 @@ impl TaskOrchestrator {
             },
             spec: Some(PodSpec {
                 init_containers: Some(init_containers),
+                node_selector,
+                tolerations,
                 containers: vec![Container {
                     name: format_container_name(ContainerKind::Outputs, None),
                     image: Some(
@@ -1570,5 +1712,33 @@ impl Monitor {
         }
 
         info!("cluster event processing has shut down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_selector() {
+        let valid = "kubernetes.azure.com/scalesetpriority=spot";
+        let result = valid.parse::<NodeSelector>().unwrap();
+        assert_eq!(result.key, "kubernetes.azure.com/scalesetpriority");
+        assert_eq!(result.value, "spot");
+
+        let invalid = "noequalsign";
+        assert!(invalid.parse::<NodeSelector>().is_err());
+    }
+
+    #[test]
+    fn taint() {
+        let valid = "kubernetes.azure.com/scalesetpriority=spot:NoSchedule";
+        let result = valid.parse::<Taint>().unwrap();
+        assert_eq!(result.key, "kubernetes.azure.com/scalesetpriority");
+        assert_eq!(result.value, "spot");
+        assert_eq!(result.effect, "NoSchedule");
+
+        let invalid = "key=value";
+        assert!(invalid.parse::<Taint>().is_err());
     }
 }
