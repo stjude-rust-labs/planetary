@@ -56,9 +56,8 @@ jobs:
         run: |
           DATE=$(date +%Y-%m-%d)
           find . -name "CHANGELOG.md" -type f -not -path "*/target/*" -not -path "*/node_modules/*" | while read changelog; do
-            # Replace "## Unreleased" with the version and date, then add a new "## Unreleased" section at the top.
-            sed -i "s|## Unreleased|## ${{ steps.bump.outputs.new_version }} (${DATE})|g" "$changelog"
-            sed -i "/^# /a\\\n## Unreleased\n" "$changelog"
+            # Replace "## Unreleased" with the version and date, then add a new "## Unreleased" section right above it.
+            sed -i "s|## Unreleased|## Unreleased\n\n## ${{ steps.bump.outputs.new_version }} (${DATE})|g" "$changelog"
           done
       - name: Commit and push updates
         run: |
