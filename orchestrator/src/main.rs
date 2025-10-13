@@ -92,6 +92,14 @@ pub struct Args {
     /// Defaults to `2.0` GiB.
     #[clap(long, env)]
     transporter_memory: Option<f64>,
+
+    /// The node selector to apply to preemptible tasks.
+    #[clap(long, env)]
+    preemptible_node_selector: Option<String>,
+
+    /// The taint to apply to preemptible tasks.
+    #[clap(long, env)]
+    preemptible_taint: Option<String>,
 }
 
 impl Args {
@@ -177,6 +185,8 @@ pub async fn main() -> anyhow::Result<()> {
         .maybe_tasks_namespace(args.tasks_namespace)
         .maybe_transporter_cpu(args.transporter_cpu)
         .maybe_transporter_memory(args.transporter_memory)
+        .maybe_preemptible_node_selector(args.preemptible_node_selector)
+        .maybe_preemptible_taint(args.preemptible_taint)
         .build()
         .run(terminate())
         .await

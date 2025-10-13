@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Added support for preemptible node pools ([#22](https://github.com/stjude-rust-labs/planetary/pull/22)).
 * Added retry for Kubernetes API calls ([#21](https://github.com/stjude-rust-labs/planetary/pull/21)).
 * Log errors to the database ([#15](https://github.com/stjude-rust-labs/planetary/pull/15)).
 * Added endpoints for getting task I/O and updating a task's outputs, which is
