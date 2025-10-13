@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  calculate-version:
+    name: Calculate new version
+    runs-on: ubuntu-latest
+    outputs:
+      old_version: ${{ steps.bump.outputs.old_version }}
+      old_version_no_v: ${{ steps.bump.outputs.old_version_no_v }}
+      new_version: ${{ steps.bump.outputs.new_version }}
+      new_version_no_v: ${{ steps.bump.outputs.new_version_no_v }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Calculate version bump
+        id: bump
+        run: |
+          # Get current version from `Chart.yaml`.
+          CURRENT_VERSION=$(grep '^version:' chart/Chart.yaml | awk '{print $2}' | tr -d '"')
+          echo "Current version: ${CURRENT_VERSION}"
+
+          # Parse version components (remove `v` prefix if present).
+          VERSION_NO_V=${CURRENT_VERSION#v}
+          MAJOR=$(echo $VERSION_NO_V | cut -d. -f1)
+          MINOR=$(echo $VERSION_NO_V | cut -d. -f2)
+          PATCH=$(echo $VERSION_NO_V | cut -d. -f3)
+
+          # Bump version based on input.
+          case "${{ inputs.bump }}" in
+            major)
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION_NO_V="${MAJOR}.${MINOR}.${PATCH}"
+          NEW_VERSION="v${NEW_VERSION_NO_V}"
+          OLD_VERSION="v${VERSION_NO_V}"
+
+          echo "old_version=${OLD_VERSION}" >> $GITHUB_OUTPUT
+          echo "old_version_no_v=${VERSION_NO_V}" >> $GITHUB_OUTPUT
+          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "new_version_no_v=${NEW_VERSION_NO_V}" >> $GITHUB_OUTPUT
+          echo "Bumping from ${OLD_VERSION} to ${NEW_VERSION} (${{ inputs.bump }} bump)"
+
+  bump-versions:
+    name: Bump all version numbers and update changelogs
+    needs: [calculate-version]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install `cargo-edit`
+        run: cargo install cargo-edit
+      - name: Bump `Cargo.toml` versions
+        run: cargo set-version --workspace ${{ needs.calculate-version.outputs.new_version_no_v }}
+      - name: Bump `Chart.yaml` version and `appVersion`
+        run: |
+          sed -i "s|^version: .*|version: ${{ needs.calculate-version.outputs.new_version_no_v }}|g" chart/Chart.yaml
+          sed -i "s|^appVersion: .*|appVersion: \"${{ needs.calculate-version.outputs.new_version }}\"|g" chart/Chart.yaml
+      - name: Update all `CHANGELOG.md` files with version and date
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          find . -name "CHANGELOG.md" -type f -not -path "*/target/*" -not -path "*/node_modules/*" | while read changelog; do
+            # Replace "## Unreleased" with the version and date, then add a new "## Unreleased" section at the top.
+            sed -i "s|## Unreleased|## ${{ needs.calculate-version.outputs.new_version }} (${DATE})|g" "$changelog"
+            sed -i "/^# /a\\\n## Unreleased\n" "$changelog"
+          done
+      - name: Commit and push updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add chart/Chart.yaml **/CHANGELOG.md **/Cargo.toml Cargo.toml Cargo.lock
+          git commit -m "revise: updates Planetary to ${{ needs.calculate-version.outputs.new_version }}"
+          git push
+      - name: Create and push git tag
+        run: |
+          git tag ${{ needs.calculate-version.outputs.new_version }}
+          git push origin ${{ needs.calculate-version.outputs.new_version }}
+
+  publish-crates:
+    name: Publish Rust crates to crates.io
+    needs: [calculate-version, bump-versions]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+      - name: Pull latest changes
+        run: git pull origin ${{ github.ref_name }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Publish all crates
+        run: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+
+  build-and-push-images:
+    name: Build and push Docker images
+    needs: [calculate-version, bump-versions]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        target:
+          - planetary-api
+          - planetary-orchestrator
+          - planetary-monitor
+          - planetary-transporter
+          - planetary-migration
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+      - name: Pull latest changes
+        run: git pull origin ${{ github.ref_name }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.target }}
+          tags: |
+            type=raw,value=${{ needs.calculate-version.outputs.new_version }}
+            type=raw,value=latest
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  create-release:
+    name: Create GitHub Release
+    needs: [calculate-version, publish-crates, build-and-push-images, bump-versions]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Pull latest changes
+        run: git pull origin ${{ github.ref_name }}
+      - name: Extract changelog from all components
+        id: changelog
+        run: |
+          VERSION="${{ needs.calculate-version.outputs.new_version }}"
+          COMBINED_CHANGELOG=""
+
+          # Extract changelog from each component.
+          for changelog in chart/CHANGELOG.md api/CHANGELOG.md orchestrator/CHANGELOG.md monitor/CHANGELOG.md transporter/CHANGELOG.md server/CHANGELOG.md db/CHANGELOG.md; do
+            if [ -f "$changelog" ]; then
+              COMPONENT=$(dirname "$changelog")
+              CONTENT=$(awk "/## ${VERSION}/,/^## [^${VERSION}]/ {if (/^## ${VERSION}/) next; if (/^## /) exit; print}" "$changelog" 2>/dev/null || echo "")
+
+              if [ -n "$CONTENT" ]; then
+                COMBINED_CHANGELOG="${COMBINED_CHANGELOG}
+          ### ${COMPONENT}
+          ${CONTENT}
+          "
+              fi
+            fi
+          done
+
+          if [ -z "$COMBINED_CHANGELOG" ]; then
+            COMBINED_CHANGELOG="No changelog entries found"
+          fi
+
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMBINED_CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.calculate-version.outputs.new_version }}
+          name: Release ${{ needs.calculate-version.outputs.new_version }}
+          body: |
+            ## Changes
+            ${{ steps.changelog.outputs.changelog }}
+
+            ## Docker Images
+            All images are available on GitHub Container Registry with both `amd64` and `arm64` architectures:
+
+            - `ghcr.io/stjude-rust-labs/planetary-api:${{ needs.calculate-version.outputs.new_version }}`
+            - `ghcr.io/stjude-rust-labs/planetary-orchestrator:${{ needs.calculate-version.outputs.new_version }}`
+            - `ghcr.io/stjude-rust-labs/planetary-monitor:${{ needs.calculate-version.outputs.new_version }}`
+            - `ghcr.io/stjude-rust-labs/planetary-transporter:${{ needs.calculate-version.outputs.new_version }}`
+            - `ghcr.io/stjude-rust-labs/planetary-migration:${{ needs.calculate-version.outputs.new_version }}`
+
+            ## Helm Chart
+            Install or upgrade with:
+            ```bash
+            helm upgrade --install planetary ./chart
+            ```
+          draft: false
+          prerelease: false
