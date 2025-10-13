@@ -333,9 +333,13 @@ Kubernetes cluster, run the following command:
 ```bash
 cd chart
 helm upgrade --install --create-namespace -n planetary planetary . \
+  --set api.image.name=stjude-rust-labs/planetary-api \
   --set api.image.tag=staging \
+  --set orchestrator.image.name=stjude-rust-labs/planetary-orchestrator \
   --set orchestrator.image.tag=staging \
+  --set monitor.image.name=stjude-rust-labs/planetary-monitor \
   --set monitor.image.tag=staging \
+  --set transporter.image.name=stjude-rust-labs/planetary-transporter \
   --set transporter.image.tag=staging \
   --set migration.image.tag=staging \
   --set postgresql.enabled=true \

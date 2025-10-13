@@ -63,7 +63,7 @@ postgresql:
 api:
   replicas: 2
   image:
-    name: stjude-rust-labs/planetary-api
+    name: ghcr.io/stjude-rust-labs/planetary-api
     tag: null
   service:
     type: ClusterIP
@@ -80,7 +80,7 @@ api:
 orchestrator:
   replicas: 2
   image:
-    name: stjude-rust-labs/planetary-orchestrator
+    name: ghcr.io/stjude-rust-labs/planetary-orchestrator
     tag: null
   account:
     create: true
@@ -112,7 +112,7 @@ orchestrator:
 # for ensuring tasks do not become orphaned.
 monitor:
   image:
-    name: stjude-rust-labs/planetary-monitor
+    name: ghcr.io/stjude-rust-labs/planetary-monitor
     tag: null
   account:
     create: true
@@ -131,7 +131,7 @@ monitor:
 # transferring files to and from cloud storage.
 transporter:
   image:
-    name: stjude-rust-labs/planetary-transporter
+    name: ghcr.io/stjude-rust-labs/planetary-transporter
     tag: null
   storage:
     # Configuration for S3
@@ -156,5 +156,5 @@ transporter:
 # Configuration relating to database migrations.
 migration:
   image:
-    name: stjude-rust-labs/planetary-migration
+    name: ghcr.io/stjude-rust-labs/planetary-migration
     tag: null
