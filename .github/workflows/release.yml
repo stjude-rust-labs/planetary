@@ -96,14 +96,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    strategy:
-      matrix:
-        target:
-          - planetary-api
-          - planetary-orchestrator
-          - planetary-monitor
-          - planetary-transporter
-          - planetary-migration
     steps:
       - uses: actions/checkout@v5
         with:
@@ -120,23 +112,56 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_PREFIX }}/${{ matrix.target }}
-          tags: |
-            type=raw,value=${{ needs.bump-versions.outputs.new_version }}
-            type=raw,value=latest
-      - name: Build and push
+      - name: Build and push `planetary-api`
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          target: ${{ matrix.target }}
+          target: planetary-api
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/planetary-api:${{ needs.bump-versions.outputs.new_version }}
+            ${{ env.IMAGE_PREFIX }}/planetary-api:latest
+      - name: Build and push `planetary-orchestrator`
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          target: planetary-orchestrator
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/planetary-orchestrator:${{ needs.bump-versions.outputs.new_version }}
+            ${{ env.IMAGE_PREFIX }}/planetary-orchestrator:latest
+      - name: Build and push `planetary-monitor`
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          target: planetary-monitor
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/planetary-monitor:${{ needs.bump-versions.outputs.new_version }}
+            ${{ env.IMAGE_PREFIX }}/planetary-monitor:latest
+      - name: Build and push `planetary-transporter`
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          target: planetary-transporter
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/planetary-transporter:${{ needs.bump-versions.outputs.new_version }}
+            ${{ env.IMAGE_PREFIX }}/planetary-transporter:latest
+      - name: Build and push `planetary-migration`
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          target: planetary-migration
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/planetary-migration:${{ needs.bump-versions.outputs.new_version }}
+            ${{ env.IMAGE_PREFIX }}/planetary-migration:latest
 
   create-release:
     name: Create GitHub Release
