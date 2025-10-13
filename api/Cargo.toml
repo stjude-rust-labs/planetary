@@ -1,6 +1,6 @@
 [package]
 name = "planetary-api"
-version = "0.0.0"
+version = "0.2.0"
 description = "The Planetary TES API service"
 authors.workspace = true
 homepage.workspace = true
@@ -35,8 +35,8 @@ chrono.workspace = true
 clap = { workspace = true, optional = true }
 clap-verbosity-flag = { workspace = true, optional = true }
 glob.workspace = true
-planetary-db = { version = "0.0.0", path = "../db" }
-planetary-server = { version = "0.0.0", path = "../server" }
+planetary-db = { version = "0.2.0", path = "../db" }
+planetary-server = { version = "0.2.0", path = "../server" }
 reqwest.workspace = true
 secrecy.workspace = true
 serde.workspace = true

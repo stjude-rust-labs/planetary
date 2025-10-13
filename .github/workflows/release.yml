@@ -38,10 +38,8 @@ jobs:
 
           # Perform the bump (no commit/tag here).
           cargo workspaces version \
-            --bump "${{ inputs.bump }}" \
+            "${{ inputs.bump }}" \
             --no-git-commit \
-            --no-git-tag \
-            --exact \
             -y
 
           FILE=$(git ls-files '**/Cargo.toml' Cargo.toml \

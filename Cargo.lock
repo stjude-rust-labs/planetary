@@ -2483,7 +2483,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "planetary-api"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2513,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "planetary-db"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2536,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "planetary-monitor"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bon",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "planetary-orchestrator"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "planetary-server"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2613,7 +2613,7 @@ dependencies = [
 
 [[package]]
 name = "planetary-transporter"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "byte-unit",
