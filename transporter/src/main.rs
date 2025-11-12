@@ -49,10 +49,8 @@ use clap_verbosity_flag::Verbosity;
 use clap_verbosity_flag::WarnLevel;
 use cloud_copy::AzureConfig;
 use cloud_copy::Config;
-use cloud_copy::GoogleAuthConfig;
 use cloud_copy::GoogleConfig;
 use cloud_copy::HttpClient;
-use cloud_copy::S3AuthConfig;
 use cloud_copy::S3Config;
 use cloud_copy::TransferEvent;
 use cloud_copy::UrlExt;
@@ -211,6 +209,20 @@ struct Args {
     /// The number of retries to attempt for network operations.
     #[clap(long, value_name = "RETRIES")]
     retries: Option<usize>,
+
+    /// The Azure Storage account name to use.
+    #[clap(long, env, value_name = "NAME", requires = "azure_access_key")]
+    azure_account_name: Option<String>,
+
+    /// The Azure Storage access key to use.
+    #[clap(
+        long,
+        env,
+        hide_env_values(true),
+        value_name = "KEY",
+        requires = "azure_account_name"
+    )]
+    azure_access_key: Option<SecretString>,
 
     /// The AWS Access Key ID to use.
     #[clap(long, env, value_name = "ID")]
@@ -817,38 +829,34 @@ async fn run(cancel: CancellationToken) -> Result<()> {
         }
     }
 
-    let s3_auth =
-        if let (Some(id), Some(key)) = (args.aws_access_key_id, args.aws_secret_access_key) {
-            Some(S3AuthConfig {
-                access_key_id: id,
-                secret_access_key: key,
-            })
-        } else {
-            None
-        };
+    let azure = args
+        .azure_account_name
+        .and_then(|name| Some((name, args.azure_access_key?)))
+        .map(|(name, key)| AzureConfig::default().with_auth(name, key))
+        .unwrap_or_default();
 
-    let google_auth = if let (Some(access_key), Some(secret)) =
-        (args.google_hmac_access_key, args.google_hmac_secret)
-    {
-        Some(GoogleAuthConfig { access_key, secret })
-    } else {
-        None
-    };
+    let s3 = args
+        .aws_access_key_id
+        .and_then(|id| Some((id, args.aws_secret_access_key?)))
+        .map(|(id, key)| S3Config::default().with_auth(id, key))
+        .unwrap_or_default()
+        .with_maybe_region(args.aws_default_region);
 
-    let config = Config {
-        link_to_cache: false,
-        overwrite: false,
-        block_size: args.block_size,
-        parallelism: args.parallelism,
-        retries: args.retries,
-        azure: AzureConfig { use_azurite: false },
-        s3: S3Config {
-            use_localstack: false,
-            region: args.aws_default_region,
-            auth: s3_auth,
-        },
-        google: GoogleConfig { auth: google_auth },
-    };
+    let google = args
+        .google_hmac_access_key
+        .and_then(|key| Some((key, args.google_hmac_secret?)))
+        .map(|(key, secret)| GoogleConfig::default().with_auth(key, secret))
+        .unwrap_or_default();
+
+    let config = Config::builder()
+        .with_link_to_cache(false)
+        .with_overwrite(false)
+        .with_maybe_block_size(args.block_size)
+        .with_maybe_parallelism(args.parallelism)
+        .with_azure(azure)
+        .with_s3(s3)
+        .with_google(google)
+        .build();
 
     let orchestrator = OrchestratorServiceInfo {
         url: args.orchestrator_url,

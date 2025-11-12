@@ -124,6 +124,9 @@ const DEFAULT_POD_CPU: i32 = 1;
 /// Uses a 256 MiB default.
 const DEFAULT_POD_MEMORY: f64 = 0.268435455;
 
+/// The name of the Azure Storage credentials secret.
+const AZURE_STORAGE_CREDENTIALS_SECRET: &str = "azure-storage-credentials";
+
 /// The name of the S3 credentials secret.
 const AWS_S3_CREDENTIALS_SECRET: &str = "aws-s3-credentials";
 
@@ -778,6 +781,13 @@ impl TaskOrchestrator {
             env_from: Some(vec![
                 EnvFromSource {
                     secret_ref: Some(SecretEnvSource {
+                        name: AZURE_STORAGE_CREDENTIALS_SECRET.into(),
+                        optional: Some(true),
+                    }),
+                    ..Default::default()
+                },
+                EnvFromSource {
+                    secret_ref: Some(SecretEnvSource {
                         name: AWS_S3_CREDENTIALS_SECRET.into(),
                         optional: Some(true),
                     }),
@@ -900,6 +910,13 @@ impl TaskOrchestrator {
                         tes_id.into(),
                     ]),
                     env_from: Some(vec![
+                        EnvFromSource {
+                            secret_ref: Some(SecretEnvSource {
+                                name: AZURE_STORAGE_CREDENTIALS_SECRET.into(),
+                                optional: Some(true),
+                            }),
+                            ..Default::default()
+                        },
                         EnvFromSource {
                             secret_ref: Some(SecretEnvSource {
                                 name: AWS_S3_CREDENTIALS_SECRET.into(),

@@ -319,7 +319,7 @@ kind load docker-image -n planetary \
 
 ## ✨ Deploying Planetary
 
-> [!NOTE]  
+> [!NOTE]
 > The Planetary Helm chart includes an optional pod-based PostgreSQL database for
 > local development and testing (enabled below with `postgresql.enabled=true`). In
 > this guide, we'll deploy Planetary using this ephemeral database. **This is for
@@ -341,6 +341,7 @@ helm upgrade --install --create-namespace -n planetary planetary . \
   --set monitor.image.tag=staging \
   --set transporter.image.name=stjude-rust-labs/planetary-transporter \
   --set transporter.image.tag=staging \
+  --set migration.image.name=stjude-rust-labs/planetary-migration \
   --set migration.image.tag=staging \
   --set postgresql.enabled=true \
   # Set a secure password here!
