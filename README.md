@@ -154,17 +154,17 @@ There are currently four images created for use with Planetary:
 Planetary supports the following cloud storage services:
 
 * [Azure Blob Storage](https://azure.microsoft.com/en-us/products/storage/blobs/)
-  : authentication is performed via the client sending input and outputs URLs
-  with SAS tokens; no configuration is required for Planetary to support Azure
-  Blob Storage.
+  : authentication is performed via signed requests using a Azure Storage
+  shared access key.
 
-* [AWS S3](https://aws.amazon.com/s3/) - authentication is performed via signed
+* [AWS S3](https://aws.amazon.com/s3/): authentication is performed via signed
   requests using an AWS Access Key Id and AWS Secret Access Key.
 
-* [Google Cloud Storage](https://cloud.google.com/storage) - authentication is
+* [Google Cloud Storage](https://cloud.google.com/storage): authentication is
   performed via signed requests using an [HMAC Access Key and HMAC Secret](https://cloud.google.com/storage/docs/authentication/hmackeys).
 
-See the [Helm chart values](./chart/values.yaml) for configuring a Planetary deployment.
+See the [`transporter.storage` Helm chart values](./chart/values.yaml) for
+configuring a Planetary deployment.
 
 ### Task Execution
 
