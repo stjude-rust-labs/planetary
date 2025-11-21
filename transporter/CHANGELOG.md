@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Added
+
+* Added `--azure-account-name` and `--azure-access-key` options for Azure
+  Storage authentication ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).
+
 ## v0.1.0 (2025-10-13)
 
 #### Added

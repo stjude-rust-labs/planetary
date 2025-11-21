@@ -391,6 +391,8 @@ dependencies = [
  "cc",
  "cfg-if",
  "constant_time_eq",
+ "memmap2",
+ "rayon-core",
 ]
 
 [[package]]
@@ -613,12 +615,13 @@ checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
 
 [[package]]
 name = "cloud-copy"
-version = "0.3.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc7f9ef2d7b38579694fc801fbd738881d4fd79275713c0cf630872894cd6c5a"
+checksum = "ee0cca7879e30a6072163271636699ad3356c59982202ba0cd44ca8e374dda3c"
 dependencies = [
  "anyhow",
  "base64",
+ "blake3",
  "byte-unit",
  "bytes",
  "chrono",
@@ -627,6 +630,7 @@ dependencies = [
  "colored",
  "crc64fast-nvme",
  "futures",
+ "git-testament",
  "hex",
  "hmac",
  "http-cache-stream-reqwest",
@@ -781,6 +785,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4955638f00a809894c947f85a024020a20815b65a5eea633798ea7924edab2b3"
 dependencies = [
  "crc",
+]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -1325,6 +1348,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
+name = "git-testament"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a74999c921479f919c87a9d2e6922a79a18683f18105344df8e067149232e51"
+dependencies = [
+ "git-testament-derive",
+]
+
+[[package]]
+name = "git-testament-derive"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbeac967e71eb3dc1656742fc7521ec7cd3b6b88738face65bf1fddf702bc4c0"
+dependencies = [
+ "log",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+ "time",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1516,9 +1561,9 @@ dependencies = [
 
 [[package]]
 name = "http-cache-stream"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f85add2cd311dce74de15ab7a3f0b1deabc9c4ea8ab7c2abde022c27643975e"
+checksum = "63b6f61e55d75019805646fba61a0d42edc257dcfe16783b84f6ceebfab57f22"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1529,6 +1574,7 @@ dependencies = [
  "hex",
  "http",
  "http-body",
+ "http-body-util",
  "http-cache-semantics",
  "http-serde",
  "httpdate",
@@ -1540,20 +1586,19 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "windows-sys 0.60.2",
 ]
 
 [[package]]
 name = "http-cache-stream-reqwest"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ddd4954ef92d43498e610ebe98721e12c7304254644dce8e6a68943c3e7c295"
+checksum = "099b3c8a9899f382f0dbc858293ad1be5e651c17be2b21d9fc2cdefda6b909ce"
 dependencies = [
  "anyhow",
  "bytes",
  "futures",
+ "http-body-util",
  "http-cache-stream",
- "pin-project-lite",
  "reqwest",
  "reqwest-middleware",
 ]
@@ -2144,6 +2189,15 @@ name = "memchr"
 version = "2.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
+
+[[package]]
+name = "memmap2"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "744133e4a0e0a658e1374cf3bf8e415c4052a15a111acd372764c55b4177d490"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "migrations_internals"
@@ -2846,6 +2900,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.3",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
 ]
 
 [[package]]

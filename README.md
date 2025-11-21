@@ -154,17 +154,17 @@ There are currently four images created for use with Planetary:
 Planetary supports the following cloud storage services:
 
 * [Azure Blob Storage](https://azure.microsoft.com/en-us/products/storage/blobs/)
-  : authentication is performed via the client sending input and outputs URLs
-  with SAS tokens; no configuration is required for Planetary to support Azure
-  Blob Storage.
+  : authentication is performed via signed requests using a Azure Storage
+  shared access key.
 
-* [AWS S3](https://aws.amazon.com/s3/) - authentication is performed via signed
+* [AWS S3](https://aws.amazon.com/s3/): authentication is performed via signed
   requests using an AWS Access Key Id and AWS Secret Access Key.
 
-* [Google Cloud Storage](https://cloud.google.com/storage) - authentication is
+* [Google Cloud Storage](https://cloud.google.com/storage): authentication is
   performed via signed requests using an [HMAC Access Key and HMAC Secret](https://cloud.google.com/storage/docs/authentication/hmackeys).
 
-See the [Helm chart values](./chart/values.yaml) for configuring a Planetary deployment.
+See the [`transporter.storage` Helm chart values](./chart/values.yaml) for
+configuring a Planetary deployment.
 
 ### Task Execution
 
@@ -319,7 +319,7 @@ kind load docker-image -n planetary \
 
 ## ✨ Deploying Planetary
 
-> [!NOTE]  
+> [!NOTE]
 > The Planetary Helm chart includes an optional pod-based PostgreSQL database for
 > local development and testing (enabled below with `postgresql.enabled=true`). In
 > this guide, we'll deploy Planetary using this ephemeral database. **This is for
@@ -341,6 +341,7 @@ helm upgrade --install --create-namespace -n planetary planetary . \
   --set monitor.image.tag=staging \
   --set transporter.image.name=stjude-rust-labs/planetary-transporter \
   --set transporter.image.tag=staging \
+  --set migration.image.name=stjude-rust-labs/planetary-migration \
   --set migration.image.tag=staging \
   --set postgresql.enabled=true \
   # Set a secure password here!

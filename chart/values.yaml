@@ -134,6 +134,14 @@ transporter:
     name: ghcr.io/stjude-rust-labs/planetary-transporter
     tag: null
   storage:
+    # Configuration for Azure Storage
+    azure: null
+    #   # The Azure Storage account name to use for authentication.
+    #   # Required if `accessKey` is set.
+    #   accountName: "<account-name"
+    #   # The Azure Storage access key to use for authentication.
+    #   # Required if `accountName` is set
+    #   accessKey: "<access-key"
     # Configuration for S3
     s3: null
     #   # The default region to use for `s3://` URLs.
