@@ -1310,7 +1310,7 @@ impl TaskOrchestrator {
             .database
             .update_task_state(
                 tes_id,
-                State::ExecutorError,
+                State::SystemError,
                 &[&format_log_message!(
                     "task `{tes_id}` has failed due to a system error"
                 )],
