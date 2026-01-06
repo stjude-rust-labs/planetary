@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Fixed
+
+* Corrected several bugs in the monitor that prevented it from aborting tasks
+  that no longer have running pods ([#29](https://github.com/stjude-rust-labs/planetary/pull/29)).
+
 ## v0.1.0 (2025-10-13)
 
 #### Added

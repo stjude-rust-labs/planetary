@@ -21,12 +21,12 @@ use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
 use kube::Client;
-use kube::ResourceExt;
 use kube::api::DeleteParams;
 use kube::api::ListParams;
 use kube::api::ObjectMeta;
 use kube::api::Patch;
 use kube::api::PatchParams;
+use kube::core::ErrorResponse;
 use kube::runtime::reflector::Lookup;
 use planetary_db::Database;
 use planetary_db::format_log_message;
@@ -55,9 +55,6 @@ const PLANETARY_ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
 
 /// The error source for the monitor.
 const MONITOR_ERROR_SOURCE: &str = "monitor";
-
-/// The annotation for the task's TES id.
-const PLANETARY_TES_ID_ANNOTATION: &str = "planetary/tes-id";
 
 /// A label applied to resources that are ready for garbage collection.
 const PLANETARY_GC_LABEL: &str = "planetary/gc";
@@ -163,35 +160,32 @@ impl Monitor {
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
                     // Start by getting the current pod map
-                    let pod_map = match Self::get_task_pod_map(&task_pods).await {
-                        Ok(map) => Some(map),
+                    match Self::get_task_pod_map(&task_pods).await {
+                        Ok(pod_map) => {
+                            // Check for orphaned tasks
+                            if let Err(e) = Self::check_orphaned_tasks(&client, &orchestrator, &planetary_pods, &pod_map).await {
+                                let message = format!("failed to check for orphaned pods: {e:#}");
+                                error!("{message}");
+                                let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
+                            }
+
+                            // Check for missing task resources
+                            if let Err(e) = Self::check_missing_resources(database.as_ref(), &task_pvcs, &pod_map).await {
+                                let message = format!("failed to check for missing Kubernetes resources: {e:#}");
+                                error!("{message}");
+                                let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
+                            }
+                        }
                         Err(e) => {
-                            let message = format!("failed to drain executing pods: {e:#}");
+                            let message = format!("failed to get task pod map: {e:#}");
                             error!("{message}");
                             let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
-                            None
                         }
                     };
 
-                    if let Some(pod_map) = pod_map {
-                        // Check for orphaned tasks
-                        if let Err(e) = Self::check_orphaned_tasks(&client, &orchestrator, &planetary_pods, &pod_map).await {
-                            let message = format!("failed to check for orphaned pods: {e:#}");
-                            error!("{message}");
-                            let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
-                        }
-
-                        // Check for missing task resources
-                        if let Err(e) = Self::check_missing_resources(database.as_ref(), &task_pods, &task_pvcs, &pod_map).await {
-                            let message = format!("failed to check for missing resources: {e:#}");
-                            error!("{message}");
-                            let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
-                        }
-                    }
-
                     // Perform a GC
                     if let Err(e) = Self::gc(&task_pods, &task_pvcs).await {
-                        let message = format!("failed to drain executing pods: {e:#}");
+                        let message = format!("failed to garbage collect Kubernetes resources: {e:#}");
                         error!("{message}");
                         let _ = database.insert_error(MONITOR_ERROR_SOURCE, None, &message).await;
                     }
@@ -202,7 +196,7 @@ impl Monitor {
         info!("task monitor has shut down");
     }
 
-    /// Gets a map of currently running task pods.
+    /// Gets the map of pod name (TES id) to pod.
     ///
     /// The key of the map is the TES identifier.
     async fn get_task_pod_map(task_pods: &Api<Pod>) -> Result<HashMap<String, Pod>> {
@@ -211,17 +205,12 @@ impl Monitor {
             .list(&ListParams::default().labels(&format!("{PLANETARY_GC_LABEL}!=true")))
             .await?
         {
-            // Don't include nameless pods
-            if pod.name().is_none() {
-                continue;
-            }
-
-            // Only include pods with a TES ID annotation
-            let Some(tes_id) = pod.annotations().get(PLANETARY_TES_ID_ANNOTATION) else {
+            // Only include pods with names
+            let Some(name) = pod.name() else {
                 continue;
             };
 
-            map.insert(tes_id.clone(), pod);
+            map.insert(name.into_owned(), pod);
         }
 
         Ok(map)
@@ -301,22 +290,26 @@ impl Monitor {
         Ok(())
     }
 
-    /// Checks for missing K8s resources for "in-progress" tasks.
+    /// Checks for missing Kubernetes resources for "in-progress" tasks.
     async fn check_missing_resources(
         database: &dyn Database,
-        task_pods: &Api<Pod>,
         task_pvcs: &Api<PersistentVolumeClaim>,
         pod_map: &HashMap<String, Pod>,
     ) -> Result<()> {
+        debug!("checking for missing Kubernetes resources");
+
         // Query for ids for in-progress tasks that have existed since before the
         // creation delta
-        for id in database
+        let ids = database
             .get_in_progress_tasks(Utc::now() - TASK_CREATION_DELTA)
-            .await?
-        {
-            let Some(pod) = pod_map.get(&id) else {
+            .await?;
+
+        for id in ids {
+            if pod_map.contains_key(&id) {
                 continue;
-            };
+            }
+
+            info!("task `{id}` does not have an associated pod and will be aborted");
 
             // Transition the task to a system error state
             if database
@@ -331,14 +324,12 @@ impl Monitor {
                 .await
                 .with_context(|| format!("failed to update state for task `{id}`"))?
             {
-                let name = pod.name().expect("should have pod name");
-
-                // Mark the pod for GC
-                task_pods
+                // Mark the PVC (if there is one) for GC
+                match task_pvcs
                     .patch(
-                        &name,
+                        &id,
                         &PatchParams::default(),
-                        &Patch::Merge(Pod {
+                        &Patch::Merge(PersistentVolumeClaim {
                             metadata: ObjectMeta {
                                 labels: Some(BTreeMap::from_iter([(
                                     PLANETARY_GC_LABEL.to_string(),
@@ -350,26 +341,13 @@ impl Monitor {
                         }),
                     )
                     .await
-                    .with_context(|| format!("failed to mark pod `{name}` for GC"))?;
-
-                // Mark the PVC for GC
-                task_pvcs
-                    .patch(
-                        &name,
-                        &PatchParams::default(),
-                        &Patch::Merge(Pod {
-                            metadata: ObjectMeta {
-                                labels: Some(BTreeMap::from_iter([(
-                                    PLANETARY_GC_LABEL.to_string(),
-                                    "true".to_string(),
-                                )])),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                    .with_context(|| format!("failed to mark PVC `{name}` for GC"))?;
+                {
+                    Ok(_) => {}
+                    Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
+                    Err(e) => {
+                        return Err(e).with_context(|| format!("failed to mark PVC `{id}` for GC"));
+                    }
+                }
             }
         }
 
