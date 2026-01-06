@@ -86,10 +86,16 @@ fn into_retry_error(e: kube::Error) -> RetryError<kube::Error> {
 /// key.
 async fn auth(
     axum::extract::State(state): axum::extract::State<Arc<State>>,
-    TypedHeader(authorization): TypedHeader<Authorization<Bearer>>,
+    authorization: Option<TypedHeader<Authorization<Bearer>>>,
     request: Request,
     next: Next,
 ) -> Response {
+    // If the Authorization header is missing, reject the request
+    let Some(TypedHeader(authorization)) = authorization else {
+        return Error::forbidden().into_response();
+    };
+
+    // If the token does not match the configured service API key, reject
     if authorization.token() != state.service_api_key.expose_secret() {
         return Error::forbidden().into_response();
     }
