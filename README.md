@@ -253,7 +253,7 @@ To install `helm`, please consult the [installation instructions](https://helm.s
 
 ### Creating the Kubernetes Cluster
 
-To crate a local Kubernetes cluster using `kind`, run the following command:
+To create a local Kubernetes cluster using `kind`, run the following command:
 
 ```bash
 kind create cluster --config kind-config.yml
