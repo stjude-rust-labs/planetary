@@ -166,3 +166,30 @@ migration:
   image:
     name: ghcr.io/stjude-rust-labs/planetary-migration
     tag: null
+
+# The Network Policies are disabled by default. If enabled, the defaults lock
+# down all communication except to `kube-dns`, the orchestrator, and the
+# public internet as seen below with the `egressRules` default.
+#
+# If you need other access, add egress rules below.
+networkPolicies:
+  enabled: false
+  egressRules:
+  # Allows for custom egress rules from the tasks namespace.
+  # Below is an example that allows public internet access but blocks a
+  # common pod and service CIDR range.
+  #
+  # - to:
+  #   - ipBlock:
+  #       cidr: 0.0.0.0/0
+  #       except:
+  #         - 10.244.0.0/16
+  #         - 10.0.0.0/16
+  #
+  # The default when enabled is allow all HTTPS traffic.
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP

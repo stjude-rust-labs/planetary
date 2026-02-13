@@ -1,0 +1,33 @@
+# planetary
+
+`planetary` is a Kubernetes-based task executor for the Task Execution Service (TES) specification.
+
+## Configuration
+
+### Network Policies
+
+Network policies are disabled for task pods by default.
+In production deployments, it is recommeded you enable network policies for the task pods.
+
+The default network policy allows communication to `kube-dns` on port 53 - both UDP and TCP, HTTP communication back to the orchestrator, and all other IPv4 traffic on port 443.
+It is suggested that you review this network policy for your use case and determine if there are requirements where this policy is not strict enough.
+To fully lock down the task pods, we suggest a custom egress rule that allows internet connectivity on port 443 for all IPv4 ranges except the private CIDR ranges of your pods and services.
+An example looks like:
+
+```yaml
+networkPolicies:
+  enabled: true
+  egressRules:
+    - to:
+      - ipBlock:
+          cidr: 0.0.0.0/0
+          except:
+            - 10.244.0.0/16
+            - 10.0.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+```
+
+This allows communication to cloud specific services such as IDMS on Azure and any other private networks.
+Restrict further as needed if other network calls should not be allowed.
