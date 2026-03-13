@@ -69,10 +69,8 @@ fn notify_retry(e: &kube::Error, duration: Duration) {
 
 /// Converts a Kubernetes error into a retry error.
 fn into_retry_error(e: kube::Error) -> RetryError<kube::Error> {
-    match e {
-        kube::Error::Api(kube::core::ErrorResponse { code, .. }) if code >= 500 => {
-            RetryError::transient(e)
-        }
+    match &e {
+        kube::Error::Api(s) if s.code >= 500 => RetryError::transient(e),
         kube::Error::HyperError(_)
         | kube::Error::Service(_)
         | kube::Error::ReadEvents(_)
@@ -156,13 +154,13 @@ pub struct Server {
 
     /// The number of CPU cores to request for transporter pods.
     ///
-    /// Defaults to `4` CPU cores.
+    /// Defaults to `1` CPU cores.
     #[builder(into)]
     transporter_cpu: Option<i32>,
 
     /// The amount of memory (in GB) to request for transporter pods.
     ///
-    /// Defaults to `1.07374182` GB (i.e 1 GiB).
+    /// Defaults to `0.268435455` GB (i.e. 256 MiB).
     #[builder(into)]
     transporter_memory: Option<f64>,
 

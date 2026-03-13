@@ -368,7 +368,7 @@ async fn download_inputs(
     // Create an event handling task
     let (events_tx, events_rx) = broadcast::channel(1000);
     let c = cancel.clone();
-    let handler = tokio::spawn(async move { handle_events(events_rx, c).await });
+    let handler = tokio::spawn(async move { handle_events(events_rx, false, c).await });
 
     let files_created = Arc::new(AtomicUsize::new(0));
 
@@ -558,7 +558,7 @@ async fn upload_outputs(
     // Create an event handling task
     let (events_tx, events_rx) = broadcast::channel(1000);
     let c = cancel.clone();
-    let handler = tokio::spawn(async move { handle_events(events_rx, c).await });
+    let handler = tokio::spawn(async move { handle_events(events_rx, false, c).await });
 
     // Transfer the outputs
     let transfer = async || {
