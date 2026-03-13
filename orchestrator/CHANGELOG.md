@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   header ([#26](https://github.com/stjude-rust-labs/planetary/pull/26)).
 * Fixed incorrect task state when a system error was encountered ([#28](https://github.com/stjude-rust-labs/planetary/pull/28)).
 
+#### Dependencies
+
+* Updated dependencies to latest ([#37](https://github.com/stjude-rust-labs/planetary/pull/37)).
+
 ## v0.1.0 (2025-10-13)
 
 #### Added
