@@ -62,7 +62,7 @@ consider in your situation.
 - **Ingress and external exposure.** The services provided by Planetary
   include **no authentication or authorization at all and will accept and
   execute unauthenticated requests if you do not take action to secure them
-  further**. It is imperitive that you restrict these services using external
+  further**. It is imperative that you restrict these services using external
   authentication and authorization mechanisms. Further, we encourage you to
   review any Services or Ingress resources included in the chart to confirm they
   are exposed only as needed. Ensure TLS termination, authentication,
@@ -306,7 +306,9 @@ docker build . --target planetary-migration --tag stjude-rust-labs/planetary-mig
 
 ### Loading the Container Images
 
-As `kind` cluster nodes run isolated from the host system, local container images must be explicitly loaded onto the nodes. To load the images, run the following command:
+As `kind` cluster nodes run isolated from the host system, local container
+images must be explicitly loaded onto the nodes. To load the images, run the
+following command:
 
 ```bash
 kind load docker-image -n planetary \
@@ -320,12 +322,12 @@ kind load docker-image -n planetary \
 ## ✨ Deploying Planetary
 
 > [!NOTE]
-> The Planetary Helm chart includes an optional pod-based PostgreSQL database for
-> local development and testing (enabled below with `postgresql.enabled=true`). In
-> this guide, we'll deploy Planetary using this ephemeral database. **This is for
-> demonstration purposes only—for anything other than local testing, we recommend
-> using an external managed database service that is backed up rather than the
-> included pod-based database.**
+> The Planetary Helm chart includes an optional pod-based PostgreSQL database
+> for local development and testing (enabled below with
+> `postgresql.enabled=true`). In this guide, we'll deploy Planetary using this
+> ephemeral database. **This is for demonstration purposes only—for anything
+> other than local testing, we recommend using an external managed database
+> service that is backed up rather than the included pod-based database.**
 
 To deploy Planetary with the included PostgreSQL database into a local
 Kubernetes cluster, run the following command:
@@ -356,7 +358,125 @@ cd ..
 
 **Note:** Replace `mypassword` with a secure password of your choice.
 
-The database schema will be automatically set up by a post-install Helm hook that runs after the chart is deployed. The migration job waits for the database to be ready (up to 10 minutes) and then runs the necessary migrations.
+The database schema will be automatically set up by a post-install Helm hook
+that runs after the chart is deployed. The migration job waits for the database
+to be ready (up to 10 minutes) and then runs the necessary migrations.
+
+### Creating Shared Storage for the Orchestrator
+
+The `planetary` orchestrator uses shared storage to communicate with task pods.
+
+It is up to the cluster administrator to provide this storage to the
+orchestrator and task pods via the creation of an `orchestrator-storage`
+Persistent Volume Claim (PVC).
+
+#### Simple NFS Shared Storage
+
+For the purpose of deploying `planetary` into a development Kubernetes cluster,
+this guide will use an NFS server deployed into the cluster to provide storage
+to the orchestrator and task pods.
+
+To start, install [`nfs-operator`](https://github.com/krestomatio/nfs-operator)
+into the cluster:
+
+```bash
+kubectl apply -k 'https://github.com/krestomatio/nfs-operator/config/default?ref=v0.4.25'
+```
+
+`nfs-operator` will define a new Custom Resource Definition named `Ganesha` for
+managing [nfs-ganesha](https://github.com/nfs-ganesha/nfs-ganesha) services.
+
+Next, we create the expected PVC resources in the `planetary` and
+`planetary-tasks` namespaces:
+
+```yaml
+apiVersion: nfs.krestomat.io/v1alpha1
+kind: Ganesha
+metadata:
+  name: planetary
+  namespace: planetary
+spec:
+  # Use 1000 as that's the uid/gid used by Planetary containers
+  ganeshaExportUserid: 1000
+  ganeshaExportGroupid: 1000
+  ganeshaExportMode: '0700'
+  ganeshaPvcDataSize: 1Gi
+  # Do not generate a storage class
+  ganeshaGeneratedNfsScNeeded: false
+  # A static cluster IP is required for the service as nodes mount the NFS volume without access to `kube-dns`
+  ganeshaServiceClusterIp: 10.96.85.10
+---
+# Create a volume for the `planetary` namespace
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: orchestrator-storage
+spec:
+  capacity:
+    storage: 1Gi
+  volumeMode: Filesystem
+  storageClassName: ""
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 10.96.85.10
+    path: /
+---
+# Create a PVC for the `planetary` namespace
+# This will be used by the orchestrator; without it, the orchestrator will not be scheduled
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orchestrator-storage
+  namespace: planetary
+spec:
+  volumeName: orchestrator-storage
+  storageClassName: ""
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Create a volume for the `planetary-tasks` namespace
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: orchestrator-storage-tasks
+  namespace: planetary-tasks
+spec:
+  capacity:
+    storage: 1Gi
+  volumeMode: Filesystem
+  storageClassName: ""
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 10.96.85.10
+    path: /
+---
+# Create a PVC for the `planetary-tasks` namespace
+# This will be used by the task pods; without it, the task pods will not be scheduled
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orchestrator-storage
+  namespace: planetary-tasks
+spec:
+  volumeName: orchestrator-storage-tasks
+  storageClassName: ""
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+With this, both the `planetary` orchestrator and task pods will have 1 GiB of
+shared storage and the orchestrator pod should be scheduled once the
+`orchestrator-storage` PVC has been bound.
 
 ### Verifying the Deployment
 

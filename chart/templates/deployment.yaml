@@ -142,8 +142,6 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.name
-          - name: SERVICE_URL
-            value: "http://planetary-orchestrator.{{ .Release.Namespace }}:8080"
           - name: SERVICE_API_KEY
             valueFrom:
               secretKeyRef:
@@ -180,6 +178,13 @@ spec:
             value: "{{- . }}"
           {{- end }}
           {{- end }}
+          volumeMounts:
+          - name: orchestrator-storage
+            mountPath: /mnt/orchestrator
+      volumes:
+        - name: orchestrator-storage
+          persistentVolumeClaim:
+            claimName: orchestrator-storage
 ---
 # Deployment for the Planetary task monitor
 apiVersion: apps/v1

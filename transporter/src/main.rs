@@ -23,7 +23,10 @@
 //! Likewise, if the `--outputs` option is used with `--targets /mnt/outputs`,
 //! it will access `/mnt/outputs/0`, `/mnt/outputs/1`, etc.
 
+use std::fs;
 use std::fs::Permissions;
+use std::io::BufReader;
+use std::io::BufWriter;
 use std::io::IsTerminal;
 use std::io::stderr;
 use std::os::unix::fs::PermissionsExt;
@@ -34,11 +37,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::anyhow;
 use anyhow::bail;
 use byte_unit::Byte;
 use byte_unit::UnitType;
@@ -60,12 +61,14 @@ use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream;
 use glob::Pattern;
-use planetary_db::TaskIo;
 use reqwest::Url;
-use reqwest::header;
-use secrecy::ExposeSecret;
 use secrecy::SecretString;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::from_reader;
+use serde_json::to_writer;
 use tes::v1::types::responses::OutputFile;
+use tes::v1::types::task::Input;
 use tes::v1::types::task::IoType;
 use tes::v1::types::task::Output;
 use tokio::fs::File;
@@ -73,41 +76,12 @@ use tokio::fs::create_dir_all;
 use tokio::fs::set_permissions;
 use tokio::pin;
 use tokio::sync::broadcast;
-use tokio_retry2::Retry;
-use tokio_retry2::RetryError;
-use tokio_retry2::strategy::ExponentialFactorBackoff;
-use tokio_retry2::strategy::MaxInterval;
 use tokio_util::sync::CancellationToken;
-use tracing::error;
 use tracing::info;
-use tracing::warn;
 use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use walkdir::WalkDir;
-
-/// Gets an iterator over the retry durations for network operations.
-///
-/// Retries use an exponential power of 2 backoff, starting at 1 second with
-/// a maximum duration of 60 seconds.
-fn retry_durations() -> impl Iterator<Item = Duration> {
-    const INITIAL_DELAY_MILLIS: u64 = 1000;
-    const BASE_FACTOR: f64 = 2.0;
-    const MAX_DURATION: Duration = Duration::from_secs(60);
-    const RETRIES: usize = 5;
-
-    ExponentialFactorBackoff::from_millis(INITIAL_DELAY_MILLIS, BASE_FACTOR)
-        .max_duration(MAX_DURATION)
-        .take(RETRIES)
-}
-
-/// Helper for notifying that a network operation failed and will be retried.
-fn notify_retry(e: &reqwest_middleware::Error, duration: Duration) {
-    warn!(
-        "network operation failed: {e} (retrying after {duration} seconds)",
-        duration = duration.as_secs()
-    );
-}
 
 /// Prints the statistics after transferring inputs or outputs.
 fn print_stats(delta: TimeDelta, files: usize, bytes: u64) {
@@ -151,39 +125,24 @@ impl FromStr for Mode {
     }
 }
 
-/// Represents information about the orchestrator service.
-struct OrchestratorServiceInfo {
-    /// The URL of the orchestrator service.
-    url: Url,
-    /// The orchestrator service API key.
-    api_key: SecretString,
-}
-
 /// A tool for transporting Planetary task's inputs and outputs.
 #[derive(Parser)]
 struct Args {
-    /// The URL for the orchestrator service.
-    #[clap(long, env)]
-    orchestrator_url: Url,
-
-    /// The Planetary orchestrator service API key.
-    #[clap(long, env, hide_env_values(true))]
-    orchestrator_api_key: SecretString,
-
     /// The mode of operation.
     #[arg(long)]
     mode: Mode,
 
-    /// The path to the inputs directory.
+    /// The path to the orchestrator shared directory.
+    #[arg(long)]
+    orchestrator_dir: PathBuf,
+
+    /// The path to the task's inputs directory.
     #[arg(long, required_if_eq("mode", "inputs"))]
     inputs_dir: Option<PathBuf>,
 
-    /// The path to the outputs directory.
+    /// The path to the task's outputs directory.
     #[arg(long)]
     outputs_dir: PathBuf,
-
-    /// The TES identifier of the task.
-    tes_id: String,
 
     /// The verbosity level.
     #[command(flatten)]
@@ -248,78 +207,58 @@ struct Args {
         requires = "google_hmac_access_key"
     )]
     google_hmac_secret: Option<SecretString>,
+
+    /// The TES identifier of the task.
+    tes_id: String,
 }
 
-/// Gets the inputs and outputs for the given task.
-async fn get_task_io(
-    client: &HttpClient,
-    orchestrator: &OrchestratorServiceInfo,
-    tes_id: &str,
-) -> Result<TaskIo> {
-    Ok(Retry::spawn_notify(
-        retry_durations(),
-        || async {
-            // Retry the operation is there is a problem sending the request to the server
-            // Don't retry if the service returned an error response
-            client
-                .get(format!("{url}v1/tasks/{tes_id}/io", url = orchestrator.url))
-                .header(
-                    header::AUTHORIZATION,
-                    format!(
-                        "Bearer {token}",
-                        token = orchestrator.api_key.expose_secret()
-                    ),
-                )
-                .send()
-                .await
-                .map_err(RetryError::transient)?
-                .error_for_status()
-                .map_err(|e| RetryError::permanent(e.into()))?
-                .json()
-                .await
-                .map_err(|e| RetryError::permanent(e.into()))
-        },
-        notify_retry,
-    )
-    .await?)
+/// Gets the inputs file path for a TES task.
+fn inputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
+    orchestrator_dir.join(tes_id).join("inputs.json")
 }
 
-/// Updates a task's output files.
-async fn update_output_files(
-    client: &HttpClient,
-    orchestrator: &OrchestratorServiceInfo,
-    tes_id: &str,
-    outputs: &[OutputFile],
-) -> Result<()> {
-    Retry::spawn_notify(
-        retry_durations(),
-        || async {
-            // Retry the operation is there is a problem sending the request to the server
-            // Don't retry if the service returned an error response
-            client
-                .put(format!(
-                    "{url}v1/tasks/{tes_id}/outputs",
-                    url = orchestrator.url
-                ))
-                .header(
-                    header::AUTHORIZATION,
-                    format!(
-                        "Bearer {token}",
-                        token = orchestrator.api_key.expose_secret()
-                    ),
-                )
-                .json(outputs)
-                .send()
-                .await
-                .map_err(RetryError::transient)?
-                .error_for_status()
-                .map_err(|e| RetryError::permanent(e.into()))
-        },
-        notify_retry,
-    )
-    .await?;
+/// Gets the outputs file path for a TES task.
+fn outputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
+    orchestrator_dir.join(tes_id).join("outputs.json")
+}
+
+/// Gets the uploaded outputs file path for a TES task.
+fn uploaded_outputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
+    orchestrator_dir.join(tes_id).join("uploaded.json")
+}
+
+/// Helper function for serializing an array of serializable items to a file.
+fn serialize_items<T: Serialize>(path: impl AsRef<Path>, items: &[T]) -> anyhow::Result<()> {
+    let path = path.as_ref();
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create directory `{parent}`",
+                parent = parent.display()
+            )
+        })?;
+    }
+
+    let file = fs::File::create_new(path)
+        .with_context(|| format!("failed to create file `{path}`", path = path.display()))?;
+
+    to_writer(BufWriter::new(file), items)
+        .with_context(|| format!("failed to write file `{path}`", path = path.display()))?;
 
     Ok(())
+}
+
+/// Helper function for deserializing an array of deserializable items from a
+/// file.
+fn deserialize_items<T: DeserializeOwned>(path: impl AsRef<Path>) -> anyhow::Result<Vec<T>> {
+    let path = path.as_ref();
+
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open file `{path}`", path = path.display()))?;
+
+    from_reader(BufReader::new(file))
+        .with_context(|| format!("failed to read file `{path}`", path = path.display()))
 }
 
 /// Downloads inputs into the inputs directory.
@@ -328,19 +267,14 @@ async fn update_output_files(
 /// directory.
 async fn download_inputs(
     config: Config,
-    orchestrator: &OrchestratorServiceInfo,
     tes_id: &str,
+    orchestrator_dir: &Path,
     inputs_dir: &Path,
     outputs_dir: &Path,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let client = HttpClient::new();
-    let task_io = get_task_io(&client, orchestrator, tes_id)
-        .await
-        .map_err(|e| {
-            error!("failed to retrieve inputs and outputs of task `{tes_id}`: {e:#}");
-            anyhow!("failed to retrieve information for task `{tes_id}`")
-        })?;
+    let inputs: Vec<Input> = deserialize_items(inputs_file_path(orchestrator_dir, tes_id))?;
+    let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
 
     // Create the inputs directory
     create_dir_all(inputs_dir).await.with_context(|| {
@@ -365,9 +299,10 @@ async fn download_inputs(
 
     let files_created = Arc::new(AtomicUsize::new(0));
 
+    let client = HttpClient::new();
     let created = files_created.clone();
     let transfer = async move || {
-        let mut downloads = stream::iter(task_io.inputs.into_iter().enumerate())
+        let mut downloads = stream::iter(inputs.into_iter().enumerate())
             .map(|(index, input)| {
                 let path = inputs_dir.join(index.to_string());
                 let cancel = cancel.clone();
@@ -499,7 +434,7 @@ async fn download_inputs(
 
     // We also need to create any file outputs so that Kubernetes will mount them as
     // files and not directories
-    for (index, output) in task_io.outputs.into_iter().enumerate() {
+    for (index, output) in outputs.into_iter().enumerate() {
         let path = outputs_dir.join(index.to_string());
         let permissions = if output.ty == IoType::File {
             // Create the file
@@ -535,18 +470,12 @@ async fn download_inputs(
 /// Uploads outputs from the specified outputs directory.
 async fn upload_outputs(
     config: Config,
-    orchestrator: &OrchestratorServiceInfo,
     tes_id: &str,
+    orchestrator_dir: &Path,
     outputs_dir: &Path,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let client = HttpClient::new();
-    let task_io = get_task_io(&client, orchestrator, tes_id)
-        .await
-        .map_err(|e| {
-            error!("failed to retrieve inputs and outputs of task `{tes_id}`: {e:#}");
-            anyhow!("failed to retrieve information for task `{tes_id}`")
-        })?;
+    let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
 
     // Create an event handling task
     let (events_tx, events_rx) = broadcast::channel(1000);
@@ -554,9 +483,10 @@ async fn upload_outputs(
     let handler = tokio::spawn(async move { handle_events(events_rx, false, c).await });
 
     // Transfer the outputs
+    let client = HttpClient::new();
     let transfer = async || {
         let mut files = Vec::new();
-        for (index, output) in task_io.outputs.iter().enumerate() {
+        for (index, output) in outputs.iter().enumerate() {
             let mut url = output.url.parse::<Url>().context("output URL is invalid")?;
             let path = outputs_dir.join(index.to_string());
             let metadata = path.metadata().with_context(|| {
@@ -633,16 +563,17 @@ async fn upload_outputs(
     drop(events_tx);
     let stats = handler.await.expect("failed to join events handler");
 
-    // Print the statistics upon success
-    if result.is_ok()
-        && let Some(stats) = stats
-    {
-        print_stats(end - start, stats.files, stats.bytes);
-    }
+    let outputs = result?;
 
-    if let Err(e) = update_output_files(&client, orchestrator, tes_id, &result?).await {
-        error!("failed to update output files for task `{tes_id}`: {e:#}");
-        bail!("failed to update output files for task `{tes_id}`")
+    // Write the uploads file
+    serialize_items(
+        uploaded_outputs_file_path(orchestrator_dir, tes_id),
+        &outputs,
+    )?;
+
+    // Print the statistics
+    if let Some(stats) = stats {
+        print_stats(end - start, stats.files, stats.bytes);
     }
 
     Ok(())
@@ -851,17 +782,12 @@ async fn run(cancel: CancellationToken) -> Result<()> {
         .with_google(google)
         .build();
 
-    let orchestrator = OrchestratorServiceInfo {
-        url: args.orchestrator_url,
-        api_key: args.orchestrator_api_key,
-    };
-
     match args.mode {
         Mode::Inputs => {
             download_inputs(
                 config,
-                &orchestrator,
                 &args.tes_id,
+                &args.orchestrator_dir,
                 &args.inputs_dir.expect("option should be present"),
                 &args.outputs_dir,
                 cancel,
@@ -871,8 +797,8 @@ async fn run(cancel: CancellationToken) -> Result<()> {
         Mode::Outputs => {
             upload_outputs(
                 config,
-                &orchestrator,
                 &args.tes_id,
+                &args.orchestrator_dir,
                 &args.outputs_dir,
                 cancel,
             )

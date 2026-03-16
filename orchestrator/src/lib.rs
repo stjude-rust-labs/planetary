@@ -12,30 +12,24 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::delete;
-use axum::routing::get;
 use axum::routing::patch;
 use axum::routing::post;
-use axum::routing::put;
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
 use bon::Builder;
 use planetary_db::Database;
-use planetary_db::TaskIo;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
 use planetary_server::Error;
-use planetary_server::Json;
 use planetary_server::Path;
 use planetary_server::ServerResponse;
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
-use tes::v1::types::responses::OutputFile;
 use tokio_retry2::RetryError;
 use tokio_retry2::strategy::ExponentialFactorBackoff;
 use tokio_retry2::strategy::MaxInterval;
 use tracing::warn;
-use url::Url;
 
 use crate::orchestrator::Monitor;
 use crate::orchestrator::PreemptibleConfig;
@@ -124,10 +118,6 @@ pub struct Server {
     #[builder(into)]
     pod_name: String,
 
-    /// The URL of the orchestrator service.
-    #[builder(into)]
-    service_url: Url,
-
     /// The API key of the orchestrator service.
     #[builder(into)]
     service_api_key: SecretString,
@@ -212,7 +202,6 @@ impl Server {
             orchestrator: TaskOrchestrator::new(
                 self.database,
                 self.pod_name,
-                self.service_url,
                 self.tasks_namespace,
                 self.storage_class,
                 TransporterInfo {
@@ -232,8 +221,6 @@ impl Server {
                 Router::new()
                     .route("/v1/tasks/{tes_id}", post(Self::start_task))
                     .route("/v1/tasks/{tes_id}", delete(Self::cancel_task))
-                    .route("/v1/tasks/{tes_id}/io", get(Self::get_task_io))
-                    .route("/v1/tasks/{tes_id}/outputs", put(Self::put_task_outputs))
                     .route("/v1/pods/{name}", patch(Self::adopt_pod))
                     .layer(middleware::from_fn_with_state(state.clone(), auth))
             ])
@@ -275,34 +262,6 @@ impl Server {
             state.orchestrator.cancel_task(&tes_id).await;
         });
 
-        Ok(())
-    }
-
-    /// Implements the API endpoint for getting a task's inputs and outputs.
-    ///
-    /// This endpoint is used by the transporter.
-    async fn get_task_io(
-        ExtractState(state): ExtractState<Arc<State>>,
-        Path(tes_id): Path<String>,
-    ) -> ServerResponse<Json<TaskIo>> {
-        Ok(Json(
-            state.orchestrator.database().get_task_io(&tes_id).await?,
-        ))
-    }
-
-    /// Implements the API endpoint for updating a task's output files.
-    ///
-    /// This endpoint is used by the transporter.
-    async fn put_task_outputs(
-        ExtractState(state): ExtractState<Arc<State>>,
-        Path(tes_id): Path<String>,
-        Json(files): Json<Vec<OutputFile>>,
-    ) -> ServerResponse<()> {
-        state
-            .orchestrator
-            .database()
-            .update_task_output_files(&tes_id, &files)
-            .await?;
         Ok(())
     }
 

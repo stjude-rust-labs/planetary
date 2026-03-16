@@ -15,7 +15,6 @@ use planetary_server::DEFAULT_PORT;
 use secrecy::SecretString;
 use tracing_log::AsTrace as _;
 use tracing_subscriber::EnvFilter;
-use url::Url;
 
 /// The Planetary task orchestrator service.
 #[derive(Parser)]
@@ -31,10 +30,6 @@ pub struct Args {
     /// The pod name of the orchestrator.
     #[clap(long, env)]
     pod_name: String,
-
-    /// The service URL for the orchestrator service.
-    #[clap(long, env)]
-    service_url: Url,
 
     /// The service API key.
     #[clap(long, env, hide_env_values(true))]
@@ -180,7 +175,6 @@ pub async fn main() -> anyhow::Result<()> {
         .maybe_storage_class(args.storage_class)
         .maybe_transporter_image(args.transporter_image)
         .pod_name(args.pod_name)
-        .service_url(args.service_url)
         .service_api_key(args.service_api_key)
         .maybe_tasks_namespace(args.tasks_namespace)
         .maybe_transporter_cpu(args.transporter_cpu)

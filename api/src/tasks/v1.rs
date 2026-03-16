@@ -362,6 +362,7 @@ pub async fn cancel_task(
             TesState::Canceling,
             &[&format_log_message!("canceling task `{id}`")],
             None,
+            None,
         )
         .await?
     {

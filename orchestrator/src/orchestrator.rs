@@ -9,6 +9,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write;
+use std::fs;
+use std::io::BufReader;
+use std::io::BufWriter;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -35,6 +40,8 @@ use k8s_openapi::api::core::v1::VolumeMount;
 use k8s_openapi::api::core::v1::VolumeResourceRequirements;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::jiff::Timestamp;
+use k8s_openapi::serde_json::from_reader;
+use k8s_openapi::serde_json::to_writer;
 use kube::Api;
 use kube::Client;
 use kube::ResourceExt;
@@ -50,6 +57,8 @@ use planetary_db::ContainerKind;
 use planetary_db::Database;
 use planetary_db::TerminatedContainer;
 use planetary_db::format_log_message;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tes::v1::types::requests::GetTaskParams;
 use tes::v1::types::requests::View;
 use tes::v1::types::responses::Task;
@@ -65,14 +74,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
-use url::Url;
 
 use crate::into_retry_error;
 use crate::notify_retry;
 use crate::retry_durations;
 
 /// The default namespace for planetary tasks.
-const PLANETARY_TASKS_NAMESPACE: &str = "planetary-tasks";
+const TASKS_NAMESPACE: &str = "planetary-tasks";
 
 /// The default storage size, in gigabytes.
 ///
@@ -95,12 +103,38 @@ const K8S_KEY_STORAGE: &str = "storage";
 const DEFAULT_TRANSPORTER_IMAGE: &str = "stjude-rust-labs/planetary-transporter:latest";
 
 /// The orchestrator id label.
-const PLANETARY_ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
+const ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
+
+/// The name of the orchestrator PVC.
+///
+/// This volume is shared between the orchestrator and task pods.
+const ORCHESTRATOR_PVC_NAME: &str = "orchestrator-storage";
+
+/// The mount point for the orchestrator volume.
+///
+/// Each task will have a sub-directory containing the following files:
+///
+/// * `inputs.json` - the task's inputs serialized as JSON; created by the
+///   orchestrator.
+/// * `outputs.json` - the task's outputs serialized as JSON; created by the
+///   orchestrator.
+/// * `uploaded.json` - the task's uploaded outputs serialized as JSON; created
+///   by the transporter.
+///
+/// A task's directory will be deleted when the task transitions to a terminal
+/// state.
+const ORCHESTRATOR_MOUNT: &str = "/mnt/orchestrator";
+
+/// The mount point for task input files.
+const TASK_INPUTS_MOUNT: &str = "/mnt/inputs";
+
+/// The mount point for task output files.
+const TASK_OUTPUTS_MOUNT: &str = "/mnt/outputs";
 
 /// A label applied to resources that are ready for garbage collection.
 ///
 /// The monitor service will periodically delete these resources.
-const PLANETARY_GC_LABEL: &str = "planetary/gc";
+const GC_LABEL: &str = "planetary/gc";
 
 /// The maximum number of lines to tail for an executor pod's logs.
 ///
@@ -195,6 +229,69 @@ fn convert_resources(resources: &Resources) -> ResourceRequirements {
         ),
         ..Default::default()
     }
+}
+
+/// Gets the task directory path for a TES task.
+fn task_directory_path(tes_id: &str) -> PathBuf {
+    Path::new(ORCHESTRATOR_MOUNT).join(tes_id)
+}
+
+/// Gets the inputs file path for a TES task.
+fn inputs_file_path(tes_id: &str) -> PathBuf {
+    task_directory_path(tes_id).join("inputs.json")
+}
+
+/// Gets the outputs file path for a TES task.
+fn outputs_file_path(tes_id: &str) -> PathBuf {
+    task_directory_path(tes_id).join("outputs.json")
+}
+
+/// Gets the uploaded outputs file path for a TES task.
+fn uploaded_outputs_file_path(tes_id: &str) -> PathBuf {
+    task_directory_path(tes_id).join("uploaded.json")
+}
+
+/// Helper function for serializing an array of serializable items to a file.
+fn serialize_items<T: Serialize>(path: impl AsRef<Path>, items: &[T]) -> anyhow::Result<()> {
+    let path = path.as_ref();
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create directory `{parent}`",
+                parent = parent.display()
+            )
+        })?;
+    }
+
+    let file = fs::File::create_new(path)
+        .with_context(|| format!("failed to create file `{path}`", path = path.display()))?;
+
+    to_writer(BufWriter::new(file), items)
+        .with_context(|| format!("failed to write file `{path}`", path = path.display()))?;
+
+    Ok(())
+}
+
+/// Helper function for deserializing an array of deserializable items from a
+/// file.
+///
+/// Returns `Ok(None)` if the file does not exist.
+fn deserialize_items<T: DeserializeOwned>(
+    path: impl AsRef<Path>,
+) -> anyhow::Result<Option<Vec<T>>> {
+    let path = path.as_ref();
+
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed to open file `{path}`", path = path.display()))?;
+
+    Ok(Some(from_reader(BufReader::new(file)).with_context(
+        || format!("failed to read file `{path}`", path = path.display()),
+    )?))
 }
 
 /// Used to determine what state a task pod is in.
@@ -495,8 +592,6 @@ impl PreemptibleConfig {
 pub struct TaskOrchestrator {
     /// The id (pod name) of the orchestrator.
     id: String,
-    /// The URL of the orchestrator service.
-    service_url: Url,
     /// The planetary database used by the orchestrator.
     database: Arc<dyn Database>,
     /// The namespace to use for K8S resources relating to tasks.
@@ -518,15 +613,12 @@ impl TaskOrchestrator {
     pub async fn new(
         database: Arc<dyn Database>,
         id: String,
-        service_url: Url,
         tasks_namespace: Option<String>,
         storage_class: Option<String>,
         transporter: TransporterInfo,
         preemptible_config: Option<PreemptibleConfig>,
     ) -> Result<Self> {
-        let ns = tasks_namespace
-            .as_deref()
-            .unwrap_or(PLANETARY_TASKS_NAMESPACE);
+        let ns = tasks_namespace.as_deref().unwrap_or(TASKS_NAMESPACE);
 
         let client = Client::try_default()
             .await
@@ -541,7 +633,6 @@ impl TaskOrchestrator {
 
         Ok(Self {
             id,
-            service_url,
             database,
             tasks_namespace,
             pods,
@@ -552,19 +643,15 @@ impl TaskOrchestrator {
         })
     }
 
-    /// Gets the database associated with the orchestrator.
-    pub fn database(&self) -> &Arc<dyn Database> {
-        &self.database
-    }
-
     /// Starts the given task.
     pub async fn start_task(&self, tes_id: &str) {
         debug!("task `{tes_id}` is starting");
 
         let start = async {
+            // Get the full task for the inputs and outputs
             let task = self
                 .database
-                .get_task(tes_id, GetTaskParams { view: View::Basic })
+                .get_task(tes_id, GetTaskParams { view: View::Full })
                 .await?
                 .into_task()
                 .expect("should have basic task");
@@ -578,6 +665,18 @@ impl TaskOrchestrator {
 
             // Create the storage PVC
             self.create_storage_pvc(&task).await?;
+
+            // Serialize the task's inputs
+            serialize_items(
+                inputs_file_path(tes_id),
+                task.inputs.as_deref().unwrap_or_default(),
+            )?;
+
+            // Serialize the task's outputs
+            serialize_items(
+                outputs_file_path(tes_id),
+                task.outputs.as_deref().unwrap_or_default(),
+            )?;
 
             // Create the task pod
             self.create_task_pod(&task).await
@@ -596,6 +695,7 @@ impl TaskOrchestrator {
                     tes_id,
                     State::SystemError,
                     &[&format_log_message!("task `{tes_id}` failed to start")],
+                    None,
                     None,
                 )
                 .await;
@@ -631,6 +731,7 @@ impl TaskOrchestrator {
                     State::Canceled,
                     &[&format_log_message!("task `{tes_id}` has been canceled")],
                     containers,
+                    None,
                 )
                 .await?
             {
@@ -656,8 +757,11 @@ impl TaskOrchestrator {
                         "task `{tes_id}` failed to be canceled"
                     )],
                     None,
+                    None,
                 )
                 .await;
+
+            self.mark_gc_ready(tes_id).await;
         }
     }
 
@@ -676,7 +780,7 @@ impl TaskOrchestrator {
                         &Patch::Merge(Pod {
                             metadata: ObjectMeta {
                                 labels: Some(BTreeMap::from_iter([(
-                                    PLANETARY_ORCHESTRATOR_LABEL.to_string(),
+                                    ORCHESTRATOR_LABEL.to_string(),
                                     self.id.clone(),
                                 )])),
                                 ..Default::default()
@@ -712,7 +816,7 @@ impl TaskOrchestrator {
                                 namespace: Some(
                                     self.tasks_namespace
                                         .as_deref()
-                                        .unwrap_or(PLANETARY_TASKS_NAMESPACE)
+                                        .unwrap_or(TASKS_NAMESPACE)
                                         .into(),
                                 ),
                                 ..Default::default()
@@ -768,14 +872,14 @@ impl TaskOrchestrator {
             ),
             args: Some(vec![
                 "-v".into(),
-                "--orchestrator-url".into(),
-                self.service_url.to_string(),
                 "--mode".into(),
                 "inputs".into(),
+                "--orchestrator-dir".into(),
+                ORCHESTRATOR_MOUNT.into(),
                 "--inputs-dir".into(),
-                "/mnt/inputs".into(),
+                TASK_INPUTS_MOUNT.into(),
                 "--outputs-dir".into(),
-                "/mnt/outputs".into(),
+                TASK_OUTPUTS_MOUNT.into(),
                 tes_id.into(),
             ]),
             env_from: Some(vec![
@@ -816,14 +920,19 @@ impl TaskOrchestrator {
             volume_mounts: Some(vec![
                 VolumeMount {
                     name: STORAGE_VOLUME_NAME.into(),
-                    mount_path: "/mnt/inputs".into(),
+                    mount_path: TASK_INPUTS_MOUNT.into(),
                     sub_path: Some("inputs".into()),
                     ..Default::default()
                 },
                 VolumeMount {
                     name: STORAGE_VOLUME_NAME.into(),
-                    mount_path: "/mnt/outputs".into(),
+                    mount_path: TASK_OUTPUTS_MOUNT.into(),
                     sub_path: Some("outputs".into()),
+                    ..Default::default()
+                },
+                VolumeMount {
+                    name: ORCHESTRATOR_PVC_NAME.into(),
+                    mount_path: ORCHESTRATOR_MOUNT.into(),
                     ..Default::default()
                 },
             ]),
@@ -879,11 +988,11 @@ impl TaskOrchestrator {
                 namespace: Some(
                     self.tasks_namespace
                         .as_deref()
-                        .unwrap_or(PLANETARY_TASKS_NAMESPACE)
+                        .unwrap_or(TASKS_NAMESPACE)
                         .into(),
                 ),
                 name: Some(tes_id.clone()),
-                labels: Some([(PLANETARY_ORCHESTRATOR_LABEL.to_string(), self.id.clone())].into()),
+                labels: Some([(ORCHESTRATOR_LABEL.to_string(), self.id.clone())].into()),
                 ..Default::default()
             },
             spec: Some(PodSpec {
@@ -901,12 +1010,12 @@ impl TaskOrchestrator {
                     ),
                     args: Some(vec![
                         "-v".into(),
-                        "--orchestrator-url".into(),
-                        self.service_url.to_string(),
                         "--mode".into(),
                         "outputs".into(),
+                        "--orchestrator-dir".into(),
+                        ORCHESTRATOR_MOUNT.into(),
                         "--outputs-dir".into(),
-                        "/mnt/outputs".into(),
+                        TASK_OUTPUTS_MOUNT.into(),
                         tes_id.into(),
                     ]),
                     env_from: Some(vec![
@@ -944,12 +1053,19 @@ impl TaskOrchestrator {
                         }),
                         ..Default::default()
                     }]),
-                    volume_mounts: Some(vec![VolumeMount {
-                        name: STORAGE_VOLUME_NAME.into(),
-                        mount_path: "/mnt/outputs".into(),
-                        sub_path: Some("outputs".into()),
-                        ..Default::default()
-                    }]),
+                    volume_mounts: Some(vec![
+                        VolumeMount {
+                            name: STORAGE_VOLUME_NAME.into(),
+                            mount_path: TASK_OUTPUTS_MOUNT.into(),
+                            sub_path: Some("outputs".into()),
+                            ..Default::default()
+                        },
+                        VolumeMount {
+                            name: ORCHESTRATOR_PVC_NAME.into(),
+                            mount_path: ORCHESTRATOR_MOUNT.into(),
+                            ..Default::default()
+                        },
+                    ]),
                     resources: Some(convert_resources(&Resources {
                         cpu_cores: Some(self.transporter.cpu.unwrap_or(DEFAULT_TRANSPORTER_CPU)),
                         ram_gb: Some(
@@ -962,14 +1078,24 @@ impl TaskOrchestrator {
                     ..Default::default()
                 }],
                 restart_policy: Some("Never".to_string()),
-                volumes: Some(vec![Volume {
-                    name: STORAGE_VOLUME_NAME.into(),
-                    persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                        claim_name: tes_id.clone(),
+                volumes: Some(vec![
+                    Volume {
+                        name: STORAGE_VOLUME_NAME.into(),
+                        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                            claim_name: tes_id.clone(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                }]),
+                    },
+                    Volume {
+                        name: ORCHESTRATOR_PVC_NAME.into(),
+                        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                            claim_name: ORCHESTRATOR_PVC_NAME.into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                ]),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1214,6 +1340,7 @@ impl TaskOrchestrator {
                 State::Queued,
                 &[&format_log_message!("task `{tes_id}` is now queued")],
                 None,
+                None,
             )
             .await?
         {
@@ -1231,6 +1358,7 @@ impl TaskOrchestrator {
                 tes_id,
                 State::Initializing,
                 &[&format_log_message!("task `{tes_id}` is now initializing")],
+                None,
                 None,
             )
             .await?
@@ -1250,6 +1378,7 @@ impl TaskOrchestrator {
                 State::Running,
                 &[&format_log_message!("task `{tes_id}` is now running")],
                 None,
+                None,
             )
             .await?
         {
@@ -1261,6 +1390,8 @@ impl TaskOrchestrator {
 
     /// Handles a succeeded task.
     async fn handle_succeeded_task(&self, tes_id: &str, pod: &Pod) -> Result<(), Error> {
+        let outputs = deserialize_items(uploaded_outputs_file_path(tes_id))?;
+
         if self
             .database
             .update_task_state(
@@ -1268,6 +1399,7 @@ impl TaskOrchestrator {
                 State::Complete,
                 &[&format_log_message!("task `{tes_id}` has completed")],
                 Some(self.get_terminated_containers(pod).boxed()),
+                outputs.as_deref(),
             )
             .await?
         {
@@ -1285,6 +1417,8 @@ impl TaskOrchestrator {
         index: usize,
         pod: &Pod,
     ) -> Result<(), Error> {
+        let outputs = deserialize_items(uploaded_outputs_file_path(tes_id))?;
+
         if self
             .database
             .update_task_state(
@@ -1294,6 +1428,7 @@ impl TaskOrchestrator {
                     "executor {index} of task `{tes_id}` has failed"
                 )],
                 Some(self.get_terminated_containers(pod).boxed()),
+                outputs.as_deref(),
             )
             .await?
         {
@@ -1306,6 +1441,8 @@ impl TaskOrchestrator {
 
     /// Handles a system error.
     async fn handle_system_error(&self, tes_id: &str, pod: &Pod) -> Result<(), Error> {
+        let outputs = deserialize_items(uploaded_outputs_file_path(tes_id))?;
+
         if self
             .database
             .update_task_state(
@@ -1315,6 +1452,7 @@ impl TaskOrchestrator {
                     "task `{tes_id}` has failed due to a system error"
                 )],
                 Some(self.get_terminated_containers(pod).boxed()),
+                outputs.as_deref(),
             )
             .await?
         {
@@ -1327,6 +1465,8 @@ impl TaskOrchestrator {
 
     /// Handles a pod in an unknown state.
     async fn handle_unknown_pod(&self, tes_id: &str, pod: &Pod) -> Result<(), Error> {
+        let outputs = deserialize_items(uploaded_outputs_file_path(tes_id))?;
+
         if self
             .database
             .update_task_state(
@@ -1337,6 +1477,7 @@ impl TaskOrchestrator {
                      system administrator for details"
                 )],
                 Some(self.get_terminated_containers(pod).boxed()),
+                outputs.as_deref(),
             )
             .await?
         {
@@ -1365,6 +1506,7 @@ impl TaskOrchestrator {
                 State::SystemError,
                 &[&format_log_message!("failed to pull image: {message}")],
                 Some(self.get_terminated_containers(pod).boxed()),
+                None,
             )
             .await?
         {
@@ -1387,12 +1529,14 @@ impl TaskOrchestrator {
     /// result of a node scale up/down and one that was terminated on a
     /// specifically preemptible node (e.g. a spot instance).
     async fn handle_pod_deleted(&self, tes_id: &str, pod: &Pod) -> OrchestrationResult<()> {
-        self.database
+        let _ = self
+            .database
             .update_task_state(
                 tes_id,
                 State::Preempted,
                 &[&format_log_message!("task `{tes_id}` has been preempted")],
                 Some(self.get_terminated_containers(pod).boxed()),
+                None,
             )
             .await?;
 
@@ -1528,7 +1672,7 @@ impl TaskOrchestrator {
                         &Patch::Merge(Pod {
                             metadata: ObjectMeta {
                                 labels: Some(BTreeMap::from_iter([(
-                                    PLANETARY_GC_LABEL.to_string(),
+                                    GC_LABEL.to_string(),
                                     "true".to_string(),
                                 )])),
                                 ..Default::default()
@@ -1566,7 +1710,7 @@ impl TaskOrchestrator {
                         &Patch::Merge(PersistentVolumeClaim {
                             metadata: ObjectMeta {
                                 labels: Some(BTreeMap::from_iter([(
-                                    PLANETARY_GC_LABEL.to_string(),
+                                    GC_LABEL.to_string(),
                                     "true".to_string(),
                                 )])),
                                 ..Default::default()
@@ -1588,6 +1732,21 @@ impl TaskOrchestrator {
             self.log_error(
                 Some(tes_id),
                 &format!("failed to mark PVC `{tes_id}` for GC: {e:#}"),
+            )
+            .await;
+        }
+
+        // Finally, delete the task's directory on the shared volume
+        let task_dir = task_directory_path(tes_id);
+        if task_dir.is_dir()
+            && let Err(e) = fs::remove_dir_all(&task_dir)
+        {
+            self.log_error(
+                Some(tes_id),
+                &format!(
+                    "failed to delete task directory `{task_dir}`: {e}",
+                    task_dir = task_dir.display()
+                ),
             )
             .await;
         }
@@ -1632,7 +1791,7 @@ impl Monitor {
             state.orchestrator.pods.as_ref().clone(),
             watcher::Config {
                 label_selector: Some(format!(
-                    "{PLANETARY_ORCHESTRATOR_LABEL}={id}",
+                    "{ORCHESTRATOR_LABEL}={id}",
                     id = state.orchestrator.id
                 )),
                 ..Default::default()
@@ -1653,7 +1812,7 @@ impl Monitor {
                             // If the pod is marked for GC, ignore it
                             if pod
                                 .labels()
-                                .get(PLANETARY_GC_LABEL)
+                                .get(GC_LABEL)
                                 .is_some()
                             {
                                 continue;
@@ -1681,6 +1840,7 @@ impl Monitor {
                                                 msg = e.as_system_log_message()
                                             )],
                                             None,
+                                            None,
                                         )
                                         .await;
 
@@ -1692,7 +1852,7 @@ impl Monitor {
                             // If the pod is marked for GC, ignore it
                             if pod
                                 .labels()
-                                .get(PLANETARY_GC_LABEL)
+                                .get(GC_LABEL)
                                 .is_some()
                             {
                                 continue;
@@ -1720,6 +1880,7 @@ impl Monitor {
                                                 "{msg}",
                                                 msg = e.as_system_log_message()
                                             )],
+                                            None,
                                             None,
                                         )
                                         .await;

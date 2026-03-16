@@ -34,18 +34,6 @@ spec:
         - port: 53
           protocol: TCP
 
-    # Allow TCP to the orchestrator
-    - to:
-      - namespaceSelector:
-          matchLabels:
-            kubernetes.io/metadata.name: {{ .Release.Namespace }}
-        podSelector:
-          matchLabels:
-            app.kubernetes.io/component: orchestrator
-      ports:
-        - port: {{ .Values.orchestrator.service.port }}
-          protocol: TCP
-
     # Custom egress rules
     {{- with .Values.networkPolicies.egressRules }}
       {{ toYaml . | nindent 4 }}

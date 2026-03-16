@@ -319,6 +319,7 @@ impl Monitor {
                         "task `{id}` was aborted by the system"
                     )],
                     None,
+                    None,
                 )
                 .await
                 .with_context(|| format!("failed to update state for task `{id}`"))?

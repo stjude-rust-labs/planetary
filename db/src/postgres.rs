@@ -482,6 +482,7 @@ impl Database for PostgresDatabase {
         state: State,
         messages: &[&str],
         containers: Option<BoxFuture<'a, Result<Vec<TerminatedContainer<'a>>>>>,
+        outputs: Option<&[OutputFile]>,
     ) -> DatabaseResult<bool> {
         use diesel::pg::sql_types::Array;
         use diesel::sql_types::Text;
@@ -563,6 +564,19 @@ impl Database for PostgresDatabase {
 
                     match updated {
                         Some(UpdatedTask { id }) => {
+                            if let Some(outputs) = outputs {
+                                diesel::update(schema::tasks::table)
+                                    .filter(
+                                        schema::tasks::tes_id
+                                            .eq(tes_id)
+                                            .and(schema::tasks::output_files.is_null()),
+                                    )
+                                    .set(schema::tasks::output_files.eq(models::Json(outputs)))
+                                    .execute(conn)
+                                    .await
+                                    .map_err(Error::Diesel)?;
+                            }
+
                             if let Some(containers) = containers {
                                 // Insert the containers
                                 let containers = containers.await?;
@@ -605,30 +619,6 @@ impl Database for PostgresDatabase {
         sql_query("UPDATE tasks SET system_logs = array_cat(system_logs, $1) WHERE tes_id = $2")
             .bind::<Array<Text>, _>(messages)
             .bind::<Text, _>(tes_id)
-            .execute(&mut conn)
-            .await
-            .map_err(Error::Diesel)?;
-
-        Ok(())
-    }
-
-    async fn update_task_output_files(
-        &self,
-        tes_id: &str,
-        files: &[OutputFile],
-    ) -> DatabaseResult<()> {
-        use diesel::*;
-        use diesel_async::RunQueryDsl;
-
-        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
-
-        diesel::update(schema::tasks::table)
-            .filter(
-                schema::tasks::tes_id
-                    .eq(tes_id)
-                    .and(schema::tasks::output_files.is_null()),
-            )
-            .set(schema::tasks::output_files.eq(models::Json(files)))
             .execute(&mut conn)
             .await
             .map_err(Error::Diesel)?;

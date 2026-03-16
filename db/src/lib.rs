@@ -144,17 +144,11 @@ pub trait Database: Send + Sync + 'static {
         state: State,
         messages: &[&str],
         containers: Option<BoxFuture<'a, Result<Vec<TerminatedContainer<'a>>>>>,
+        outputs: Option<&[OutputFile]>,
     ) -> DatabaseResult<bool>;
 
     /// Appends the given messages to the task's system log.
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()>;
-
-    /// Updates the output files of the given task.
-    async fn update_task_output_files(
-        &self,
-        tes_id: &str,
-        files: &[OutputFile],
-    ) -> DatabaseResult<()>;
 
     /// Inserts an internal system error with the database.
     async fn insert_error(
