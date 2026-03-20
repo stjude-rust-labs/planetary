@@ -21,7 +21,6 @@ chrono.workspace = true
 clap.workspace = true
 clap-verbosity-flag.workspace = true
 cloud-copy.workspace = true
-colored.workspace = true
 futures.workspace = true
 glob.workspace = true
 planetary-db = { version = "0.1.0", path = "../db" }

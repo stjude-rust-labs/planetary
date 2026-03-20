@@ -2707,7 +2707,6 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "cloud-copy",
- "colored",
  "futures",
  "glob",
  "planetary-db",
