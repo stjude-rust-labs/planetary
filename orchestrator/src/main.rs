@@ -83,7 +83,7 @@ pub struct Args {
 
     /// The number of CPU cores to request for transporter pods.
     ///
-    /// Defaults to `1` CPU cores.
+    /// Defaults to `1` CPU core.
     #[clap(long, env)]
     transporter_cpu: Option<i32>,
 
