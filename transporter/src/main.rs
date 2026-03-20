@@ -56,7 +56,6 @@ use cloud_copy::TransferEvent;
 use cloud_copy::UrlExt;
 use cloud_copy::cli::TimeDeltaExt;
 use cloud_copy::cli::handle_events;
-use colored::Colorize;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream;
@@ -115,25 +114,19 @@ fn print_stats(delta: TimeDelta, files: usize, bytes: u64) {
     let seconds = delta.num_seconds();
 
     println!(
-        "{files} file{s} copied with a total of {bytes:#} transferred in {time} ({speed})",
-        files = files.to_string().cyan(),
+        "{files} file{s} copied with a total of {bytes:#} transferred in {time} ({speed:#.3}/s)",
         s = if files == 1 { "" } else { "s" },
         bytes = format!(
             "{:#.3}",
             Byte::from_u64(bytes).get_appropriate_unit(UnitType::Binary)
-        )
-        .cyan(),
-        time = delta.english().to_string().cyan(),
-        speed = format!(
-            "{bytes:#.3}/s",
-            bytes = if seconds == 0 || bytes < 60 {
-                Byte::from_u64(bytes)
-            } else {
-                Byte::from_u64(bytes / seconds as u64)
-            }
-            .get_appropriate_unit(UnitType::Binary)
-        )
-        .cyan()
+        ),
+        time = delta.english(),
+        speed = if seconds == 0 {
+            Byte::from_u64(bytes)
+        } else {
+            Byte::from_u64(bytes / seconds as u64)
+        }
+        .get_appropriate_unit(UnitType::Binary)
     );
 }
 
@@ -368,7 +361,7 @@ async fn download_inputs(
     // Create an event handling task
     let (events_tx, events_rx) = broadcast::channel(1000);
     let c = cancel.clone();
-    let handler = tokio::spawn(async move { handle_events(events_rx, c).await });
+    let handler = tokio::spawn(async move { handle_events(events_rx, false, c).await });
 
     let files_created = Arc::new(AtomicUsize::new(0));
 
@@ -558,7 +551,7 @@ async fn upload_outputs(
     // Create an event handling task
     let (events_tx, events_rx) = broadcast::channel(1000);
     let c = cancel.clone();
-    let handler = tokio::spawn(async move { handle_events(events_rx, c).await });
+    let handler = tokio::spawn(async move { handle_events(events_rx, false, c).await });
 
     // Transfer the outputs
     let transfer = async || {
@@ -901,15 +894,7 @@ async fn main() {
             _ = terminate(cancel.clone()) => continue,
             r = &mut run => {
                 if let Err(e) = r {
-                    eprintln!(
-                        "{error}: {e:?}",
-                        error = if std::io::stderr().is_terminal() {
-                            "error".red().bold()
-                        } else {
-                            "error".normal()
-                        }
-                    );
-
+                    eprintln!("error: {e:?}");
                     std::process::exit(1);
                 }
 

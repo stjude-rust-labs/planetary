@@ -15,7 +15,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use axum::http::StatusCode;
-use chrono::Utc;
+use chrono::DateTime;
 use futures::FutureExt;
 use k8s_openapi::api::core::v1::Container;
 use k8s_openapi::api::core::v1::EnvFromSource;
@@ -34,6 +34,7 @@ use k8s_openapi::api::core::v1::Volume;
 use k8s_openapi::api::core::v1::VolumeMount;
 use k8s_openapi::api::core::v1::VolumeResourceRequirements;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::jiff::Timestamp;
 use kube::Api;
 use kube::Client;
 use kube::ResourceExt;
@@ -42,7 +43,6 @@ use kube::api::ObjectMeta;
 use kube::api::Patch;
 use kube::api::PatchParams;
 use kube::api::PostParams;
-use kube::core::ErrorResponse;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::watcher;
 use kube::runtime::watcher::Event;
@@ -1414,7 +1414,7 @@ impl TaskOrchestrator {
 
         let statuses = status.container_statuses.as_deref().unwrap_or_default();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut containers = Vec::new();
         for (kind, executor_index, state) in init_statuses
             .iter()
@@ -1452,8 +1452,7 @@ impl TaskOrchestrator {
                         .await
                     {
                         Ok(output) => Ok(output),
-                        Err(kube::Error::Api(ErrorResponse { code: 404, .. }))
-                        | Err(kube::Error::Api(ErrorResponse { code: 400, .. })) => {
+                        Err(kube::Error::Api(s)) if s.is_not_found() || s.code == 400 => {
                             // The pod or container no longer exists; treat as empty output
                             Ok(String::new())
                         }
@@ -1489,8 +1488,24 @@ impl TaskOrchestrator {
             containers.push(TerminatedContainer {
                 kind,
                 executor_index: executor_index.map(|i| i as i32),
-                start_time: state.started_at.as_ref().map(|t| t.0).unwrap_or(now),
-                end_time: state.finished_at.as_ref().map(|t| t.0).unwrap_or(now),
+                start_time: DateTime::from_timestamp_micros(
+                    state
+                        .started_at
+                        .as_ref()
+                        .map(|t| t.0)
+                        .unwrap_or(now)
+                        .as_microsecond(),
+                )
+                .context("timestamp out of range")?,
+                end_time: DateTime::from_timestamp_micros(
+                    state
+                        .finished_at
+                        .as_ref()
+                        .map(|t| t.0)
+                        .unwrap_or(now)
+                        .as_microsecond(),
+                )
+                .context("timestamp out of range")?,
                 stdout,
                 stderr,
                 exit_code,
@@ -1524,7 +1539,7 @@ impl TaskOrchestrator {
                     .await
                 {
                     Ok(_) => Ok(()),
-                    Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(()),
+                    Err(kube::Error::Api(s)) if s.is_not_found() => Ok(()),
                     Err(e) => Err(into_retry_error(e)),
                 }
             },
@@ -1562,7 +1577,7 @@ impl TaskOrchestrator {
                     .await
                 {
                     Ok(_) => Ok(()),
-                    Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(()),
+                    Err(kube::Error::Api(s)) if s.is_not_found() => Ok(()),
                     Err(e) => Err(into_retry_error(e)),
                 }
             },

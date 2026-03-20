@@ -26,7 +26,6 @@ use kube::api::ListParams;
 use kube::api::ObjectMeta;
 use kube::api::Patch;
 use kube::api::PatchParams;
-use kube::core::ErrorResponse;
 use kube::runtime::reflector::Lookup;
 use planetary_db::Database;
 use planetary_db::format_log_message;
@@ -343,7 +342,7 @@ impl Monitor {
                     .await
                 {
                     Ok(_) => {}
-                    Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => {}
+                    Err(kube::Error::Api(s)) if s.is_not_found() => {}
                     Err(e) => {
                         return Err(e).with_context(|| format!("failed to mark PVC `{id}` for GC"));
                     }
