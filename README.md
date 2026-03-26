@@ -444,7 +444,6 @@ apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: orchestrator-storage-tasks
-  namespace: planetary-tasks
 spec:
   capacity:
     storage: 1Gi

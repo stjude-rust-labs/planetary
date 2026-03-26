@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fmt::Write;
 use std::fs;
+use std::io;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::path::Path;
@@ -282,12 +283,16 @@ fn deserialize_items<T: DeserializeOwned>(
 ) -> anyhow::Result<Option<Vec<T>>> {
     let path = path.as_ref();
 
-    if !path.is_file() {
-        return Ok(None);
-    }
-
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open file `{path}`", path = path.display()))?;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("failed to open file `{path}`", path = path.display()));
+        }
+    };
 
     Ok(Some(from_reader(BufReader::new(file)).with_context(
         || format!("failed to read file `{path}`", path = path.display()),

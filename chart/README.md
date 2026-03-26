@@ -28,8 +28,8 @@ Network policies are disabled for task pods by default.
 In production deployments, it is recommended you enable network policies for
 the task pods.
 
-The default network policy allows communication to `kube-dns` on port 53 - both
-UDP and TCP - and all other IPv4 traffic on port 443.
+The default network policy allows communication to `kube-dns` on port 53 for
+both UDP and TCP.
 
 It is suggested that you review this network policy for your use case and
 determine if there are requirements where this policy is not strict enough.

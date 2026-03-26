@@ -136,6 +136,10 @@ pub trait Database: Send + Sync + 'static {
     /// if the task is transitioned to the given state; the returned containers
     /// are then recorded in the database.
     ///
+    /// The given output files will be associated with the task if the task
+    /// transitions to the given state; if `None`, the task's output files will
+    /// not be set.
+    ///
     /// Returns `Ok(true)` if the status was updated or `Ok(false)` if the
     /// task's current state cannot be transitioned to the given state.
     async fn update_task_state<'a>(
