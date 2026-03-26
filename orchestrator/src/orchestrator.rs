@@ -654,7 +654,7 @@ impl TaskOrchestrator {
                 .get_task(tes_id, GetTaskParams { view: View::Full })
                 .await?
                 .into_task()
-                .expect("should have basic task");
+                .expect("should have full task");
 
             self.database
                 .append_system_log(
