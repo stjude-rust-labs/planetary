@@ -264,7 +264,7 @@ fn serialize_items<T: Serialize>(path: impl AsRef<Path>, items: &[T]) -> anyhow:
         })?;
     }
 
-    let file = fs::File::create_new(path)
+    let file = fs::File::create(path)
         .with_context(|| format!("failed to create file `{path}`", path = path.display()))?;
 
     to_writer(BufWriter::new(file), items)
