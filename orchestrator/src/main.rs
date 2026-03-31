@@ -1,6 +1,7 @@
 //! The `planetary` command line tool.
 
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -59,42 +60,13 @@ pub struct Args {
     #[clap(long, env, default_value = "planetary")]
     database_name: String,
 
-    /// The Kubernetes storage class to use for tasks.
+    /// The directory containing the Kubernetes resource templates.
     #[clap(long, env)]
-    storage_class: Option<String>,
+    templates_dir: PathBuf,
 
-    /// The transporter image to use.
-    ///
-    /// Defaults to `stjude-rust-labs/planetary-transporter:latest`
+    /// The namespace to monitor for task pod events.
     #[clap(long, env)]
-    transporter_image: Option<String>,
-
-    /// The Kubernetes namespace to use for TES tasks created by the Planetary
-    /// service.
-    ///
-    /// Defaults to `planetary-tasks`.
-    #[clap(long, env)]
-    tasks_namespace: Option<String>,
-
-    /// The number of CPU cores to request for transporter pods.
-    ///
-    /// Defaults to `1` CPU core.
-    #[clap(long, env)]
-    transporter_cpu: Option<i32>,
-
-    /// The amount of memory (in GiB) to request for transporter pods.
-    ///
-    /// Defaults to `256` MiB.
-    #[clap(long, env)]
-    transporter_memory: Option<f64>,
-
-    /// The node selector to apply to preemptible tasks.
-    #[clap(long, env)]
-    preemptible_node_selector: Option<String>,
-
-    /// The taint to apply to preemptible tasks.
-    #[clap(long, env)]
-    preemptible_taint: Option<String>,
+    tasks_namespace: String,
 }
 
 impl Args {
@@ -172,15 +144,10 @@ pub async fn main() -> anyhow::Result<()> {
         .address(&args.address)
         .port(args.port)
         .shared_database(database)
-        .maybe_storage_class(args.storage_class)
-        .maybe_transporter_image(args.transporter_image)
         .pod_name(args.pod_name)
         .service_api_key(args.service_api_key)
-        .maybe_tasks_namespace(args.tasks_namespace)
-        .maybe_transporter_cpu(args.transporter_cpu)
-        .maybe_transporter_memory(args.transporter_memory)
-        .maybe_preemptible_node_selector(args.preemptible_node_selector)
-        .maybe_preemptible_taint(args.preemptible_taint)
+        .templates_dir(args.templates_dir)
+        .tasks_namespace(args.tasks_namespace)
         .build()
         .run(terminate())
         .await

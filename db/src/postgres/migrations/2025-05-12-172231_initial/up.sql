@@ -18,6 +18,7 @@ CREATE TABLE tasks (
     id SERIAL PRIMARY KEY,
     tes_id TEXT NOT NULL,
     state task_state NOT NULL DEFAULT 'UNKNOWN',
+    state_update_time TIMESTAMPTZ NOT NULL DEFAULT (now() at time zone 'utc'),
     name TEXT NULL,
     description TEXT NULL,
     inputs JSONB NULL,
@@ -34,6 +35,7 @@ CREATE TABLE tasks (
     tags JSONB NULL,
     output_files JSONB NULL,
     system_logs TEXT[] NULL,
+    gc BOOLEAN DEFAULT FALSE,
     creation_time TIMESTAMPTZ NOT NULL DEFAULT (now() at time zone 'utc'),
     CONSTRAINT tasks_tes_id_unique UNIQUE (tes_id)
 );

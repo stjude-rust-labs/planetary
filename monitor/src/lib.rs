@@ -11,7 +11,9 @@ use planetary_server::DEFAULT_PORT;
 use secrecy::SecretString;
 use url::Url;
 
+use crate::monitor::Intervals;
 use crate::monitor::Monitor;
+use crate::monitor::Namespaces;
 use crate::monitor::OrchestratorServiceInfo;
 
 mod monitor;
@@ -32,22 +34,24 @@ pub struct Server {
     database: Arc<dyn Database>,
 
     /// The Kubernetes namespace for the Planetary services.
-    ///
-    /// Defaults to `planetary`.
     #[builder(into)]
-    planetary_namespace: Option<String>,
+    planetary_namespace: String,
 
     /// The Kubernetes namespace to use for TES task resources.
-    ///
-    /// Defaults to `planetary-tasks`.
     #[builder(into)]
-    tasks_namespace: Option<String>,
+    tasks_namespace: String,
 
     /// The interval for which the monitor should check the cluster state.
     ///
     /// Defaults to 60 seconds.
     #[builder(into)]
-    interval: Duration,
+    check_interval: Duration,
+
+    /// The interval for which the monitor should check the cluster state.
+    ///
+    /// Defaults to 600 seconds.
+    #[builder(into)]
+    keep_interval: Duration,
 
     /// The Planetary orchestrator service URL.
     #[builder(into)]
@@ -92,9 +96,14 @@ impl Server {
                 url: self.orchestrator_url,
                 api_key: self.orchestrator_api_key,
             },
-            self.planetary_namespace,
-            self.tasks_namespace,
-            self.interval,
+            Namespaces {
+                planetary: self.planetary_namespace,
+                tasks: self.tasks_namespace,
+            },
+            Intervals {
+                check: self.check_interval,
+                keep: self.keep_interval,
+            },
         )
         .await?;
 

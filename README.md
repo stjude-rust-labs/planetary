@@ -323,60 +323,27 @@ kind load docker-image -n planetary \
 
 > [!NOTE]
 > The Planetary Helm chart includes an optional pod-based PostgreSQL database
-> for local development and testing (enabled below with
-> `postgresql.enabled=true`). In this guide, we'll deploy Planetary using this
+> for local development and testing (enabled with `postgresql.enabled=true` in
+> `staging.yaml`).
+>
+> In this guide, we'll deploy Planetary using this
 > ephemeral database. **This is for demonstration purposes only—for anything
 > other than local testing, we recommend using an external managed database
 > service that is backed up rather than the included pod-based database.**
 
-To deploy Planetary with the included PostgreSQL database into a local
-Kubernetes cluster, run the following command:
+### Installing NFS
 
-```bash
-cd chart
-helm upgrade --install --create-namespace -n planetary planetary . \
-  --set api.image.name=stjude-rust-labs/planetary-api \
-  --set api.image.tag=staging \
-  --set orchestrator.image.name=stjude-rust-labs/planetary-orchestrator \
-  --set orchestrator.image.tag=staging \
-  --set monitor.image.name=stjude-rust-labs/planetary-monitor \
-  --set monitor.image.tag=staging \
-  --set transporter.image.name=stjude-rust-labs/planetary-transporter \
-  --set transporter.image.tag=staging \
-  --set migration.image.name=stjude-rust-labs/planetary-migration \
-  --set migration.image.tag=staging \
-  --set postgresql.enabled=true \
-  # Set a secure password here!
-  --set postgresql.password=mypassword \
-  # You may also need to reduce the resources for a local installation.
-  --set api.resources.limits.memory=1Gi \
-  --set orchestrator.resources.limits.memory=1Gi \
-  --set monitor.resources.limits.memory=1Gi \
-  --set postgresql.resources.limits.memory=1Gi
-cd ..
-```
-
-**Note:** Replace `mypassword` with a secure password of your choice.
-
-The database schema will be automatically set up by a post-install Helm hook
-that runs after the chart is deployed. The migration job waits for the database
-to be ready (up to 10 minutes) and then runs the necessary migrations.
-
-### Creating Shared Storage for the Orchestrator
-
-The `planetary` orchestrator uses shared storage to communicate with task pods.
+The `planetary` orchestrator uses shared storage to communicate with task pods
+to coordinate the transfer of remote inputs and outputs into the storage
+attached to the pod.
 
 It is up to the cluster administrator to provide this storage to the
-orchestrator and task pods via the creation of an `orchestrator-storage`
-Persistent Volume Claim (PVC).
-
-#### Simple NFS Shared Storage
+orchestrator and task pods.
 
 For the purpose of deploying `planetary` into a development Kubernetes cluster,
-this guide will use an NFS server deployed into the cluster to provide storage
-to the orchestrator and task pods.
+this guide will use an NFS server to provide the shared storage.
 
-To start, install [`nfs-operator`](https://github.com/krestomatio/nfs-operator)
+Install [`nfs-operator`](https://github.com/krestomatio/nfs-operator)
 into the cluster:
 
 ```bash
@@ -386,96 +353,22 @@ kubectl apply -k 'https://github.com/krestomatio/nfs-operator/config/default?ref
 `nfs-operator` will define a new Custom Resource Definition named `Ganesha` for
 managing [nfs-ganesha](https://github.com/nfs-ganesha/nfs-ganesha) services.
 
-Next, we create the expected PVC resources in the `planetary` and
-`planetary-tasks` namespaces:
+### Installing Planetary
 
-```yaml
-apiVersion: nfs.krestomat.io/v1alpha1
-kind: Ganesha
-metadata:
-  name: planetary
-  namespace: planetary
-spec:
-  # Use 1000 as that's the uid/gid used by Planetary containers
-  ganeshaExportUserid: 1000
-  ganeshaExportGroupid: 1000
-  ganeshaExportMode: '0700'
-  ganeshaPvcDataSize: 1Gi
-  # Do not generate a storage class
-  ganeshaGeneratedNfsScNeeded: false
-  # A static cluster IP is required for the service as nodes mount the NFS volume without access to `kube-dns`
-  ganeshaServiceClusterIp: 10.96.85.10
----
-# Create a volume for the `planetary` namespace
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: orchestrator-storage
-spec:
-  capacity:
-    storage: 1Gi
-  volumeMode: Filesystem
-  storageClassName: ""
-  accessModes:
-    - ReadWriteMany
-  persistentVolumeReclaimPolicy: Retain
-  nfs:
-    server: 10.96.85.10
-    path: /
----
-# Create a PVC for the `planetary` namespace
-# This will be used by the orchestrator; without it, the orchestrator will not be scheduled
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: orchestrator-storage
-  namespace: planetary
-spec:
-  volumeName: orchestrator-storage
-  storageClassName: ""
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 1Gi
----
-# Create a volume for the `planetary-tasks` namespace
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: orchestrator-storage-tasks
-spec:
-  capacity:
-    storage: 1Gi
-  volumeMode: Filesystem
-  storageClassName: ""
-  accessModes:
-    - ReadWriteMany
-  persistentVolumeReclaimPolicy: Retain
-  nfs:
-    server: 10.96.85.10
-    path: /
----
-# Create a PVC for the `planetary-tasks` namespace
-# This will be used by the task pods; without it, the task pods will not be scheduled
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: orchestrator-storage
-  namespace: planetary-tasks
-spec:
-  volumeName: orchestrator-storage-tasks
-  storageClassName: ""
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 1Gi
+To deploy Planetary with the included PostgreSQL database into a local
+Kubernetes cluster, run the following command:
+
+```bash
+helm upgrade --install --create-namespace -n planetary planetary chart \
+  --set postgresql.password='<mypassword>' \
+  -f staging.yaml
 ```
 
-With this, both the `planetary` orchestrator and task pods will have 1 GiB of
-shared storage and the orchestrator pod should be scheduled once the
-`orchestrator-storage` PVC has been bound.
+**Note:** Replace `<mypassword>` with a secure password of your choice.
+
+The database schema will be automatically set up by a post-install Helm hook
+that runs after the chart is deployed. The migration job waits for the database
+to be ready (up to 10 minutes) and then runs the necessary migrations.
 
 ### Verifying the Deployment
 
@@ -484,8 +377,11 @@ Check the status of the Planetary pods to see if they are `Running`:
 ```bash
 kubectl get pods -n planetary
 ```
+Note: it may take a little while for the `planetary-orchestrator` and
+`planetary-monitor` pods to become `Running` as they have dependencies on the
+NFS service.
 
-Once the Planetary service is running, you may forward the service port for
+Once the Planetary pods are running, you may forward the service port for
 accessing the TES API locally:
 
 ```bash

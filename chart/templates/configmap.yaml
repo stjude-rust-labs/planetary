@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: templates
+data:
+  # The orchestrator uses this template when creating resources for tasks.
+  # See https://keats.github.io/tera for the template syntax.
+  # NOTE: all Tera template tags must be escaped for the Helm chart.
+  task.yaml: |
+    # This is the PVC used for the task's `disk` requirement.
+    # The task's inputs, outputs, work directory, and `/tmp` are all mounted from this volume.
+    apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata:
+      name: {{ `{{ id }}` }}
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: {{ `{{ disk }}` }}
+    ---
+    # The pod that executes a task.
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: {{ `{{ id }}` }}
+    spec:
+      {{- with .Values.orchestrator.preemptible }}
+      # Node selector and toleration to use for preemptible tasks
+      {{ `{%- if preemptible %}` }}
+      nodeSelector:
+        {{ .nodeSelector.key }}: "{{ .nodeSelector.value }}"
+      tolerations: 
+        - key: "{{ .toleration.key }}"
+          operator: Equal
+          value: "{{ .toleration.value }}""
+      {{ `{%- endif %}` }}
+      {{- end }}
+      restartPolicy: Never
+      initContainers:
+      # The first init container is responsible for downloading inputs and creating empty outputs to mount
+      - name: inputs
+        image: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
+        args: ["-v", "--mode", "inputs", "--orchestrator-dir", "/mnt/orchestrator", "--inputs-dir", "/mnt/inputs", "--outputs-dir", "/mnt/outputs", {{ `{{ id | json_encode }}` }}]
+        envFrom:
+        - secretRef:
+            name: azure-storage-credentials
+            optional: true
+        - secretRef:
+            name: aws-s3-credentials
+            optional: true
+        - secretRef:
+            name: google-storage-credentials
+            optional: true
+        env:
+        - name: RUST_LOG
+          value: {{ .Values.transporter.log }}
+        volumeMounts:
+        - name: storage
+          mountPath: /mnt/inputs
+          subPath: inputs
+        - name: storage
+          mountPath: /mnt/outputs
+          subPath: outputs
+        - name: orchestrator-storage
+          mountPath: /mnt/orchestrator
+          readOnly: true
+          recursiveReadOnly: IfPossible
+        resources:
+          requests:
+            cpu: "{{ .Values.transporter.cpu }}"
+            memory: "{{ .Values.transporter.memory }}"
+      # The remaining init containers are the task's executors
+      {{ `{%- for executor in executors %}` }}
+      - name: executor-{{ `{{ loop.index0 }}` }}
+        image: {{ `{{ executor.image }}` }}
+        command: ["/bin/sh"]
+        args: ["-c", {{ `{{ executor.script | json_encode }}` }}]
+        workingDir: {{ `{{ executor.workdir }}` }}
+        env:
+        {{ `{%- for key, value in executor.env %}` }}
+        - name: {{ `{{ key }}` }}
+          value: {{ `{{ value }}` }}
+        {{ `{%- endfor %}` }}
+        resources:
+          requests:
+            cpu: {{ `"{{ cpu }}"` }}
+            memory: {{ `"{{ memory }}"` }}
+        volumeMounts:
+          - name: storage
+            mountPath: /tmp
+            subPath: tmp
+          - name: storage
+            mountPath: {{ `{{ executor.workdir }}` }}
+            subPath: work
+          {{ `{%- for input in inputs %}` }}
+          - name: storage
+            mountPath: {{ `{{ input }}` }}
+            subPath: inputs/{{ `{{ loop.index0 }}` }}
+            readOnly: true
+            recursiveReadOnly: IfPossible
+          {{ `{%- endfor -%}` }}
+          {{ `{%- for output in outputs %}` }}
+          - name: storage
+            mountPath: {{ `{{ output }}` }}
+            subPath: outputs/{{ `{{ loop.index0 }}` }}
+            {{ `{%- endfor -%}` }}
+          {{ `{%- for volume in volumes %}` }}
+          - name: storage
+            mountPath: {{ `{{ volume }}` }}
+            subPath: volumes/{{ `{{ loop.index0 }}` }}
+          {{ `{%- endfor -%}` }}
+      {{ `{%- endfor %}` }}
+      containers:
+      # The primary container of the task pod is responsible for uploading the task's outputs
+      - name: outputs
+        image: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
+        args: ["-v", "--mode", "outputs", "--orchestrator-dir", "/mnt/orchestrator", "--outputs-dir", "/mnt/outputs", {{ `{{ id | json_encode }}` }}]
+        envFrom:
+        - secretRef:
+            name: azure-storage-credentials
+            optional: true
+        - secretRef:
+            name: aws-s3-credentials
+            optional: true
+        - secretRef:
+            name: google-storage-credentials
+            optional: true
+        env:
+        - name: RUST_LOG
+          value: {{ .Values.transporter.log }}
+        volumeMounts:
+        - name: storage
+          mountPath: /mnt/outputs
+          subPath: outputs
+          readOnly: true
+          recursiveReadOnly: IfPossible
+        - name: orchestrator-storage
+          mountPath: /mnt/orchestrator
+        resources:
+          requests:
+            cpu: "{{ .Values.transporter.cpu }}"
+            memory: "{{ .Values.transporter.memory }}"
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: {{ `{{ id }}` }}
+      - name: orchestrator-storage
+        {{- with .Values.orchestrator.storage }}
+        {{- include "render" (dict "value" . "context" $) | nindent 8 }}
+        {{- end }}

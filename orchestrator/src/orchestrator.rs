@@ -1,7 +1,6 @@
 //! Implementation of the task orchestrator.
 //!
-//! The task orchestrator is responsible for creating Kubernetes resources for
-//! task execution.
+//! The task orchestrator is creating Kubernetes resources for tasks.
 //!
 //! It watches for Kubernetes cluster events relating to the pods it is
 //! orchestrating and updates the database accordingly.
@@ -17,54 +16,47 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
 use axum::http::StatusCode;
 use chrono::DateTime;
 use futures::FutureExt;
-use k8s_openapi::api::core::v1::Container;
-use k8s_openapi::api::core::v1::EnvFromSource;
-use k8s_openapi::api::core::v1::EnvVar;
-use k8s_openapi::api::core::v1::EnvVarSource;
-use k8s_openapi::api::core::v1::PersistentVolumeClaim;
-use k8s_openapi::api::core::v1::PersistentVolumeClaimSpec;
-use k8s_openapi::api::core::v1::PersistentVolumeClaimVolumeSource;
 use k8s_openapi::api::core::v1::Pod;
-use k8s_openapi::api::core::v1::PodSpec;
-use k8s_openapi::api::core::v1::ResourceRequirements;
-use k8s_openapi::api::core::v1::SecretEnvSource;
-use k8s_openapi::api::core::v1::SecretKeySelector;
-use k8s_openapi::api::core::v1::Toleration;
-use k8s_openapi::api::core::v1::Volume;
-use k8s_openapi::api::core::v1::VolumeMount;
-use k8s_openapi::api::core::v1::VolumeResourceRequirements;
-use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::jiff::Timestamp;
 use k8s_openapi::serde_json::from_reader;
 use k8s_openapi::serde_json::to_writer;
 use kube::Api;
 use kube::Client;
-use kube::ResourceExt;
+use kube::Discovery;
+use kube::api::ApiResource;
+use kube::api::DeleteParams;
+use kube::api::DynamicObject;
+use kube::api::GroupVersionKind;
+use kube::api::ListParams;
 use kube::api::LogParams;
 use kube::api::ObjectMeta;
 use kube::api::Patch;
 use kube::api::PatchParams;
 use kube::api::PostParams;
+use kube::discovery::ApiCapabilities;
+use kube::discovery::Scope;
 use kube::runtime::WatchStreamExt;
+use kube::runtime::reflector::Lookup;
 use kube::runtime::watcher;
 use kube::runtime::watcher::Event;
 use planetary_db::ContainerKind;
 use planetary_db::Database;
 use planetary_db::TerminatedContainer;
 use planetary_db::format_log_message;
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tera::Tera;
 use tes::v1::types::requests::GetTaskParams;
 use tes::v1::types::requests::View;
 use tes::v1::types::responses::Task;
 use tes::v1::types::task::Executor;
-use tes::v1::types::task::Resources;
 use tes::v1::types::task::State;
 use tokio::pin;
 use tokio::select;
@@ -80,36 +72,27 @@ use crate::into_retry_error;
 use crate::notify_retry;
 use crate::retry_durations;
 
-/// The default namespace for planetary tasks.
-const TASKS_NAMESPACE: &str = "planetary-tasks";
+/// The expected name of the task resource template.
+const TEMPLATE_NAME: &str = "task.yaml";
 
-/// The default storage size, in gigabytes.
+/// The default task storage size, in gigabytes.
 ///
 /// Uses a 1 GiB default.
 const DEFAULT_STORAGE_SIZE: f64 = 1.07374182;
 
-/// The name of the volume that pods will attach to for their storage.
-const STORAGE_VOLUME_NAME: &str = "storage";
+/// The default CPU request (in cores) for tasks.
+const DEFAULT_CPU: i32 = 1;
 
-/// The Kubernetes resources CPU key.
-const K8S_KEY_CPU: &str = "cpu";
-
-/// The Kubernetes resources memory key.
-const K8S_KEY_MEMORY: &str = "memory";
-
-/// The Kubernetes resources storage key.
-const K8S_KEY_STORAGE: &str = "storage";
-
-/// The default transporter image to use for inputs and outputs pods.
-const DEFAULT_TRANSPORTER_IMAGE: &str = "stjude-rust-labs/planetary-transporter:latest";
+/// The default memory request (in GB) for tasks.
+///
+/// Uses a 256 MiB default.
+const DEFAULT_MEMORY: f64 = 0.268435455;
 
 /// The orchestrator id label.
 const ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
 
-/// The name of the orchestrator PVC.
-///
-/// This volume is shared between the orchestrator and task pods.
-const ORCHESTRATOR_PVC_NAME: &str = "orchestrator-storage";
+/// The task id label.
+const TASK_LABEL: &str = "planetary/task";
 
 /// The mount point for the orchestrator volume.
 ///
@@ -126,60 +109,14 @@ const ORCHESTRATOR_PVC_NAME: &str = "orchestrator-storage";
 /// state.
 const ORCHESTRATOR_MOUNT: &str = "/mnt/orchestrator";
 
-/// The mount point for task input files.
-const TASK_INPUTS_MOUNT: &str = "/mnt/inputs";
-
-/// The mount point for task output files.
-const TASK_OUTPUTS_MOUNT: &str = "/mnt/outputs";
-
-/// A label applied to resources that are ready for garbage collection.
-///
-/// The monitor service will periodically delete these resources.
-const GC_LABEL: &str = "planetary/gc";
-
 /// The maximum number of lines to tail for an executor pod's logs.
 ///
 /// This is 16 because there is always an extra line of output in the executor's
 /// log to maybe contain the executors real exit code.
 const MAX_EXECUTOR_LOG_LINES: i64 = 16;
 
-/// The default CPU request (in cores) for transporter pods.
-const DEFAULT_TRANSPORTER_CPU: i32 = 1;
-
-/// The default memory request (in GB) for transporter pods.
-///
-/// Uses a 256 MiB default.
-const DEFAULT_TRANSPORTER_MEMORY: f64 = 0.268435455;
-
-/// The default CPU request (in cores) for pods.
-const DEFAULT_POD_CPU: i32 = 1;
-
-/// The default memory request (in GB) for pods.
-///
-/// Uses a 256 MiB default.
-const DEFAULT_POD_MEMORY: f64 = 0.268435455;
-
-/// The name of the Azure Storage credentials secret.
-const AZURE_STORAGE_CREDENTIALS_SECRET: &str = "azure-storage-credentials";
-
-/// The name of the S3 credentials secret.
-const AWS_S3_CREDENTIALS_SECRET: &str = "aws-s3-credentials";
-
-/// The name of the Google Cloud Storage credentials secret.
-const GOOGLE_STORAGE_CREDENTIALS_SECRET: &str = "google-storage-credentials";
-
 /// The reason for an image pull backoff wait.
 const IMAGE_PULL_BACKOFF_REASON: &str = "ImagePullBackOff";
-
-/// The name of the orchestrator API key environment variable for the
-/// transporter.
-const TRANSPORTER_ORCHESTRATOR_API_KEY: &str = "ORCHESTRATOR_API_KEY";
-
-/// The name of the orchestrator auth secret.
-const ORCHESTRATOR_AUTH_SECRET_NAME: &str = "orchestrator-auth";
-
-/// The key of the orchestrator auth secret.
-const ORCHESTRATOR_AUTH_SECRET_KEY: &str = "api-key";
 
 /// A prefix that is used in a container's output when the a task executor
 /// should ignore errors.
@@ -194,9 +131,6 @@ const ORCHESTRATOR_AUTH_SECRET_KEY: &str = "api-key";
 /// exit code.
 const EXIT_PREFIX: &str = "exit: ";
 
-/// The toleration operator for equal matching.
-const TOLERATION_OPERATOR_EQUAL: &str = "Equal";
-
 /// Formats a container name given the container kind.
 fn format_container_name(kind: ContainerKind, executor_index: Option<usize>) -> String {
     match kind {
@@ -206,29 +140,6 @@ fn format_container_name(kind: ContainerKind, executor_index: Option<usize>) -> 
             index = executor_index.expect("should have index")
         ),
         ContainerKind::Outputs => "outputs".into(),
-    }
-}
-
-/// Converts TES resources into K8S resource requirements.
-fn convert_resources(resources: &Resources) -> ResourceRequirements {
-    ResourceRequirements {
-        requests: Some(
-            [
-                (
-                    K8S_KEY_CPU.to_string(),
-                    Quantity(resources.cpu_cores.unwrap_or(DEFAULT_POD_CPU).to_string()),
-                ),
-                (
-                    K8S_KEY_MEMORY.to_string(),
-                    Quantity(format!(
-                        "{memory}G",
-                        memory = resources.ram_gb.unwrap_or(DEFAULT_POD_MEMORY).ceil() as u64
-                    )),
-                ),
-            ]
-            .into(),
-        ),
-        ..Default::default()
     }
 }
 
@@ -299,6 +210,215 @@ fn deserialize_items<T: DeserializeOwned>(
     )?))
 }
 
+/// Creates a template context for a TES task.
+///
+/// Returns an error if the task was invalid.
+fn create_context(task: &Task) -> Result<tera::Context> {
+    /// Helper for inserting items into the context.
+    fn insert(
+        context: &mut tera::Map<String, tera::Value>,
+        name: impl Into<String>,
+        value: impl Into<tera::Value>,
+    ) {
+        context.insert(name.into(), value.into());
+    }
+
+    let resources = task.resources.as_ref();
+
+    let mut context = tera::Map::new();
+    insert(
+        &mut context,
+        "id",
+        task.id.as_deref().context("task should have id")?,
+    );
+    insert(
+        &mut context,
+        "preemptible",
+        resources.and_then(|r| r.preemptible).unwrap_or(false),
+    );
+    insert(
+        &mut context,
+        "cpu",
+        resources.and_then(|r| r.cpu_cores).unwrap_or(DEFAULT_CPU),
+    );
+    insert(
+        &mut context,
+        "memory",
+        format!(
+            "{memory}G",
+            memory = resources
+                .and_then(|r| r.ram_gb)
+                .unwrap_or(DEFAULT_MEMORY)
+                .ceil()
+        ),
+    );
+    insert(
+        &mut context,
+        "disk",
+        format!(
+            "{disk}G",
+            disk = resources
+                .and_then(|r| r.disk_gb)
+                .unwrap_or(0.0)
+                .max(DEFAULT_STORAGE_SIZE)
+        ),
+    );
+
+    let inputs: Vec<tera::Value> = task
+        .inputs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|i| i.path.clone().into())
+        .collect();
+    insert(&mut context, "inputs", inputs);
+
+    let outputs: Vec<tera::Value> = task
+        .outputs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|o| o.path.clone().into())
+        .collect();
+    insert(&mut context, "outputs", outputs);
+
+    insert(
+        &mut context,
+        "volumes",
+        task.volumes.as_deref().unwrap_or_default(),
+    );
+
+    let executors: Vec<tera::Value> = task
+        .executors
+        .iter()
+        .map(|e| {
+            let mut executor = tera::Map::new();
+            insert(&mut executor, "image", e.image.clone());
+            insert(&mut executor, "script", format_executor_script(e)?);
+            insert(
+                &mut executor,
+                "workdir",
+                e.workdir.as_deref().unwrap_or_default(),
+            );
+
+            let mut env = tera::Map::new();
+            if let Some(vars) = e.env.as_ref() {
+                for (k, v) in vars {
+                    insert(&mut env, k, v.clone());
+                }
+            }
+
+            insert(&mut executor, "env", env);
+            Ok(executor.into())
+        })
+        .collect::<Result<_>>()?;
+    insert(&mut context, "executors", executors);
+
+    tera::Context::from_value(context.into()).context("invalid template context")
+}
+
+/// Formats an executor script into a single line that can be used with `sh -c`.
+///
+/// It is expected that the arguments are already shell quoted.
+fn format_executor_script(executor: &Executor) -> Result<String> {
+    // Shell quote the stdin
+    let stdin = executor
+        .stdin
+        .as_ref()
+        .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stdin path `{p}`")))
+        .transpose()?;
+
+    // Shell quote the stdout
+    let stdout = executor
+        .stdout
+        .as_ref()
+        .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stdout path `{p}`")))
+        .transpose()?;
+
+    // Shell quote the stderr
+    let stderr = executor
+        .stderr
+        .as_ref()
+        .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stderr path `{p}`")))
+        .transpose()?;
+
+    // Shell join the command twice as we're going to nest its execution in yet
+    // another `sh -c`.
+    let command = shlex::try_join(executor.command.iter().map(AsRef::as_ref))
+        .map_err(|_| Error::System("executor command was invalid".into()))?;
+    let command = shlex::try_join([command.as_str()])
+        .map_err(|_| Error::System("executor command was invalid".into()))?;
+
+    let mut script = String::new();
+    script.push_str("set -eu;");
+
+    // Add check for stdin file existence
+    if let Some(stdin) = &stdin {
+        script.push_str("! [ -f ");
+        script.push_str(stdin);
+        script.push_str(r#" ] && >&2 echo "executor stdin file "#);
+        script.push_str(stdin);
+        script.push_str(r#" does not exist" && exit 1;"#);
+    }
+
+    // Set up stdout redirection
+    // We use tee so that both Kubernetes and the requested stdout file have the
+    // output
+    if let Some(stdout) = &stdout {
+        script.push_str(r#"out="${TMPDIR:-/tmp}/stdout";"#);
+        script.push_str(r#"mkfifo "$out";"#);
+        script.push_str("tee -a ");
+        script.push_str(stdout);
+        script.push_str(r#" < "$out" &"#);
+    }
+
+    // Set up stderr redirection
+    // We use tee so that both Kubernetes and the requested stderr file have the
+    // output
+    if let Some(stderr) = &stderr {
+        script.push_str(r#"err="${TMPDIR:-/tmp}/stderr";"#);
+        script.push_str(r#"mkfifo "$err";"#);
+        script.push_str("tee -a ");
+        script.push_str(stderr);
+        script.push_str(r#" < "$err" &"#);
+    }
+
+    // Add the command in a nested `sh -c` invocation in case it exits
+    write!(&mut script, "sh -c {command}").unwrap();
+
+    // Redirect stdout
+    if stdout.is_some() {
+        script.push_str(" >\"$out\"");
+    }
+
+    // Redirect stderr
+    if stderr.is_some() {
+        script.push_str(" 2>\"$err\"");
+    }
+
+    // Redirect stdin
+    if let Some(stdin) = stdin {
+        script.push_str(" < ");
+        script.push_str(&stdin);
+    }
+
+    write!(
+        &mut script,
+        " || CODE=$?; echo \"{EXIT_PREFIX}${{CODE:-0}}\";"
+    )
+    .unwrap();
+
+    // If not ignoring error, exit on non-zero
+    if !executor.ignore_error.unwrap_or(false) {
+        script.push_str("if [[ ${CODE:-0} -ne 0 ]]; then exit $CODE; fi;");
+    }
+
+    // We must wait for the background tee jobs to complete, otherwise buffers might
+    // not be flushed
+    script.push_str("wait $(jobs -p) 2>&1 >/dev/null");
+    Ok(script)
+}
+
 /// Used to determine what state a task pod is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TaskPodState<'a> {
@@ -352,7 +472,11 @@ trait PodExt {
 
 impl PodExt for Pod {
     fn tes_id(&self) -> Result<&str> {
-        self.metadata.name.as_deref().context("pod has no name")
+        use kube::ResourceExt;
+        self.labels()
+            .get(TASK_LABEL)
+            .map(String::as_str)
+            .context("pod has no task label")
     }
 
     fn state(&self) -> Result<TaskPodState<'_>> {
@@ -484,167 +608,62 @@ impl From<Error> for planetary_server::Error {
 /// The result type of the orchestrator methods.
 pub type OrchestrationResult<T> = Result<T, Error>;
 
-/// Represents information about the transporter pod used by the orchestrator.
-#[derive(Clone)]
-pub struct TransporterInfo {
-    /// The image of the transporter to use.
-    pub image: Option<String>,
-    /// The number of cpu cores to request for the transporter pod.
-    pub cpu: Option<i32>,
-    /// The amount of memory (in GB) to request for the transporter pod.
-    pub memory: Option<f64>,
-}
-
-/// A node selector.
-#[derive(Clone)]
-pub struct NodeSelector {
-    /// The label key for node selection.
-    pub key: String,
-    /// The label value for node selection.
-    pub value: String,
-}
-
-impl std::str::FromStr for NodeSelector {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts = s.split('=').collect::<Vec<_>>();
-
-        if parts.len() != 2 {
-            return Err(());
-        }
-
-        Ok(NodeSelector {
-            key: parts[0].to_string(),
-            value: parts[1].to_string(),
-        })
-    }
-}
-
-/// A taint.
-#[derive(Clone)]
-pub struct Taint {
-    /// The taint key.
-    pub key: String,
-    /// The taint value.
-    pub value: String,
-    /// The taint effect (e.g., "NoSchedule").
-    pub effect: String,
-}
-
-impl std::str::FromStr for Taint {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts = s.split(':').collect::<Vec<_>>();
-
-        if parts.len() != 2 {
-            return Err(());
-        }
-
-        let key_value: Vec<&str> = parts[0].split('=').collect();
-        if key_value.len() != 2 {
-            return Err(());
-        }
-
-        Ok(Taint {
-            key: key_value[0].to_string(),
-            value: key_value[1].to_string(),
-            effect: parts[1].to_string(),
-        })
-    }
-}
-
-/// Preemptible task configuration within the orchestrator.
-#[derive(Clone)]
-pub struct PreemptibleConfig {
-    /// The node selector to apply to preemptible tasks.
-    node_selector: NodeSelector,
-    /// The taint to apply to preemptible tasks.
-    taint: Taint,
-}
-
-impl PreemptibleConfig {
-    /// Creates a new `PreemptibleConfig`, validating the inputs.
-    pub fn new(node_selector: String, taint: String) -> Result<Self> {
-        let node_selector = node_selector
-            .parse::<NodeSelector>()
-            .or_else(|_| bail!("invalid node selector: `{}`", node_selector))?;
-
-        let taint = taint
-            .parse::<Taint>()
-            .or_else(|_| bail!("invalid taint: `{}`", taint))?;
-
-        Ok(Self {
-            node_selector,
-            taint,
-        })
-    }
-
-    /// Gets the node selector.
-    fn node_selector(&self) -> &NodeSelector {
-        &self.node_selector
-    }
-
-    /// Gets the taint.
-    fn taint(&self) -> &Taint {
-        &self.taint
-    }
-}
-
 /// Implements the task orchestrator.
-#[derive(Clone)]
 pub struct TaskOrchestrator {
     /// The id (pod name) of the orchestrator.
     id: String,
     /// The planetary database used by the orchestrator.
     database: Arc<dyn Database>,
-    /// The namespace to use for K8S resources relating to tasks.
-    tasks_namespace: Option<String>,
-    /// The K8S pods API.
-    pods: Arc<Api<Pod>>,
-    /// The K8S persistent volume claim API.
-    pvc: Arc<Api<PersistentVolumeClaim>>,
-    /// The storage class name to use for persistent volume claims.
-    storage_class: Option<String>,
-    /// Information about the transporter to use.
-    transporter: TransporterInfo,
-    /// Configuration for preemptible instance scheduling.
-    preemptible_config: Option<PreemptibleConfig>,
+    /// The Kubernetes client.
+    client: Client,
+    /// Used to discover available resource types on the cluster.
+    discovery: Discovery,
+    /// The templates for creating Kubernetes resources.
+    templates: Tera,
+    /// The task Kubernetes resource namespace.
+    tasks_namespace: String,
 }
 
 impl TaskOrchestrator {
     /// Constructs a new task orchestrator.
     pub async fn new(
         database: Arc<dyn Database>,
-        id: String,
-        tasks_namespace: Option<String>,
-        storage_class: Option<String>,
-        transporter: TransporterInfo,
-        preemptible_config: Option<PreemptibleConfig>,
+        id: impl Into<String>,
+        templates_dir: impl Into<PathBuf>,
+        tasks_namespace: impl Into<String>,
     ) -> Result<Self> {
-        let ns = tasks_namespace.as_deref().unwrap_or(TASKS_NAMESPACE);
-
         let client = Client::try_default()
             .await
             .context("failed to get default Kubernetes client")?;
 
-        let pods = Arc::new(Api::namespaced(client.clone(), ns));
-        let pvc = Arc::new(Api::namespaced(client, ns));
+        let discovery = Discovery::new(client.clone())
+            .run_aggregated()
+            .await
+            .context("failed to perform cluster resource discovery")?;
 
-        if preemptible_config.is_some() {
-            info!("preemptible task scheduling is enabled");
+        let templates_dir = templates_dir.into().join("**/*");
+
+        let templates = Tera::new(templates_dir.to_str().with_context(|| {
+            format!(
+                "templates directory `{path}` is not valid UTF-8",
+                path = templates_dir.display()
+            )
+        })?)?;
+
+        if !templates.get_template_names().any(|n| n == TEMPLATE_NAME) {
+            bail!(
+                "templates directory `{path}` does not contain a template named `{TEMPLATE_NAME}`",
+                path = templates_dir.display()
+            );
         }
 
         Ok(Self {
-            id,
+            id: id.into(),
             database,
-            tasks_namespace,
-            pods,
-            pvc,
-            storage_class,
-            transporter,
-            preemptible_config,
+            client,
+            discovery,
+            templates,
+            tasks_namespace: tasks_namespace.into(),
         })
     }
 
@@ -668,9 +687,6 @@ impl TaskOrchestrator {
                 )
                 .await?;
 
-            // Create the storage PVC
-            self.create_storage_pvc(&task).await?;
-
             // Serialize the task's inputs
             serialize_items(
                 inputs_file_path(tes_id),
@@ -683,8 +699,42 @@ impl TaskOrchestrator {
                 task.outputs.as_deref().unwrap_or_default(),
             )?;
 
-            // Create the task pod
-            self.create_task_pod(&task).await
+            let resources = self
+                .templates
+                .render(TEMPLATE_NAME, &create_context(&task)?)
+                .context("failed to render task resource template")?;
+
+            // Deserialize and create an API for each object before applying them
+            let mut has_pod = false;
+            let objects: Vec<_> = serde_yaml_ng::Deserializer::from_str(&resources)
+                .map(|de| self.deserialize_object(tes_id, &mut has_pod, de))
+                .collect::<Result<_>>()?;
+
+            if !has_pod {
+                bail!("task resource template did not define a pod for the task");
+            }
+
+            // Create the task's resources from the template
+            for (resource, capabilities, object) in objects {
+                let api = if capabilities.scope == Scope::Cluster {
+                    Api::all_with(self.client.clone(), &resource)
+                } else {
+                    Api::namespaced_with(self.client.clone(), &self.tasks_namespace, &resource)
+                };
+
+                api.create(&PostParams::default(), &object)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to create `{kind}` ({api}) task resource named `{name}`",
+                            name = object.name().expect("object should have a name"),
+                            kind = resource.kind,
+                            api = resource.api_version
+                        )
+                    })?;
+            }
+
+            Ok(())
         };
 
         if let Err(e) = start.await {
@@ -704,9 +754,67 @@ impl TaskOrchestrator {
                     None,
                 )
                 .await;
-
-            self.mark_gc_ready(tes_id).await;
         }
+    }
+
+    /// Deserializes a Kubernetes object and returns its resolved API resources
+    /// and capabilities.
+    fn deserialize_object(
+        &self,
+        tes_id: &str,
+        has_pod: &mut bool,
+        de: serde_yaml_ng::Deserializer<'_>,
+    ) -> Result<(ApiResource, ApiCapabilities, DynamicObject)> {
+        let mut object = DynamicObject::deserialize(de)
+            .context("failed to deserialize task resource template")?;
+
+        let name = object
+            .name()
+            .context("task template contains a resource that has no name")?;
+
+        let meta = object.types.as_ref().with_context(|| {
+            format!("task resource `{name}` does not specify an object API version and kind")
+        })?;
+
+        let gvk = GroupVersionKind::try_from(meta).with_context(|| {
+            format!(
+                "task resource `{name}` has invalid kind: `{kind}` ({api})",
+                kind = meta.kind,
+                api = meta.api_version
+            )
+        })?;
+
+        if gvk.version == "v1" && gvk.kind == "Pod" {
+            if *has_pod {
+                bail!("task resource template defines more then one pod for the task");
+            }
+
+            // Set the orchestrator label for the task pod
+            let labels = object.metadata.labels.get_or_insert_default();
+            labels.insert(ORCHESTRATOR_LABEL.to_string(), self.id.clone());
+            *has_pod = true;
+        }
+
+        // Set the task label for the object
+        let labels = object.metadata.labels.get_or_insert_default();
+        labels.insert(TASK_LABEL.to_string(), tes_id.to_string());
+
+        let (resource, capabilities) = self.discovery.resolve_gvk(&gvk).with_context(|| {
+            format!(
+                "task resource `{name}` has unknown resource kind `{kind}` ({api})",
+                name = object.name().expect("object should have a name"),
+                kind = meta.kind,
+                api = meta.api_version
+            )
+        })?;
+
+        if capabilities.scope == Scope::Cluster {
+            object.metadata.namespace = None;
+        } else {
+            object.metadata.namespace = Some(self.tasks_namespace.clone());
+        }
+
+        Ok((resource, capabilities, object))
     }
 
     /// Cancels the given task.
@@ -714,20 +822,25 @@ impl TaskOrchestrator {
         debug!("task `{tes_id}` is canceling");
 
         let cancel = async {
-            // Get the pod information so we can record the terminated containers as it was
-            // canceled.
+            let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.tasks_namespace);
+
+            // Get the pod information so we can record the terminated containers at the
+            // time it was canceled.
             let pod = Retry::spawn_notify(
                 retry_durations(),
-                || async { self.pods.get_opt(tes_id).await.map_err(into_retry_error) },
+                || async {
+                    pods.list(&ListParams::default().labels(&format!("{TASK_LABEL}={tes_id}")))
+                        .await
+                        .map_err(into_retry_error)
+                },
                 notify_retry,
             )
             .await?;
 
             let containers = pod
-                .as_ref()
+                .items
+                .first()
                 .map(|p| self.get_terminated_containers(p).boxed());
-
-            self.mark_gc_ready(tes_id).await;
 
             if self
                 .database
@@ -740,6 +853,17 @@ impl TaskOrchestrator {
                 )
                 .await?
             {
+                // Immediately attempt to stop the pod upon cancellation (don't wait for the
+                // monitor)
+                if let Some(pod) = pod.items.first() {
+                    let _ = pods
+                        .delete(
+                            &pod.name().expect("pod should have a name"),
+                            &DeleteParams::default().grace_period(0),
+                        )
+                        .await;
+                }
+
                 debug!("task `{tes_id}` has been canceled");
             }
 
@@ -765,8 +889,6 @@ impl TaskOrchestrator {
                     None,
                 )
                 .await;
-
-            self.mark_gc_ready(tes_id).await;
         }
     }
 
@@ -774,542 +896,34 @@ impl TaskOrchestrator {
     pub async fn adopt_pod(&self, name: &str) -> OrchestrationResult<()> {
         debug!("adopting task pod `{name}`");
 
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.tasks_namespace);
+
         // Patch the pod's orchestrator label to be this orchestrator
         Retry::spawn_notify(
             retry_durations(),
             || async {
-                self.pods
-                    .patch(
-                        name,
-                        &PatchParams::default(),
-                        &Patch::Merge(Pod {
-                            metadata: ObjectMeta {
-                                labels: Some(BTreeMap::from_iter([(
-                                    ORCHESTRATOR_LABEL.to_string(),
-                                    self.id.clone(),
-                                )])),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                    .map_err(into_retry_error)
-            },
-            notify_retry,
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    /// Creates a persistent volume claim for a task's storage.
-    async fn create_storage_pvc(&self, task: &Task) -> OrchestrationResult<()> {
-        let tes_id = task.id.as_ref().expect("task should have id");
-
-        debug!("initializing storage for task `{tes_id}`");
-
-        Retry::spawn_notify(
-            retry_durations(),
-            || async {
-                self.pvc
-                    .create(
-                        &PostParams::default(),
-                        &PersistentVolumeClaim {
-                            metadata: ObjectMeta {
-                                name: Some(tes_id.clone()),
-                                namespace: Some(
-                                    self.tasks_namespace
-                                        .as_deref()
-                                        .unwrap_or(TASKS_NAMESPACE)
-                                        .into(),
-                                ),
-                                ..Default::default()
-                            },
-                            spec: Some(PersistentVolumeClaimSpec {
-                                access_modes: Some(vec!["ReadWriteOnce".into()]),
-                                resources: Some(VolumeResourceRequirements {
-                                    limits: None,
-                                    requests: Some(BTreeMap::from_iter([(
-                                        K8S_KEY_STORAGE.to_string(),
-                                        Quantity(format!(
-                                            "{disk}G",
-                                            disk = task
-                                                .resources
-                                                .as_ref()
-                                                .and_then(|r| r.disk_gb)
-                                                .unwrap_or(0.0)
-                                                .max(DEFAULT_STORAGE_SIZE)
-                                        )),
-                                    )])),
-                                }),
-                                storage_class_name: self.storage_class.clone(),
-                                ..Default::default()
-                            }),
+                pods.patch(
+                    name,
+                    &PatchParams::default(),
+                    &Patch::Merge(Pod {
+                        metadata: ObjectMeta {
+                            labels: Some(BTreeMap::from_iter([(
+                                ORCHESTRATOR_LABEL.to_string(),
+                                self.id.clone(),
+                            )])),
                             ..Default::default()
                         },
-                    )
-                    .await
-                    .map_err(into_retry_error)
-            },
-            notify_retry,
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    /// Creates the pod for the task.
-    async fn create_task_pod(&self, task: &Task) -> OrchestrationResult<()> {
-        let tes_id = task.id.as_ref().expect("task should have id");
-
-        // The task will use a pod that has init containers for inputs and every
-        // executor
-        let mut init_containers = Vec::with_capacity(task.executors.len() + 1);
-        init_containers.push(Container {
-            name: format_container_name(ContainerKind::Inputs, None),
-            image: Some(
-                self.transporter
-                    .image
-                    .as_deref()
-                    .unwrap_or(DEFAULT_TRANSPORTER_IMAGE)
-                    .into(),
-            ),
-            args: Some(vec![
-                "-v".into(),
-                "--mode".into(),
-                "inputs".into(),
-                "--orchestrator-dir".into(),
-                ORCHESTRATOR_MOUNT.into(),
-                "--inputs-dir".into(),
-                TASK_INPUTS_MOUNT.into(),
-                "--outputs-dir".into(),
-                TASK_OUTPUTS_MOUNT.into(),
-                tes_id.into(),
-            ]),
-            env_from: Some(vec![
-                EnvFromSource {
-                    secret_ref: Some(SecretEnvSource {
-                        name: AZURE_STORAGE_CREDENTIALS_SECRET.into(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                },
-                EnvFromSource {
-                    secret_ref: Some(SecretEnvSource {
-                        name: AWS_S3_CREDENTIALS_SECRET.into(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                },
-                EnvFromSource {
-                    secret_ref: Some(SecretEnvSource {
-                        name: GOOGLE_STORAGE_CREDENTIALS_SECRET.into(),
-                        optional: Some(true),
-                    }),
-                    ..Default::default()
-                },
-            ]),
-            env: Some(vec![EnvVar {
-                name: TRANSPORTER_ORCHESTRATOR_API_KEY.into(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: ORCHESTRATOR_AUTH_SECRET_NAME.into(),
-                        key: ORCHESTRATOR_AUTH_SECRET_KEY.into(),
                         ..Default::default()
                     }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }]),
-            volume_mounts: Some(vec![
-                VolumeMount {
-                    name: STORAGE_VOLUME_NAME.into(),
-                    mount_path: TASK_INPUTS_MOUNT.into(),
-                    sub_path: Some("inputs".into()),
-                    ..Default::default()
-                },
-                VolumeMount {
-                    name: STORAGE_VOLUME_NAME.into(),
-                    mount_path: TASK_OUTPUTS_MOUNT.into(),
-                    sub_path: Some("outputs".into()),
-                    ..Default::default()
-                },
-                VolumeMount {
-                    name: ORCHESTRATOR_PVC_NAME.into(),
-                    mount_path: ORCHESTRATOR_MOUNT.into(),
-                    ..Default::default()
-                },
-            ]),
-            resources: Some(convert_resources(&Resources {
-                cpu_cores: Some(self.transporter.cpu.unwrap_or(DEFAULT_TRANSPORTER_CPU)),
-                ram_gb: Some(
-                    self.transporter
-                        .memory
-                        .unwrap_or(DEFAULT_TRANSPORTER_MEMORY),
-                ),
-                ..Default::default()
-            })),
-            ..Default::default()
-        });
-
-        for i in 0..task.executors.len() {
-            init_containers.push(Self::create_executor_container_spec(task, i)?);
-        }
-
-        let is_preemptible = task
-            .resources
-            .as_ref()
-            .and_then(|r| r.preemptible)
-            .unwrap_or(false);
-
-        let (node_selector, tolerations) = if is_preemptible {
-            if let Some(preemptible_config) = &self.preemptible_config {
-                let selector = preemptible_config.node_selector();
-                let taint = preemptible_config.taint();
-
-                let mut node_selector = BTreeMap::new();
-                node_selector.insert(selector.key.clone(), selector.value.clone());
-
-                (
-                    Some(node_selector),
-                    Some(vec![Toleration {
-                        key: Some(taint.key.clone()),
-                        operator: Some(TOLERATION_OPERATOR_EQUAL.to_string()),
-                        value: Some(taint.value.clone()),
-                        effect: Some(taint.effect.clone()),
-                        ..Default::default()
-                    }]),
                 )
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
-
-        let pod = Pod {
-            metadata: ObjectMeta {
-                namespace: Some(
-                    self.tasks_namespace
-                        .as_deref()
-                        .unwrap_or(TASKS_NAMESPACE)
-                        .into(),
-                ),
-                name: Some(tes_id.clone()),
-                labels: Some([(ORCHESTRATOR_LABEL.to_string(), self.id.clone())].into()),
-                ..Default::default()
-            },
-            spec: Some(PodSpec {
-                init_containers: Some(init_containers),
-                node_selector,
-                tolerations,
-                containers: vec![Container {
-                    name: format_container_name(ContainerKind::Outputs, None),
-                    image: Some(
-                        self.transporter
-                            .image
-                            .as_deref()
-                            .unwrap_or(DEFAULT_TRANSPORTER_IMAGE)
-                            .into(),
-                    ),
-                    args: Some(vec![
-                        "-v".into(),
-                        "--mode".into(),
-                        "outputs".into(),
-                        "--orchestrator-dir".into(),
-                        ORCHESTRATOR_MOUNT.into(),
-                        "--outputs-dir".into(),
-                        TASK_OUTPUTS_MOUNT.into(),
-                        tes_id.into(),
-                    ]),
-                    env_from: Some(vec![
-                        EnvFromSource {
-                            secret_ref: Some(SecretEnvSource {
-                                name: AZURE_STORAGE_CREDENTIALS_SECRET.into(),
-                                optional: Some(true),
-                            }),
-                            ..Default::default()
-                        },
-                        EnvFromSource {
-                            secret_ref: Some(SecretEnvSource {
-                                name: AWS_S3_CREDENTIALS_SECRET.into(),
-                                optional: Some(true),
-                            }),
-                            ..Default::default()
-                        },
-                        EnvFromSource {
-                            secret_ref: Some(SecretEnvSource {
-                                name: GOOGLE_STORAGE_CREDENTIALS_SECRET.into(),
-                                optional: Some(true),
-                            }),
-                            ..Default::default()
-                        },
-                    ]),
-                    env: Some(vec![EnvVar {
-                        name: TRANSPORTER_ORCHESTRATOR_API_KEY.into(),
-                        value_from: Some(EnvVarSource {
-                            secret_key_ref: Some(SecretKeySelector {
-                                name: ORCHESTRATOR_AUTH_SECRET_NAME.into(),
-                                key: ORCHESTRATOR_AUTH_SECRET_KEY.into(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }]),
-                    volume_mounts: Some(vec![
-                        VolumeMount {
-                            name: STORAGE_VOLUME_NAME.into(),
-                            mount_path: TASK_OUTPUTS_MOUNT.into(),
-                            sub_path: Some("outputs".into()),
-                            ..Default::default()
-                        },
-                        VolumeMount {
-                            name: ORCHESTRATOR_PVC_NAME.into(),
-                            mount_path: ORCHESTRATOR_MOUNT.into(),
-                            ..Default::default()
-                        },
-                    ]),
-                    resources: Some(convert_resources(&Resources {
-                        cpu_cores: Some(self.transporter.cpu.unwrap_or(DEFAULT_TRANSPORTER_CPU)),
-                        ram_gb: Some(
-                            self.transporter
-                                .memory
-                                .unwrap_or(DEFAULT_TRANSPORTER_MEMORY),
-                        ),
-                        ..Default::default()
-                    })),
-                    ..Default::default()
-                }],
-                restart_policy: Some("Never".to_string()),
-                volumes: Some(vec![
-                    Volume {
-                        name: STORAGE_VOLUME_NAME.into(),
-                        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                            claim_name: tes_id.clone(),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    Volume {
-                        name: ORCHESTRATOR_PVC_NAME.into(),
-                        persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
-                            claim_name: ORCHESTRATOR_PVC_NAME.into(),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                ]),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        Retry::spawn_notify(
-            retry_durations(),
-            || async {
-                self.pods
-                    .create(&PostParams::default(), &pod)
-                    .await
-                    .map_err(into_retry_error)
+                .await
+                .map_err(into_retry_error)
             },
             notify_retry,
         )
         .await?;
 
         Ok(())
-    }
-
-    /// Creates a container specification for a task executor of the given
-    /// index.
-    fn create_executor_container_spec(
-        task: &Task,
-        executor_index: usize,
-    ) -> OrchestrationResult<Container> {
-        let executor = &task.executors[executor_index];
-
-        // Format the executor script
-        let script =
-            Self::format_executor_script(executor, executor.ignore_error.unwrap_or(false))?;
-
-        // Create volume mounts for the inputs, outputs, and requested volumes
-        let volume_mounts = task
-            .inputs
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .enumerate()
-            .map(|(i, input)| {
-                Ok(VolumeMount {
-                    mount_path: input.path.clone(),
-                    name: STORAGE_VOLUME_NAME.into(),
-                    read_only: Some(true),
-                    recursive_read_only: Some("IfPossible".into()),
-                    sub_path: Some(format!("inputs/{i}")),
-                    ..Default::default()
-                })
-            })
-            .chain(
-                task.outputs
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, output)| {
-                        Ok(VolumeMount {
-                            mount_path: output
-                                .path_prefix
-                                .as_deref()
-                                .unwrap_or(&output.path)
-                                .to_string(),
-                            name: STORAGE_VOLUME_NAME.into(),
-                            read_only: Some(false),
-                            sub_path: Some(format!("outputs/{i}")),
-                            ..Default::default()
-                        })
-                    }),
-            )
-            .chain(
-                task.volumes
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, volume)| {
-                        Ok(VolumeMount {
-                            mount_path: volume.clone(),
-                            name: STORAGE_VOLUME_NAME.into(),
-                            read_only: Some(false),
-                            sub_path: Some(format!("volumes/{i}")),
-                            ..Default::default()
-                        })
-                    }),
-            )
-            .collect::<Result<_>>()?;
-
-        Ok(Container {
-            name: format_container_name(ContainerKind::Executor, Some(executor_index)),
-            image: Some(executor.image.clone()),
-            args: Some(vec!["-c".to_string(), script]),
-            command: Some(vec!["/bin/sh".to_string()]),
-            env: executor.env.as_ref().map(|env| {
-                env.iter()
-                    .map(|(k, v)| EnvVar {
-                        name: k.clone(),
-                        value: Some(v.clone()),
-                        ..Default::default()
-                    })
-                    .collect()
-            }),
-            resources: task.resources.as_ref().map(convert_resources),
-            volume_mounts: Some(volume_mounts),
-            working_dir: executor.workdir.clone(),
-            ..Default::default()
-        })
-    }
-
-    /// Formats an executor script into a single line that can be used with `sh
-    /// -c`.
-    ///
-    /// It is expected that the arguments are already shell quoted.
-    fn format_executor_script(executor: &Executor, ignore_error: bool) -> Result<String> {
-        // Shell quote the stdin
-        let stdin = executor
-            .stdin
-            .as_ref()
-            .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stdin path `{p}`")))
-            .transpose()?;
-
-        // Shell quote the stdout
-        let stdout = executor
-            .stdout
-            .as_ref()
-            .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stdout path `{p}`")))
-            .transpose()?;
-
-        // Shell quote the stderr
-        let stderr = executor
-            .stderr
-            .as_ref()
-            .map(|p| shlex::try_quote(p).with_context(|| format!("invalid stderr path `{p}`")))
-            .transpose()?;
-
-        // Shell join the command twice as we're going to nest its execution in yet
-        // another `sh -c`.
-        let command = shlex::try_join(executor.command.iter().map(AsRef::as_ref))
-            .map_err(|_| Error::System("executor command was invalid".into()))?;
-        let command = shlex::try_join([command.as_str()])
-            .map_err(|_| Error::System("executor command was invalid".into()))?;
-
-        let mut script = String::new();
-        script.push_str("set -eu;");
-
-        // Add check for stdin file existence
-        if let Some(stdin) = &stdin {
-            script.push_str("! [ -f ");
-            script.push_str(stdin);
-            script.push_str(r#" ] && >&2 echo "executor stdin file "#);
-            script.push_str(stdin);
-            script.push_str(r#" does not exist" && exit 1;"#);
-        }
-
-        // Set up stdout redirection
-        // We use tee so that both Kubernetes and the requested stdout file have the
-        // output
-        if let Some(stdout) = &stdout {
-            script.push_str(r#"out="${TMPDIR:-/tmp}/stdout";"#);
-            script.push_str(r#"mkfifo "$out";"#);
-            script.push_str("tee -a ");
-            script.push_str(stdout);
-            script.push_str(r#" < "$out" &"#);
-        }
-
-        // Set up stderr redirection
-        // We use tee so that both Kubernetes and the requested stderr file have the
-        // output
-        if let Some(stderr) = &stderr {
-            script.push_str(r#"err="${TMPDIR:-/tmp}/stderr";"#);
-            script.push_str(r#"mkfifo "$err";"#);
-            script.push_str("tee -a ");
-            script.push_str(stderr);
-            script.push_str(r#" < "$err" &"#);
-        }
-
-        // Add the command in a nested `sh -c` invocation in case it exits
-        write!(&mut script, "sh -c {command}").unwrap();
-
-        // Redirect stdout
-        if stdout.is_some() {
-            script.push_str(" >\"$out\"");
-        }
-
-        // Redirect stderr
-        if stderr.is_some() {
-            script.push_str(" 2>\"$err\"");
-        }
-
-        // Redirect stdin
-        if let Some(stdin) = stdin {
-            script.push_str(" < ");
-            script.push_str(&stdin);
-        }
-
-        write!(
-            &mut script,
-            " || CODE=$?; echo \"{EXIT_PREFIX}${{CODE:-0}}\";"
-        )
-        .unwrap();
-
-        // If not ignoring error, exit on non-zero
-        if !ignore_error {
-            script.push_str("if [[ ${CODE:-0} -ne 0 ]]; then exit $CODE; fi;");
-        }
-
-        // We must wait for the background tee jobs to complete, otherwise buffers might
-        // not be flushed
-        script.push_str("wait $(jobs -p) 2>&1 >/dev/null");
-        Ok(script)
     }
 
     /// Updates a TES task based on the given pod status.
@@ -1411,7 +1025,6 @@ impl TaskOrchestrator {
             debug!("task `{tes_id}` has completed");
         }
 
-        self.mark_gc_ready(tes_id).await;
         Ok(())
     }
 
@@ -1440,7 +1053,6 @@ impl TaskOrchestrator {
             debug!("executor {index} of task `{tes_id}` has failed");
         }
 
-        self.mark_gc_ready(tes_id).await;
         Ok(())
     }
 
@@ -1464,7 +1076,6 @@ impl TaskOrchestrator {
             debug!("task `{tes_id}` has failed due to a system error");
         }
 
-        self.mark_gc_ready(tes_id).await;
         Ok(())
     }
 
@@ -1493,7 +1104,6 @@ impl TaskOrchestrator {
             .await;
         }
 
-        self.mark_gc_ready(tes_id).await;
         Ok(())
     }
 
@@ -1518,7 +1128,6 @@ impl TaskOrchestrator {
             debug!("task `{tes_id}` failed to pull image: {message}");
         }
 
-        self.mark_gc_ready(tes_id).await;
         Ok(())
     }
 
@@ -1553,8 +1162,11 @@ impl TaskOrchestrator {
         &self,
         pod: &'a Pod,
     ) -> anyhow::Result<Vec<TerminatedContainer<'a>>> {
-        let tes_id = pod.tes_id()?;
+        let name = pod.name().context("pod is missing a name")?;
+        let ns = pod.namespace().context("pod is missing a namespace")?;
         let status = pod.status.as_ref().context("pod has no status")?;
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &ns);
 
         let init_statuses = status
             .init_container_statuses
@@ -1582,10 +1194,9 @@ impl TaskOrchestrator {
             let mut output = Retry::spawn_notify(
                 retry_durations(),
                 || async {
-                    match self
-                        .pods
+                    match pods
                         .logs(
-                            tes_id,
+                            &name,
                             &LogParams {
                                 container: Some(format_container_name(kind, executor_index)),
                                 tail_lines: match kind {
@@ -1664,99 +1275,6 @@ impl TaskOrchestrator {
         Ok(containers)
     }
 
-    /// Marks Kubernetes resources related to a task as ready for GC.
-    async fn mark_gc_ready(&self, tes_id: &str) {
-        if let Err(e) = Retry::spawn_notify(
-            retry_durations(),
-            || async {
-                match self
-                    .pods
-                    .patch(
-                        tes_id,
-                        &PatchParams::default(),
-                        &Patch::Merge(Pod {
-                            metadata: ObjectMeta {
-                                labels: Some(BTreeMap::from_iter([(
-                                    GC_LABEL.to_string(),
-                                    "true".to_string(),
-                                )])),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                {
-                    Ok(_) => Ok(()),
-                    Err(kube::Error::Api(s)) if s.is_not_found() => Ok(()),
-                    Err(e) => Err(into_retry_error(e)),
-                }
-            },
-            notify_retry,
-        )
-        .await
-        {
-            self.log_error(
-                Some(tes_id),
-                &format!("failed to mark pod `{tes_id}` for GC: {e:#}"),
-            )
-            .await;
-        }
-
-        // Add a label to the PVC to mark it ready for GC
-        if let Err(e) = Retry::spawn_notify(
-            retry_durations(),
-            || async {
-                match self
-                    .pvc
-                    .patch(
-                        tes_id,
-                        &PatchParams::default(),
-                        &Patch::Merge(PersistentVolumeClaim {
-                            metadata: ObjectMeta {
-                                labels: Some(BTreeMap::from_iter([(
-                                    GC_LABEL.to_string(),
-                                    "true".to_string(),
-                                )])),
-                                ..Default::default()
-                            },
-                            ..Default::default()
-                        }),
-                    )
-                    .await
-                {
-                    Ok(_) => Ok(()),
-                    Err(kube::Error::Api(s)) if s.is_not_found() => Ok(()),
-                    Err(e) => Err(into_retry_error(e)),
-                }
-            },
-            notify_retry,
-        )
-        .await
-        {
-            self.log_error(
-                Some(tes_id),
-                &format!("failed to mark PVC `{tes_id}` for GC: {e:#}"),
-            )
-            .await;
-        }
-
-        // Finally, delete the task's directory on the shared volume
-        let task_dir = task_directory_path(tes_id);
-        if task_dir.is_dir()
-            && let Err(e) = fs::remove_dir_all(&task_dir)
-        {
-            self.log_error(
-                Some(tes_id),
-                &format!(
-                    "failed to delete task directory `{task_dir}`: {e}",
-                    task_dir = task_dir.display()
-                ),
-            )
-            .await;
-        }
-    }
-
     /// Logs an error with the database.
     ///
     /// The error is also emitted to stderr.
@@ -1766,7 +1284,7 @@ impl TaskOrchestrator {
     }
 }
 
-/// Implements a monitor for Kubernetes pod events and orphaned pods.
+/// Implements a monitor for Kubernetes pod events.
 pub struct Monitor {
     /// The cancellation token for shutting down the monitor.
     shutdown: CancellationToken,
@@ -1793,7 +1311,10 @@ impl Monitor {
         info!("cluster event processing has started");
 
         let stream = watcher(
-            state.orchestrator.pods.as_ref().clone(),
+            Api::<Pod>::namespaced(
+                state.orchestrator.client.clone(),
+                &state.orchestrator.tasks_namespace,
+            ),
             watcher::Config {
                 label_selector: Some(format!(
                     "{ORCHESTRATOR_LABEL}={id}",
@@ -1814,15 +1335,6 @@ impl Monitor {
                 event = stream.next() => {
                     match event {
                         Some(Ok(Event::Apply(pod))) => {
-                            // If the pod is marked for GC, ignore it
-                            if pod
-                                .labels()
-                                .get(GC_LABEL)
-                                .is_some()
-                            {
-                                continue;
-                            }
-
                             let state = state.clone();
                             tokio::spawn(async move {
                                 let Ok(tes_id) = pod.tes_id() else { return };
@@ -1848,22 +1360,12 @@ impl Monitor {
                                             None,
                                         )
                                         .await;
-
-                                    state.orchestrator.mark_gc_ready(tes_id).await;
                                 }
                             });
                         }
                         Some(Ok(Event::Delete(pod))) => {
-                            // If the pod is marked for GC, ignore it
-                            if pod
-                                .labels()
-                                .get(GC_LABEL)
-                                .is_some()
-                            {
-                                continue;
-                            }
-
-                            // Otherwise, treat this as a preemption
+                            // Treat a deleted pod as preempted
+                            // If the associated task is already in a terminal state, this is a no-op
                             let state = state.clone();
                             tokio::spawn(async move {
                                 let Ok(tes_id) = pod.tes_id() else { return };
@@ -1890,8 +1392,6 @@ impl Monitor {
                                         )
                                         .await;
                                 }
-
-                                state.orchestrator.mark_gc_ready(tes_id).await;
                             });
                         }
                         Some(Ok(Event::Init | Event::InitDone | Event::InitApply(_))) => continue,
@@ -1910,33 +1410,5 @@ impl Monitor {
         }
 
         info!("cluster event processing has shut down");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn node_selector() {
-        let valid = "kubernetes.azure.com/scalesetpriority=spot";
-        let result = valid.parse::<NodeSelector>().unwrap();
-        assert_eq!(result.key, "kubernetes.azure.com/scalesetpriority");
-        assert_eq!(result.value, "spot");
-
-        let invalid = "noequalsign";
-        assert!(invalid.parse::<NodeSelector>().is_err());
-    }
-
-    #[test]
-    fn taint() {
-        let valid = "kubernetes.azure.com/scalesetpriority=spot:NoSchedule";
-        let result = valid.parse::<Taint>().unwrap();
-        assert_eq!(result.key, "kubernetes.azure.com/scalesetpriority");
-        assert_eq!(result.value, "spot");
-        assert_eq!(result.effect, "NoSchedule");
-
-        let invalid = "key=value";
-        assert!(invalid.parse::<Taint>().is_err());
     }
 }

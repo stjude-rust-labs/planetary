@@ -1,0 +1,5 @@
+# Extra Kubernetes resources to deploy with Planetary
+{{- range .Values.extra }}
+---
+{{ include "render" (dict "value" . "context" $) }}
+{{- end }}

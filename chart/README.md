@@ -14,9 +14,9 @@ It is up to the cluster administrator to specify the manner of this shared
 storage via Persistent Volume Claims (PVC).
 
 Both the orchestrator and the task pods depend on the existence of an
-`orchestrator-storage` PVC in their respective namespaces.
+`orchestrator-storage` volume.
 
-The volume referenced by the PVCs must use shared storage like a singular NFS
+The volume referenced by the pods must use shared storage like a singular NFS
 share or the same cloud storage bucket used as a file system.
 
 After the `planetary` chart is installed, the orchestrator service will not be

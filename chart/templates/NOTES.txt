@@ -7,19 +7,7 @@
      kubectl get jobs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=migration
      kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/component=migration --tail=-1
 
-2. Create an `orchestrator-storage` Persistent Volume Claim (PVC) in the `{{ .Release.Namespace }}` namespace.
-
-   This PVC is required for the orchestrator service to be scheduled.
-
-   The volume referenced by the PVC should share the same storage as the volume referenced in the `{{ .Values.tasks.namespace }}` namespace.
-
-3. Create an `orchestrator-storage` Persistent Volume Claim (PVC) in the `{{ .Values.tasks.namespace }}` namespace.
-
-   This PVC is required for task pods to be scheduled.
-
-   The volume referenced by the PVC should share the same storage as the volume referenced in the `{{ .Release.Namespace }}` namespace.
-
-4. Get the API service URL by running these commands:
+2. Get the API service URL by running these commands:
 {{- if contains "NodePort" .Values.api.service.type }}
   export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" svc planetary-api)
   export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")

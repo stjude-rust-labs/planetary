@@ -1,6 +1,7 @@
 //! Implements the Planetary task orchestrator.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,9 +33,7 @@ use tokio_retry2::strategy::MaxInterval;
 use tracing::warn;
 
 use crate::orchestrator::Monitor;
-use crate::orchestrator::PreemptibleConfig;
 use crate::orchestrator::TaskOrchestrator;
-use crate::orchestrator::TransporterInfo;
 
 mod orchestrator;
 
@@ -126,41 +125,13 @@ pub struct Server {
     #[builder(name = "shared_database")]
     database: Arc<dyn Database>,
 
-    /// The Kubernetes storage class to use for tasks.
+    /// The directory containing the Kubernetes resource templates.
     #[builder(into)]
-    storage_class: Option<String>,
+    templates_dir: PathBuf,
 
-    /// The transporter image to use.
-    ///
-    /// Defaults to `stjude-rust-labs/planetary-transporter:latest`.
+    /// The namespace to monitor for task pod events
     #[builder(into)]
-    transporter_image: Option<String>,
-
-    /// The Kubernetes namespace to use for TES task resources.
-    ///
-    /// Defaults to `planetary-tasks`.
-    #[builder(into)]
-    tasks_namespace: Option<String>,
-
-    /// The number of CPU cores to request for transporter pods.
-    ///
-    /// Defaults to `1` CPU core.
-    #[builder(into)]
-    transporter_cpu: Option<i32>,
-
-    /// The amount of memory (in GB) to request for transporter pods.
-    ///
-    /// Defaults to `0.268435455` GB (i.e. 256 MiB).
-    #[builder(into)]
-    transporter_memory: Option<f64>,
-
-    /// The node selector to apply to preemptible tasks.
-    #[builder(into)]
-    preemptible_node_selector: Option<String>,
-
-    /// The taint to apply to preemptible tasks.
-    #[builder(into)]
-    preemptible_taint: Option<String>,
+    tasks_namespace: String,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -185,31 +156,13 @@ impl Server {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        // Build the preemptible config if both fields are present
-        let preemptible_config = match (self.preemptible_node_selector, self.preemptible_taint) {
-            (Some(node_selector), Some(taint)) => {
-                Some(PreemptibleConfig::new(node_selector, taint)?)
-            }
-            (None, None) => None,
-            _ => anyhow::bail!(
-                "preemptive task execution requires both the node selector and taint to be \
-                 configured"
-            ),
-        };
-
         let state = Arc::new(State {
             service_api_key: self.service_api_key,
             orchestrator: TaskOrchestrator::new(
                 self.database,
                 self.pod_name,
+                self.templates_dir,
                 self.tasks_namespace,
-                self.storage_class,
-                TransporterInfo {
-                    image: self.transporter_image,
-                    cpu: self.transporter_cpu,
-                    memory: self.transporter_memory,
-                },
-                preemptible_config,
             )
             .await?,
         });

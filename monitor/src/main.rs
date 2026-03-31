@@ -21,6 +21,9 @@ use url::Url;
 /// The default interval for the monitoring service, in seconds.
 const MONITORING_INTERVAL_SECONDS: u64 = 60;
 
+/// The default interval for keeping task resources, in seconds.
+const KEEP_INTERVAL_SECONDS: u64 = 300;
+
 /// A tool for executing tasks in Kubernetes via the GA4GH TES specification.
 #[derive(Parser)]
 pub struct Args {
@@ -36,11 +39,19 @@ pub struct Args {
     #[command(flatten)]
     verbose: Verbosity<WarnLevel>,
 
-    /// The interval for which the monitor should check the cluster state.
+    /// The interval (in seconds) for which the monitor should check the cluster
+    /// state.
     ///
     /// Defaults to 60 seconds.
     #[clap(long, default_value_t = MONITORING_INTERVAL_SECONDS)]
-    interval: u64,
+    check_interval: u64,
+
+    /// The interval (in seconds) for which the monitor should keep Kubernetes
+    /// resources after a task enters a terminal state.
+    ///
+    /// Defaults to 300 seconds.
+    #[clap(long, default_value_t = KEEP_INTERVAL_SECONDS)]
+    keep_interval: u64,
 
     /// The name of the pod running the service.
     #[clap(long, env)]
@@ -67,17 +78,13 @@ pub struct Args {
     database_name: String,
 
     /// The Kubernetes namespace running the Planetary services.
-    ///
-    /// Defaults to `planetary`
     #[clap(long, env)]
-    planetary_namespace: Option<String>,
+    planetary_namespace: String,
 
     /// The Kubernetes namespace to use for TES tasks created by the Planetary
     /// service.
-    ///
-    /// Defaults to `planetary-tasks`.
     #[clap(long, env)]
-    tasks_namespace: Option<String>,
+    tasks_namespace: String,
 
     /// The Planetary orchestrator service URL to use.
     #[clap(long, env)]
@@ -163,9 +170,10 @@ pub async fn main() -> anyhow::Result<()> {
         .address(&args.address)
         .port(args.port)
         .shared_database(database)
-        .maybe_planetary_namespace(args.planetary_namespace)
-        .maybe_tasks_namespace(args.tasks_namespace)
-        .interval(Duration::from_secs(args.interval))
+        .planetary_namespace(args.planetary_namespace)
+        .tasks_namespace(args.tasks_namespace)
+        .check_interval(Duration::from_secs(args.check_interval))
+        .keep_interval(Duration::from_secs(args.keep_interval))
         .orchestrator_url(args.orchestrator_url)
         .orchestrator_api_key(args.orchestrator_api_key)
         .build()
