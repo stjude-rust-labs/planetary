@@ -1,6 +1,7 @@
 //! Implements the Planetary task monitor.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +41,10 @@ pub struct Server {
     /// The Kubernetes namespace to use for TES task resources.
     #[builder(into)]
     tasks_namespace: String,
+
+    /// The directory containing the Kubernetes resource templates.
+    #[builder(into)]
+    templates_dir: PathBuf,
 
     /// The interval for which the monitor should check the cluster state.
     ///
@@ -100,6 +105,7 @@ impl Server {
                 planetary: self.planetary_namespace,
                 tasks: self.tasks_namespace,
             },
+            self.templates_dir,
             Intervals {
                 check: self.check_interval,
                 keep: self.keep_interval,

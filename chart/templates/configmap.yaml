@@ -93,9 +93,6 @@ data:
           - name: storage
             mountPath: /tmp
             subPath: tmp
-          - name: storage
-            mountPath: {{ `{{ executor.workdir }}` }}
-            subPath: work
           {{ `{%- for input in inputs %}` }}
           - name: storage
             mountPath: {{ `{{ input }}` }}

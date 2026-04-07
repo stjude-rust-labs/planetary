@@ -30,7 +30,6 @@ use kube::Api;
 use kube::Client;
 use kube::Discovery;
 use kube::api::ApiResource;
-use kube::api::DeleteParams;
 use kube::api::DynamicObject;
 use kube::api::GroupVersionKind;
 use kube::api::ListParams;
@@ -93,6 +92,9 @@ const ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
 
 /// The task id label.
 const TASK_LABEL: &str = "planetary/task";
+
+/// The cancellation label used to mark canceled task for garbage collection.
+const CANCELED_LABEL: &str = "planetary/canceled";
 
 /// The mount point for the orchestrator volume.
 ///
@@ -704,7 +706,7 @@ impl TaskOrchestrator {
                 .render(TEMPLATE_NAME, &create_context(&task)?)
                 .context("failed to render task resource template")?;
 
-            // Deserialize and create an API for each object before applying them
+            // Deserialize each object before applying them
             let mut has_pod = false;
             let objects: Vec<_> = serde_yaml_ng::Deserializer::from_str(&resources)
                 .map(|de| self.deserialize_object(tes_id, &mut has_pod, de))
@@ -863,13 +865,22 @@ impl TaskOrchestrator {
                 )
                 .await?
             {
-                // Immediately attempt to stop the pod upon cancellation (don't wait for the
-                // monitor)
+                // Mark the pod as canceled so that the monitor will collect it
                 if let Some(pod) = pod.items.first() {
                     let _ = pods
-                        .delete(
+                        .patch(
                             &pod.name().expect("pod should have a name"),
-                            &DeleteParams::default().grace_period(0),
+                            &PatchParams::default(),
+                            &Patch::Merge(Pod {
+                                metadata: ObjectMeta {
+                                    labels: Some(BTreeMap::from_iter([(
+                                        CANCELED_LABEL.to_string(),
+                                        "true".to_string(),
+                                    )])),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
                         )
                         .await;
                 }

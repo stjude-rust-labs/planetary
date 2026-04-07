@@ -61,10 +61,10 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["list", "deletecollection", "patch"]
+  verbs: ["list", "watch", "delete"]
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
-  verbs: ["deletecollection", "patch"]
+  verbs: ["delete"]
 ---
 # Service account for the monitor
 apiVersion: v1

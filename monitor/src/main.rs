@@ -1,6 +1,7 @@
 //! The `planetary` command line tool.
 
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,6 +86,10 @@ pub struct Args {
     /// service.
     #[clap(long, env)]
     tasks_namespace: String,
+
+    /// The directory containing the Kubernetes resource templates.
+    #[clap(long, env)]
+    templates_dir: PathBuf,
 
     /// The Planetary orchestrator service URL to use.
     #[clap(long, env)]
@@ -172,6 +177,7 @@ pub async fn main() -> anyhow::Result<()> {
         .shared_database(database)
         .planetary_namespace(args.planetary_namespace)
         .tasks_namespace(args.tasks_namespace)
+        .templates_dir(args.templates_dir)
         .check_interval(Duration::from_secs(args.check_interval))
         .keep_interval(Duration::from_secs(args.keep_interval))
         .orchestrator_url(args.orchestrator_url)

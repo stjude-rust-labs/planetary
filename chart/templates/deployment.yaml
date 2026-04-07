@@ -249,6 +249,8 @@ spec:
             value: "{{ .Release.Namespace }}"
           - name: TASKS_NAMESPACE
             value: {{ .Values.tasks.namespace }}
+          - name: TEMPLATES_DIR
+            value: /etc/templates
           - name: ORCHESTRATOR_URL
             value: "http://planetary-orchestrator:{{ .Values.orchestrator.service.port }}"
           - name: ORCHESTRATOR_API_KEY
@@ -259,7 +261,12 @@ spec:
           volumeMounts:
           - name: orchestrator-storage
             mountPath: /mnt/orchestrator
+          - name: templates
+            mountPath: /etc/templates
       volumes:
+      - name: templates
+        configMap:
+          name: templates
       - name: orchestrator-storage
         {{- with .Values.orchestrator.storage }}
         {{- include "render" (dict "value" . "context" $) | nindent 8 }}
