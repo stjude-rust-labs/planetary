@@ -158,17 +158,6 @@ pub trait Database: Send + Sync + 'static {
         tes_id: Option<&str>,
         message: &str,
     ) -> DatabaseResult<()>;
-
-    /// Updates tasks that are ready for garbage collection if:
-    ///
-    /// * The task is in a terminal state (complete, executor error, system
-    ///   error, canceled, or preempted).
-    /// * The task transitioned to the terminal state before the given time.
-    /// * The task hasn't already been collected.
-    ///
-    /// Returns the set of task identifiers that are ready for garbage
-    /// collection.
-    async fn mark_gc_ready_tasks(&self, before: DateTime<Utc>) -> DatabaseResult<Vec<String>>;
 }
 
 /// Formats a log message by including a time stamp.

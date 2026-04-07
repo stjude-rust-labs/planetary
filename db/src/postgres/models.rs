@@ -261,8 +261,6 @@ pub struct BasicTask {
     pub tes_id: String,
     /// The task state.
     pub state: TaskState,
-    /// The last time the state was changed for the task.
-    pub state_update_time: DateTime<Utc>,
     /// The task name.
     pub name: Option<String>,
     /// The task description.
@@ -371,8 +369,6 @@ pub struct FullTask {
     pub tes_id: String,
     /// The task state.
     pub state: TaskState,
-    /// The update time for the task's state.
-    pub state_update_time: DateTime<Utc>,
     /// The task name.
     pub name: Option<String>,
     /// The task description.

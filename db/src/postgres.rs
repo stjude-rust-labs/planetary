@@ -459,7 +459,6 @@ impl Database for PostgresDatabase {
     ) -> DatabaseResult<bool> {
         use diesel::pg::sql_types::Array;
         use diesel::sql_types::Text;
-        use diesel::sql_types::Timestamptz;
         use diesel::*;
         use diesel_async::RunQueryDsl;
         use models::TaskState;
@@ -524,13 +523,11 @@ impl Database for PostgresDatabase {
                     // TODO: currently diesel hasn't released support for the PostgreSQL
                     // `array_cat` function; remove the raw query when diesel supports it
                     let updated: Option<UpdatedTask> = sql_query(
-                        "UPDATE tasks SET state = $1, state_update_time = $3, system_logs = \
-                         array_cat(system_logs, $2) WHERE tes_id = $4 AND state = ANY ($5) \
-                         RETURNING id",
+                        "UPDATE tasks SET state = $1, system_logs = array_cat(system_logs, $2) \
+                         WHERE tes_id = $3 AND state = ANY ($4) RETURNING id",
                     )
                     .bind::<schema::sql_types::TaskState, _>(TaskState::from(state))
                     .bind::<Array<Text>, _>(messages)
-                    .bind::<Timestamptz, _>(Utc::now())
                     .bind::<Text, _>(tes_id)
                     .bind::<Array<schema::sql_types::TaskState>, _>(previous)
                     .get_result(conn)
@@ -648,33 +645,5 @@ impl Database for PostgresDatabase {
 
         transaction.await?;
         Ok(())
-    }
-
-    async fn mark_gc_ready_tasks(&self, before: DateTime<Utc>) -> DatabaseResult<Vec<String>> {
-        use diesel::pg::sql_types::Timestamptz;
-        use diesel::*;
-        use diesel_async::RunQueryDsl;
-        use models::TaskState;
-
-        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
-
-        Ok(diesel::update(schema::tasks::table)
-            .filter(
-                schema::tasks::gc
-                    .eq(false)
-                    .and(schema::tasks::state.eq_any(&[
-                        TaskState::Complete,
-                        TaskState::ExecutorError,
-                        TaskState::SystemError,
-                        TaskState::Canceled,
-                        TaskState::Preempted,
-                    ]))
-                    .and(schema::tasks::state_update_time.le(before.into_sql::<Timestamptz>())),
-            )
-            .set(schema::tasks::gc.eq(true))
-            .returning(schema::tasks::tes_id)
-            .get_results(&mut conn)
-            .await
-            .map_err(Error::Diesel)?)
     }
 }

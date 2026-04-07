@@ -46,7 +46,6 @@ diesel::table! {
         id -> Int4,
         tes_id -> Text,
         state -> TaskState,
-        state_update_time -> Timestamptz,
         name -> Nullable<Text>,
         description -> Nullable<Text>,
         inputs -> Nullable<Jsonb>,
@@ -63,7 +62,6 @@ diesel::table! {
         tags -> Nullable<Jsonb>,
         output_files -> Nullable<Jsonb>,
         system_logs -> Nullable<Array<Nullable<Text>>>,
-        gc -> Nullable<Bool>,
         creation_time -> Timestamptz,
     }
 }

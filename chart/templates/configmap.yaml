@@ -21,6 +21,7 @@ data:
           storage: {{ `{{ disk }}` }}
     ---
     # The pod that executes a task.
+    # There must be exactly one pod for each task.
     apiVersion: v1
     kind: Pod
     metadata:
@@ -37,6 +38,7 @@ data:
           value: "{{ .toleration.value }}""
       {{ `{%- endif %}` }}
       {{- end }}
+      # Task pods are required to have a `Never` restart policy
       restartPolicy: Never
       initContainers:
       # The first init container is responsible for downloading inputs and creating empty outputs to mount

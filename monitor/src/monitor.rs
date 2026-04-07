@@ -22,6 +22,7 @@ use anyhow::Context;
 use anyhow::Result;
 use chrono::Utc;
 use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::jiff::Timestamp;
 use kube::Api;
 use kube::Client;
 use kube::Discovery;
@@ -29,6 +30,7 @@ use kube::ResourceExt;
 use kube::api::DeleteParams;
 use kube::api::DynamicObject;
 use kube::api::ListParams;
+use kube::api::ObjectList;
 use kube::discovery::Scope;
 use kube::runtime::reflector::Lookup;
 use planetary_db::Database;
@@ -224,6 +226,8 @@ impl Monitor {
     ) {
         info!("garbage collector has started");
 
+        let task_pods: Api<Pod> = Api::namespaced(client.clone(), &task_namespace);
+
         let mut interval = tokio::time::interval(intervals.check);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -233,7 +237,7 @@ impl Monitor {
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
                     // Perform a GC
-                    if let Err(e) = Self::collect_resources(database.as_ref(), &client, &discovery, &task_namespace, intervals.keep).await {
+                    if let Err(e) = Self::collect_resources(database.as_ref(), &task_pods, &client, &discovery, &task_namespace, intervals.keep).await {
                         log_error(database.as_ref(), None,  &format!("failed to garbage collect Kubernetes resources: {e:#}")).await;
                     }
                 }
@@ -382,86 +386,147 @@ impl Monitor {
     /// Performs a garbage collection for terminated tasks.
     async fn collect_resources(
         database: &dyn Database,
+        task_pods: &Api<Pod>,
         client: &Client,
         discovery: &Discovery,
         tasks_namespace: &str,
         keep_interval: Duration,
     ) -> Result<()> {
-        // Mark tasks for GC
-        let ids = database
-            .mark_gc_ready_tasks(Utc::now() - keep_interval)
-            .await?;
+        /// The maximum number of tasks to collect per iteration
+        const MAX_TASKS: u32 = 100;
 
-        if ids.is_empty() {
-            return Ok(());
+        /// Helper for mapping a pod to a task id.
+        ///
+        /// If the pod terminated within the keep interval, `None` is returned.
+        ///
+        /// If the pod is missing the task label, `None` is returned.
+        fn map_task_id(pod: &Pod, keep_interval: Duration) -> Option<&str> {
+            let status = pod.status.as_ref()?;
+
+            // Look for the last container or init container status
+            let status = if status
+                .container_statuses
+                .as_ref()
+                .map(Vec::is_empty)
+                .unwrap_or(true)
+            {
+                status.init_container_statuses.as_ref()?.last()?
+            } else {
+                status.container_statuses.as_ref()?.last()?
+            };
+
+            let state = status.state.as_ref()?;
+            let terminated = state.terminated.as_ref()?;
+            let finished_at = terminated.finished_at.as_ref()?;
+
+            // Check to see if the pod's last container is within the keep interval
+            if finished_at.0 >= (Timestamp::now() - keep_interval) {
+                return None;
+            }
+
+            pod.labels().get(TASK_LABEL).map(String::as_str)
         }
 
-        debug!("performing garbage collection for tasks: {ids:?}");
+        let mut token = None;
 
-        let label = format!("{TASK_LABEL} in ({ids})", ids = ids.join(","));
+        loop {
+            // Query all finished (succeeded or failed) task pods
+            let ObjectList {
+                metadata, items, ..
+            } = task_pods
+                .list(&ListParams {
+                    label_selector: Some(TASK_LABEL.to_string()),
+                    field_selector: Some("status.phase!=Running,status.phase!=Pending".to_string()),
+                    limit: Some(MAX_TASKS),
+                    continue_token: token,
+                    ..Default::default()
+                })
+                .await
+                .context("failed to query task pods")?;
 
-        // Delete all cluster resources associated with the tasks
-        // Unfortunately there's no "generic" API for deleting all resources with a
-        // label selector; we must make an API request for each defined resource
-        for group in discovery.groups() {
-            for version in group.versions() {
-                for (resource, capabilities) in group.versioned_resources(version) {
-                    let api: Api<DynamicObject> = if capabilities.scope == Scope::Cluster {
-                        Api::all_with(client.clone(), &resource)
-                    } else {
-                        Api::namespaced_with(client.clone(), tasks_namespace, &resource)
-                    };
+            if items.is_empty() {
+                return Ok(());
+            }
 
-                    // Immediately perform a cascading delete of matching objects
-                    if let Err(e) = api
-                        .delete_collection(
-                            &DeleteParams::foreground().grace_period(0),
-                            &ListParams::default().labels(&label),
-                        )
-                        .await
-                    {
-                        match e {
-                            // Ignore forbidden errors as the RBAC for the service may not permit
-                            // delete operations on a resource
-                            kube::Error::Api(e) if e.is_forbidden() => {}
-                            _ => {
-                                log_error(
-                                    database,
-                                    None,
-                                    &format!(
-                                        "failed to delete resource collection for `{kind}` \
-                                         ({api}): {e}",
-                                        kind = resource.kind,
-                                        api = resource.api_version
-                                    ),
-                                )
-                                .await;
+            token = metadata.continue_;
+
+            // Filter the pods to the associated task ids
+            let ids: Vec<&str> = items
+                .iter()
+                .filter_map(|p| map_task_id(p, keep_interval))
+                .collect();
+
+            if ids.is_empty() {
+                continue;
+            }
+
+            debug!("performing garbage collection for tasks: `{ids:?}`");
+
+            // Delete all cluster resources associated with the tasks
+            // Unfortunately there's no "generic" API for deleting all resources with a
+            // label selector; we must make an API request for each defined resource
+            for group in discovery.groups() {
+                for version in group.versions() {
+                    for (resource, capabilities) in group.versioned_resources(version) {
+                        let api: Api<DynamicObject> = if capabilities.scope == Scope::Cluster {
+                            Api::all_with(client.clone(), &resource)
+                        } else {
+                            Api::namespaced_with(client.clone(), tasks_namespace, &resource)
+                        };
+
+                        // Immediately perform a cascading delete of matching objects
+                        if let Err(e) = api
+                            .delete_collection(
+                                &DeleteParams::foreground().grace_period(0),
+                                &ListParams::default().labels(&format!(
+                                    "{TASK_LABEL} in ({ids})",
+                                    ids = ids.join(",")
+                                )),
+                            )
+                            .await
+                        {
+                            match e {
+                                // Ignore forbidden errors as the RBAC for the service may not
+                                // permit delete operations on a
+                                // resource
+                                kube::Error::Api(e) if e.is_forbidden() => {}
+                                _ => {
+                                    log_error(
+                                        database,
+                                        None,
+                                        &format!(
+                                            "failed to delete resource collection for `{kind}` \
+                                             ({api}): {e}",
+                                            kind = resource.kind,
+                                            api = resource.api_version
+                                        ),
+                                    )
+                                    .await;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Delete the orchestrator storage for the task
-        for id in &ids {
-            let task_dir = Path::new("/mnt/orchestrator").join(id);
+            // Delete the orchestrator storage for the task
+            for id in ids {
+                let task_dir = Path::new("/mnt/orchestrator").join(id);
 
-            if task_dir.is_dir()
-                && let Err(e) = fs::remove_dir_all(&task_dir)
-            {
-                log_error(
-                    database,
-                    Some(id),
-                    &format!(
-                        "failed to delete task directory `{task_dir}`: {e}",
-                        task_dir = task_dir.display()
-                    ),
-                )
-                .await;
+                if task_dir.is_dir()
+                    && let Err(e) = fs::remove_dir_all(&task_dir)
+                {
+                    log_error(
+                        database,
+                        Some(id),
+                        &format!(
+                            "failed to delete task directory `{task_dir}`: {e}",
+                            task_dir = task_dir.display()
+                        ),
+                    )
+                    .await;
+                }
             }
         }
-
-        Ok(())
     }
 }

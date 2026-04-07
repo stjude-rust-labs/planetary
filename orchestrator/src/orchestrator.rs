@@ -789,6 +789,16 @@ impl TaskOrchestrator {
                 bail!("task resource template defines more then one pod for the task");
             }
 
+            if object
+                .data
+                .get("spec")
+                .and_then(|o| o.get("restartPolicy"))
+                .and_then(tera::Value::as_str)
+                != Some("Never")
+            {
+                bail!("task pod must have a `Never` restart policy");
+            }
+
             // Set the orchestrator label for the task pod
             let labels = object.metadata.labels.get_or_insert_default();
             labels.insert(ORCHESTRATOR_LABEL.to_string(), self.id.clone());
