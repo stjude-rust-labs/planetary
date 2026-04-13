@@ -212,9 +212,7 @@ impl State {
             .await
             .context("failed to perform cluster resource discovery")?;
 
-        let templates_dir = templates_dir.join("**/*");
-
-        let templates = Tera::new(templates_dir.to_str().with_context(|| {
+        let templates = Tera::new(templates_dir.join("**/*").to_str().with_context(|| {
             format!(
                 "templates directory `{path}` is not valid UTF-8",
                 path = templates_dir.display()
@@ -568,10 +566,6 @@ impl Monitor {
                 .await
                 .context("failed to query task pods")?;
 
-            if items.is_empty() {
-                return Ok(());
-            }
-
             token = metadata.continue_;
 
             for pod in &items {
@@ -587,6 +581,11 @@ impl Monitor {
                         )
                         .await;
                 }
+            }
+
+            // Check to see if there are no more pods in the list
+            if token.is_none() {
+                return Ok(());
             }
         }
     }

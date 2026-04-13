@@ -643,9 +643,9 @@ impl TaskOrchestrator {
             .await
             .context("failed to perform cluster resource discovery")?;
 
-        let templates_dir = templates_dir.into().join("**/*");
+        let templates_dir = templates_dir.into();
 
-        let templates = Tera::new(templates_dir.to_str().with_context(|| {
+        let templates = Tera::new(templates_dir.join("**/*").to_str().with_context(|| {
             format!(
                 "templates directory `{path}` is not valid UTF-8",
                 path = templates_dir.display()
@@ -866,8 +866,8 @@ impl TaskOrchestrator {
                 .await?
             {
                 // Mark the pod as canceled so that the monitor will collect it
-                if let Some(pod) = pod.items.first() {
-                    let _ = pods
+                if let Some(pod) = pod.items.first()
+                    && let Err(e) = pods
                         .patch(
                             &pod.name().expect("pod should have a name"),
                             &PatchParams::default(),
@@ -882,7 +882,19 @@ impl TaskOrchestrator {
                                 ..Default::default()
                             }),
                         )
-                        .await;
+                        .await
+                {
+                    // Ignore if the pod is not found as the monitor may have GC'd already
+                    match e {
+                        kube::Error::Api(status) if status.is_not_found() => {}
+                        _ => {
+                            self.log_error(
+                                Some(tes_id),
+                                &format!("failed to cancel task `{tes_id}`: {e:#}"),
+                            )
+                            .await
+                        }
+                    }
                 }
 
                 debug!("task `{tes_id}` has been canceled");

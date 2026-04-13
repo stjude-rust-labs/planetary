@@ -288,7 +288,7 @@ async fn download_inputs(
     create_dir_all(outputs_dir).await.with_context(|| {
         format!(
             "failed to create outputs directory `{path}`",
-            path = inputs_dir.display()
+            path = outputs_dir.display()
         )
     })?;
 

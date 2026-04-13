@@ -93,7 +93,8 @@ orchestrator:
       cpu: 2000m
     limits:
       memory: 4Gi
-  # Properties for the storage volume
+  # Properties for the orchestrator storage volume
+  # This is a required value and the volume must support a shared file system.
   storage:
   log: info
   # Configuration for scheduling preemptible tasks.
