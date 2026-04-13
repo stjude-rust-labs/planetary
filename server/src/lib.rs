@@ -34,6 +34,7 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
+#[cfg(feature = "templating")]
 pub mod templating;
 
 /// The default address to bind the server to.
