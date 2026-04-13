@@ -438,7 +438,7 @@ impl Monitor {
         /// it has the task id label.
         ///
         /// Otherwise, `None` is returned.
-        fn filter_pod(pod: &Pod, keep_interval: Duration) -> Option<&str> {
+        fn filter_pod(pod: &Pod, now: Timestamp, keep_interval: Duration) -> Option<&str> {
             // Only include pods that haven't been deleted
             if pod.metadata.deletion_timestamp.is_some() {
                 return None;
@@ -457,7 +457,7 @@ impl Monitor {
                 .next()?;
 
             // Check to see if the pod is within the keep interval
-            if terminated.finished_at.as_ref()?.0 >= (Timestamp::now() - keep_interval) {
+            if terminated.finished_at.as_ref()?.0 >= (now - keep_interval) {
                 return None;
             }
 
@@ -466,6 +466,7 @@ impl Monitor {
         }
 
         let mut token = None;
+        let now = Timestamp::now();
 
         loop {
             // Query all finished (succeeded or failed) task pods
@@ -485,7 +486,7 @@ impl Monitor {
             token = metadata.continue_;
 
             for pod in &items {
-                let Some(id) = filter_pod(pod, state.intervals.keep) else {
+                let Some(id) = filter_pod(pod, now, state.intervals.keep) else {
                     continue;
                 };
 
