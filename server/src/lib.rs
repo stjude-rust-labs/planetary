@@ -34,6 +34,8 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
+pub mod templating;
+
 /// The default address to bind the server to.
 pub const DEFAULT_ADDRESS: &str = "0.0.0.0";
 

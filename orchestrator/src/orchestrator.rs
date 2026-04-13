@@ -29,16 +29,12 @@ use k8s_openapi::serde_json::to_writer;
 use kube::Api;
 use kube::Client;
 use kube::Discovery;
-use kube::api::ApiResource;
-use kube::api::DynamicObject;
-use kube::api::GroupVersionKind;
 use kube::api::ListParams;
 use kube::api::LogParams;
 use kube::api::ObjectMeta;
 use kube::api::Patch;
 use kube::api::PatchParams;
 use kube::api::PostParams;
-use kube::discovery::ApiCapabilities;
 use kube::discovery::Scope;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::reflector::Lookup;
@@ -48,13 +44,14 @@ use planetary_db::ContainerKind;
 use planetary_db::Database;
 use planetary_db::TerminatedContainer;
 use planetary_db::format_log_message;
-use serde::Deserialize;
+use planetary_server::templating::CANCELED_LABEL;
+use planetary_server::templating::ORCHESTRATOR_LABEL;
+use planetary_server::templating::TASK_LABEL;
+use planetary_server::templating::Template;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tera::Tera;
 use tes::v1::types::requests::GetTaskParams;
 use tes::v1::types::requests::View;
-use tes::v1::types::responses::Task;
 use tes::v1::types::task::Executor;
 use tes::v1::types::task::State;
 use tokio::pin;
@@ -70,31 +67,6 @@ use tracing::info;
 use crate::into_retry_error;
 use crate::notify_retry;
 use crate::retry_durations;
-
-/// The expected name of the task resource template.
-const TEMPLATE_NAME: &str = "task.yaml";
-
-/// The default task storage size, in gigabytes.
-///
-/// Uses a 1 GiB default.
-const DEFAULT_STORAGE_SIZE: f64 = 1.07374182;
-
-/// The default CPU request (in cores) for tasks.
-const DEFAULT_CPU: i32 = 1;
-
-/// The default memory request (in GB) for tasks.
-///
-/// Uses a 256 MiB default.
-const DEFAULT_MEMORY: f64 = 0.268435455;
-
-/// The orchestrator id label.
-const ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
-
-/// The task id label.
-const TASK_LABEL: &str = "planetary/task";
-
-/// The cancellation label used to mark canceled task for garbage collection.
-const CANCELED_LABEL: &str = "planetary/canceled";
 
 /// The mount point for the orchestrator volume.
 ///
@@ -210,113 +182,6 @@ fn deserialize_items<T: DeserializeOwned>(
     Ok(Some(from_reader(BufReader::new(file)).with_context(
         || format!("failed to read file `{path}`", path = path.display()),
     )?))
-}
-
-/// Creates a template context for a TES task.
-///
-/// Returns an error if the task was invalid.
-fn create_context(task: &Task) -> Result<tera::Context> {
-    /// Helper for inserting items into the context.
-    fn insert(
-        context: &mut tera::Map<String, tera::Value>,
-        name: impl Into<String>,
-        value: impl Into<tera::Value>,
-    ) {
-        context.insert(name.into(), value.into());
-    }
-
-    let resources = task.resources.as_ref();
-
-    let mut context = tera::Map::new();
-    insert(
-        &mut context,
-        "id",
-        task.id.as_deref().context("task should have id")?,
-    );
-    insert(
-        &mut context,
-        "preemptible",
-        resources.and_then(|r| r.preemptible).unwrap_or(false),
-    );
-    insert(
-        &mut context,
-        "cpu",
-        resources.and_then(|r| r.cpu_cores).unwrap_or(DEFAULT_CPU),
-    );
-    insert(
-        &mut context,
-        "memory",
-        format!(
-            "{memory}G",
-            memory = resources
-                .and_then(|r| r.ram_gb)
-                .unwrap_or(DEFAULT_MEMORY)
-                .ceil()
-        ),
-    );
-    insert(
-        &mut context,
-        "disk",
-        format!(
-            "{disk}G",
-            disk = resources
-                .and_then(|r| r.disk_gb)
-                .unwrap_or(0.0)
-                .max(DEFAULT_STORAGE_SIZE)
-        ),
-    );
-
-    let inputs: Vec<tera::Value> = task
-        .inputs
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(|i| i.path.clone().into())
-        .collect();
-    insert(&mut context, "inputs", inputs);
-
-    let outputs: Vec<tera::Value> = task
-        .outputs
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(|o| o.path.clone().into())
-        .collect();
-    insert(&mut context, "outputs", outputs);
-
-    insert(
-        &mut context,
-        "volumes",
-        task.volumes.as_deref().unwrap_or_default(),
-    );
-
-    let executors: Vec<tera::Value> = task
-        .executors
-        .iter()
-        .map(|e| {
-            let mut executor = tera::Map::new();
-            insert(&mut executor, "image", e.image.clone());
-            insert(&mut executor, "script", format_executor_script(e)?);
-            insert(
-                &mut executor,
-                "workdir",
-                e.workdir.as_deref().unwrap_or_default(),
-            );
-
-            let mut env = tera::Map::new();
-            if let Some(vars) = e.env.as_ref() {
-                for (k, v) in vars {
-                    insert(&mut env, k, v.clone());
-                }
-            }
-
-            insert(&mut executor, "env", env);
-            Ok(executor.into())
-        })
-        .collect::<Result<_>>()?;
-    insert(&mut context, "executors", executors);
-
-    tera::Context::from_value(context.into()).context("invalid template context")
 }
 
 /// Formats an executor script into a single line that can be used with `sh -c`.
@@ -620,8 +485,8 @@ pub struct TaskOrchestrator {
     client: Client,
     /// Used to discover available resource types on the cluster.
     discovery: Discovery,
-    /// The templates for creating Kubernetes resources.
-    templates: Tera,
+    /// The template for creating Kubernetes resources.
+    template: Template,
     /// The task Kubernetes resource namespace.
     tasks_namespace: String,
 }
@@ -643,29 +508,23 @@ impl TaskOrchestrator {
             .await
             .context("failed to perform cluster resource discovery")?;
 
-        let templates_dir = templates_dir.into();
+        let template = Template::new(templates_dir.into())?;
 
-        let templates = Tera::new(templates_dir.join("**/*").to_str().with_context(|| {
-            format!(
-                "templates directory `{path}` is not valid UTF-8",
-                path = templates_dir.display()
-            )
-        })?)?;
-
-        if !templates.get_template_names().any(|n| n == TEMPLATE_NAME) {
-            bail!(
-                "templates directory `{path}` does not contain a template named `{TEMPLATE_NAME}`",
-                path = templates_dir.display()
-            );
-        }
+        // Do an up-front rendering with a dummy identifier to catch errors in the
+        // template. Note: this will not catch an error in the template that would
+        // result from a branch or loop not taken.
+        let tasks_namespace = tasks_namespace.into();
+        template
+            .render_id_only("validation", &discovery, &tasks_namespace)
+            .context("template failed initial validation")?;
 
         Ok(Self {
             id: id.into(),
             database,
             client,
             discovery,
-            templates,
-            tasks_namespace: tasks_namespace.into(),
+            template,
+            tasks_namespace,
         })
     }
 
@@ -701,42 +560,47 @@ impl TaskOrchestrator {
                 task.outputs.as_deref().unwrap_or_default(),
             )?;
 
-            let resources = self
-                .templates
-                .render(TEMPLATE_NAME, &create_context(&task)?)
-                .context("failed to render task resource template")?;
-
-            // Deserialize each object before applying them
-            let mut has_pod = false;
-            let objects: Vec<_> = serde_yaml_ng::Deserializer::from_str(&resources)
-                .map(|de| self.deserialize_object(tes_id, &mut has_pod, de))
-                .collect::<Result<_>>()?;
-
-            if !has_pod {
-                bail!("task resource template did not define a pod for the task");
-            }
-
             // Create the task's resources from the template
-            for (resource, capabilities, object) in objects {
-                let api = if capabilities.scope == Scope::Cluster {
-                    Api::all_with(self.client.clone(), &resource)
+            for mut resource in
+                self.template
+                    .render(&task, &self.discovery, &self.tasks_namespace, |e| {
+                        format_executor_script(e)
+                    })?
+            {
+                let api = if resource.capabilities().scope == Scope::Cluster {
+                    Api::all_with(self.client.clone(), resource.api())
                 } else {
-                    Api::namespaced_with(self.client.clone(), &self.tasks_namespace, &resource)
+                    Api::namespaced_with(self.client.clone(), &self.tasks_namespace, resource.api())
                 };
 
-                api.create(&PostParams::default(), &object)
+                // Set the orchestrator label for the pod
+                if resource.api().kind == "Pod" && resource.api().api_version == "v1" {
+                    let labels = resource
+                        .object_mut()
+                        .metadata
+                        .labels
+                        .get_or_insert_default();
+                    labels.insert(ORCHESTRATOR_LABEL.to_string(), self.id.clone());
+                }
+
+                let name = resource
+                    .object()
+                    .name()
+                    .context("object should have a name")?;
+
+                api.create(&PostParams::default(), resource.object())
                     .await
                     .with_context(|| {
                         format!(
-                            "failed to create `{kind}` ({api}) task resource named `{name}`",
-                            name = object.name().expect("object should have a name"),
-                            kind = resource.kind,
-                            api = resource.api_version
+                            "failed to create task resource `{name}` of kind `{kind}` and API \
+                             version `{api}`",
+                            kind = resource.api().kind,
+                            api = resource.api().api_version
                         )
                     })?;
             }
 
-            Ok(())
+            anyhow::Ok(())
         };
 
         if let Err(e) = start.await {
@@ -757,76 +621,6 @@ impl TaskOrchestrator {
                 )
                 .await;
         }
-    }
-
-    /// Deserializes a Kubernetes object and returns its resolved API resources
-    /// and capabilities.
-    fn deserialize_object(
-        &self,
-        tes_id: &str,
-        has_pod: &mut bool,
-        de: serde_yaml_ng::Deserializer<'_>,
-    ) -> Result<(ApiResource, ApiCapabilities, DynamicObject)> {
-        let mut object = DynamicObject::deserialize(de)
-            .context("failed to deserialize task resource template")?;
-
-        let name = object
-            .name()
-            .context("task template contains a resource that has no name")?;
-
-        let meta = object.types.as_ref().with_context(|| {
-            format!("task resource `{name}` does not specify an object API version and kind")
-        })?;
-
-        let gvk = GroupVersionKind::try_from(meta).with_context(|| {
-            format!(
-                "task resource `{name}` has invalid kind: `{kind}` ({api})",
-                kind = meta.kind,
-                api = meta.api_version
-            )
-        })?;
-
-        if gvk.version == "v1" && gvk.kind == "Pod" {
-            if *has_pod {
-                bail!("task resource template defines more then one pod for the task");
-            }
-
-            if object
-                .data
-                .get("spec")
-                .and_then(|o| o.get("restartPolicy"))
-                .and_then(tera::Value::as_str)
-                != Some("Never")
-            {
-                bail!("task pod must have a `Never` restart policy");
-            }
-
-            // Set the orchestrator label for the task pod
-            let labels = object.metadata.labels.get_or_insert_default();
-            labels.insert(ORCHESTRATOR_LABEL.to_string(), self.id.clone());
-            *has_pod = true;
-        }
-
-        // Set the task label for the object
-        let labels = object.metadata.labels.get_or_insert_default();
-        labels.insert(TASK_LABEL.to_string(), tes_id.to_string());
-
-        let (resource, capabilities) = self.discovery.resolve_gvk(&gvk).with_context(|| {
-            format!(
-                "task resource `{name}` has unknown resource kind `{kind}` ({api})",
-                name = object.name().expect("object should have a name"),
-                kind = meta.kind,
-                api = meta.api_version
-            )
-        })?;
-
-        if capabilities.scope == Scope::Cluster {
-            object.metadata.namespace = None;
-        } else {
-            object.metadata.namespace = Some(self.tasks_namespace.clone());
-        }
-
-        Ok((resource, capabilities, object))
     }
 
     /// Cancels the given task.

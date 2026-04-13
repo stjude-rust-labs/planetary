@@ -19,23 +19,18 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 use chrono::Utc;
 use futures::StreamExt as _;
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::jiff::Timestamp;
-use k8s_openapi::serde::Deserialize;
 use kube::Api;
 use kube::Client;
 use kube::Discovery;
 use kube::ResourceExt;
-use kube::api::ApiResource;
 use kube::api::DeleteParams;
 use kube::api::DynamicObject;
-use kube::api::GroupVersionKind;
 use kube::api::ListParams;
 use kube::api::ObjectList;
-use kube::discovery::ApiCapabilities;
 use kube::discovery::Scope;
 use kube::runtime::WatchStreamExt;
 use kube::runtime::reflector::Lookup;
@@ -43,11 +38,11 @@ use kube::runtime::watcher;
 use kube::runtime::watcher::Event;
 use planetary_db::Database;
 use planetary_db::format_log_message;
+use planetary_server::templating::Template;
 use reqwest::StatusCode;
 use reqwest::header;
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
-use tera::Tera;
 use tes::v1::types::task::State as TesState;
 use tokio::pin;
 use tokio::select;
@@ -58,9 +53,6 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use url::Url;
-
-/// The expected name of the task resource template.
-const TEMPLATE_NAME: &str = "task.yaml";
 
 /// The task id label.
 const TASK_LABEL: &str = "planetary/task";
@@ -80,76 +72,6 @@ const CANCELED_LABEL: &str = "planetary/canceled";
 /// Setting this too low may cause the monitor to abort a task before it even
 /// has a chance to start.
 const TASK_CREATION_DELTA: Duration = Duration::from_secs(60);
-
-/// Creates a dummy template context for a TES task.
-///
-/// This is used to render a template for a task so that we can delete its
-/// resources.
-fn create_context(id: &str) -> Result<tera::Context> {
-    /// Helper for inserting items into the context.
-    fn insert(
-        context: &mut tera::Map<String, tera::Value>,
-        name: impl Into<String>,
-        value: impl Into<tera::Value>,
-    ) {
-        context.insert(name.into(), value.into());
-    }
-
-    let mut context = tera::Map::new();
-    insert(&mut context, "id", id);
-    insert(&mut context, "preemptible", false);
-    insert(&mut context, "cpu", 1);
-    insert(&mut context, "memory", "1G");
-    insert(&mut context, "disk", "1G");
-    insert(&mut context, "inputs", Vec::<tera::Value>::new());
-    insert(&mut context, "outputs", Vec::<tera::Value>::new());
-    insert(&mut context, "volumes", Vec::<tera::Value>::new());
-    insert(&mut context, "executors", Vec::<tera::Value>::new());
-    tera::Context::from_value(context.into()).context("invalid template context")
-}
-
-/// Deserializes a Kubernetes object and returns its resolved API resources and
-/// capabilities.
-fn deserialize_object(
-    state: &State,
-    de: serde_yaml_ng::Deserializer<'_>,
-) -> Result<(ApiResource, ApiCapabilities, DynamicObject)> {
-    let mut object =
-        DynamicObject::deserialize(de).context("failed to deserialize task resource template")?;
-
-    let name = object
-        .name()
-        .context("task template contains a resource that has no name")?;
-
-    let meta = object.types.as_ref().with_context(|| {
-        format!("task resource `{name}` does not specify an object API version and kind")
-    })?;
-
-    let gvk = GroupVersionKind::try_from(meta).with_context(|| {
-        format!(
-            "task resource `{name}` has invalid kind: `{kind}` ({api})",
-            kind = meta.kind,
-            api = meta.api_version
-        )
-    })?;
-
-    let (resource, capabilities) = state.discovery.resolve_gvk(&gvk).with_context(|| {
-        format!(
-            "task resource `{name}` has unknown resource kind `{kind}` ({api})",
-            name = object.name().expect("object should have a name"),
-            kind = meta.kind,
-            api = meta.api_version
-        )
-    })?;
-
-    if capabilities.scope == Scope::Cluster {
-        object.metadata.namespace = None;
-    } else {
-        object.metadata.namespace = Some(state.namespaces.tasks.to_string());
-    }
-
-    Ok((resource, capabilities, object))
-}
 
 /// Represents information about the orchestrator service.
 pub struct OrchestratorServiceInfo {
@@ -191,15 +113,15 @@ struct State {
     namespaces: Namespaces,
     /// The monitor intervals.
     intervals: Intervals,
-    /// The templates for deleting task resources.
-    templates: tera::Tera,
+    /// The task template for deleting task resources.
+    template: Template,
 }
 
 impl State {
     /// Constructs a new [`State`].
     async fn new(
         database: Arc<dyn Database>,
-        templates_dir: PathBuf,
+        templates_dir: impl Into<PathBuf>,
         namespaces: Namespaces,
         intervals: Intervals,
     ) -> Result<Self> {
@@ -212,19 +134,14 @@ impl State {
             .await
             .context("failed to perform cluster resource discovery")?;
 
-        let templates = Tera::new(templates_dir.join("**/*").to_str().with_context(|| {
-            format!(
-                "templates directory `{path}` is not valid UTF-8",
-                path = templates_dir.display()
-            )
-        })?)?;
+        let template = Template::new(templates_dir.into())?;
 
-        if !templates.get_template_names().any(|n| n == TEMPLATE_NAME) {
-            bail!(
-                "templates directory `{path}` does not contain a template named `{TEMPLATE_NAME}`",
-                path = templates_dir.display()
-            );
-        }
+        // Do an up-front rendering with a dummy identifier to catch errors in the
+        // template. Note: this will not catch an error in the template that would
+        // result from a branch or loop not taken.
+        template
+            .render_id_only("validation", &discovery, &namespaces.tasks)
+            .context("template failed initial validation")?;
 
         Ok(Self {
             shutdown: CancellationToken::new(),
@@ -233,7 +150,7 @@ impl State {
             discovery,
             namespaces,
             intervals,
-            templates,
+            template,
         })
     }
 
@@ -275,8 +192,7 @@ impl Monitor {
         templates_dir: impl Into<PathBuf>,
         intervals: Intervals,
     ) -> Result<Self> {
-        let state =
-            Arc::new(State::new(database, templates_dir.into(), namespaces, intervals).await?);
+        let state = Arc::new(State::new(database, templates_dir, namespaces, intervals).await?);
 
         // Spawn the orphan monitoring tokio task
         let orphans = tokio::spawn(Self::monitor_orphans(state.clone(), orchestrator));
@@ -594,29 +510,29 @@ impl Monitor {
     async fn delete_resources(state: &State, id: &str) -> Result<()> {
         debug!("performing garbage collection for task `{id}`");
 
-        let resources = state
-            .templates
-            .render(TEMPLATE_NAME, &create_context(id)?)
-            .context("failed to render task resource template")?;
-
-        // Deserialize each object before deleting them
-        let objects: Vec<_> = serde_yaml_ng::Deserializer::from_str(&resources)
-            .map(|de| deserialize_object(state, de))
-            .collect::<Result<_>>()?;
-
         // Delete the task's resources
-        for (resource, capabilities, object) in objects {
-            let api: Api<DynamicObject> = if capabilities.scope == Scope::Cluster {
-                Api::all_with(state.client.clone(), &resource)
+        for resource in
+            state
+                .template
+                .render_id_only(id, &state.discovery, &state.namespaces.tasks)?
+        {
+            let api: Api<DynamicObject> = if resource.capabilities().scope == Scope::Cluster {
+                Api::all_with(state.client.clone(), resource.api())
             } else {
-                Api::namespaced_with(state.client.clone(), &state.namespaces.tasks, &resource)
+                Api::namespaced_with(
+                    state.client.clone(),
+                    &state.namespaces.tasks,
+                    resource.api(),
+                )
             };
 
+            let name = resource
+                .object()
+                .name()
+                .context("object should have a name")?;
+
             match api
-                .delete(
-                    &object.name().expect("object should have a name"),
-                    &DeleteParams::foreground().grace_period(0),
-                )
+                .delete(&name, &DeleteParams::foreground().grace_period(0))
                 .await
             {
                 Ok(_) => {}
@@ -626,9 +542,10 @@ impl Monitor {
                         .log_error(
                             None,
                             &format!(
-                                "failed to delete resource `{kind}` ({api}) for task `{id}`: {e}",
-                                kind = resource.kind,
-                                api = resource.api_version
+                                "failed to delete task resource `{name}` of kind `{kind}` and API \
+                                 version `{api}`: {e}",
+                                kind = resource.api().kind,
+                                api = resource.api().api_version
                             ),
                         )
                         .await;

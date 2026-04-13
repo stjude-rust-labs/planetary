@@ -1,13 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "api",
-    "db",
-    "monitor",
-    "orchestrator",
-    "server",
-    "transporter",
-]
+members = ["api", "db", "monitor", "orchestrator", "server", "transporter"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"
