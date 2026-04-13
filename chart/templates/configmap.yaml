@@ -35,7 +35,7 @@ data:
       tolerations: 
         - key: "{{ .toleration.key }}"
           operator: Equal
-          value: "{{ .toleration.value }}""
+          value: "{{ .toleration.value }}"
       {{ `{%- endif %}` }}
       {{- end }}
       # Task pods are required to have a `Never` restart policy
