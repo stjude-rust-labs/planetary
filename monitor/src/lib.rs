@@ -52,9 +52,8 @@ pub struct Server {
     #[builder(into)]
     check_interval: Duration,
 
-    /// The interval for which the monitor should check the cluster state.
-    ///
-    /// Defaults to 600 seconds.
+    /// The interval for which Kubernetes resources are kept after a task
+    /// enters a terminal state.
     #[builder(into)]
     keep_interval: Duration,
 
