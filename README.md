@@ -168,7 +168,16 @@ configuring a Planetary deployment.
 
 ### Task Execution
 
-Planetary runs each TES task by scheduling a single Kubernetes pod for the task.
+Planetary runs each TES task by evaluating a template file for creating
+Kubernetes resources associated with the task.
+
+The task resource template is stored in a `ConfigMap` resource named
+`templates`. See [`configmap.yaml`](./chart/templates/configmap.yaml)
+for more information.
+
+By default, the template creates a `PersistentVolumeClaim` resource to
+provision storage for the task and a single `Pod` resource for executing the
+task.
 
 The task pod consists of several containers:
 
@@ -211,6 +220,17 @@ Running a TES task as a single pod has some performance benefits:
 * By attaching a volume at most once to a node for a task, a pod being
   scheduled on one node doesn't need to wait for the same volume to detach from
   a node where a task pod was executing previously.
+
+#### RBAC Authorization
+
+RBAC authorization is used to grant permissions to the Planetary orchestrator
+and monitor for creating and deleting Kubernetes resources, respectively.
+
+If additional resource kinds are required in the task template, ensure that the
+Planetary orchestrator is granted the `create` verb and that the Planetary
+monitor is granted the `delete` verb for the resource.
+
+See [`rbac.yaml`](./chart/templates/rbac.yaml) for more information.
 
 ## 🚀 Getting Started
 
@@ -324,7 +344,7 @@ kind load docker-image -n planetary \
 > [!NOTE]
 > The Planetary Helm chart includes an optional pod-based PostgreSQL database
 > for local development and testing (enabled with `postgresql.enabled=true` in
-> `staging.yaml`).
+> `./chart/examples/staging.yaml`).
 >
 > In this guide, we'll deploy Planetary using this
 > ephemeral database. **This is for demonstration purposes only—for anything
@@ -361,7 +381,7 @@ Kubernetes cluster, run the following command:
 ```bash
 helm upgrade --install --create-namespace -n planetary planetary chart \
   --set postgresql.password='<mypassword>' \
-  -f staging.yaml
+  -f chart/examples/staging.yaml
 ```
 
 **Note:** Replace `<mypassword>` with a secure password of your choice.
