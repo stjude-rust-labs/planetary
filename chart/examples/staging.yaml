@@ -1,0 +1,60 @@
+# This file is used to install the Planetary chart into a "staging" cluster.
+# See README.md for a walkthrough on installing the chart.
+api:
+  replicas: 1
+  log: info
+  image:
+    name: stjude-rust-labs/planetary-api
+    tag: staging
+
+orchestrator:
+  replicas: 1
+  log: info
+  image:
+    name: stjude-rust-labs/planetary-orchestrator
+    tag: staging
+  storage:
+    nfs:
+      server: 10.96.85.10
+      path: /
+
+monitor:
+  log: info
+  image:
+    name: stjude-rust-labs/planetary-monitor
+    tag: staging
+
+transporter:
+  log: info
+  image:
+    name: stjude-rust-labs/planetary-transporter
+    tag: staging
+
+migration:
+  image:
+    name: stjude-rust-labs/planetary-migration
+    tag: staging
+
+postgresql:
+  enabled: true
+  resources:
+    limits:
+      memory: '8Gi'
+
+extra:
+# Create an NFS service for the shared storage
+- apiVersion: nfs.krestomat.io/v1alpha1
+  kind: Ganesha
+  metadata:
+    name: planetary-nfs
+    namespace: planetary
+  spec:
+    # Use 1000 as that's the uid/gid used by Planetary containers
+    ganeshaExportUserid: 1000
+    ganeshaExportGroupid: 1000
+    ganeshaExportMode: '0700'
+    ganeshaPvcDataSize: 1Gi
+    # Do not generate a storage class
+    ganeshaGeneratedNfsScNeeded: false
+    # A static cluster IP is required for the service as nodes mount the NFS volume without access to `kube-dns`
+    ganeshaServiceClusterIp: 10.96.85.10

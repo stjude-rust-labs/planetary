@@ -1,3 +1,5 @@
+{{- $storage := .Values.orchestrator.storage | required "The `orchestrator.storage` value is required." -}}
+
 # Deployment for the Planetary API service
 apiVersion: apps/v1
 kind: Deployment
@@ -103,6 +105,8 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        fsGroup: 1000
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -142,8 +146,6 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.name
-          - name: SERVICE_URL
-            value: "http://planetary-orchestrator.{{ .Release.Namespace }}:8080"
           - name: SERVICE_API_KEY
             valueFrom:
               secretKeyRef:
@@ -162,24 +164,23 @@ spec:
             value: "{{ .Values.database.port }}"
           - name: DATABASE_NAME
             value: {{ .Values.database.name }}
-          - name: TRANSPORTER_IMAGE
-            value: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
+          - name: TEMPLATES_DIR
+            value: /etc/templates
           - name: TASKS_NAMESPACE
             value: {{ .Values.tasks.namespace }}
-          {{- with .Values.orchestrator.storageClass }}
-          - name: STORAGE_CLASS
-            value: "{{- . }}"
-          {{- end }}
-          {{- with .Values.orchestrator.preemptible }}
-          {{- with .nodeSelector }}
-          - name: PREEMPTIBLE_NODE_SELECTOR
-            value: "{{- . }}"
-          {{- end }}
-          {{- with .taint }}
-          - name: PREEMPTIBLE_TAINT
-            value: "{{- . }}"
-          {{- end }}
-          {{- end }}
+          volumeMounts:
+          - name: orchestrator-storage
+            mountPath: /mnt/orchestrator
+          - name: templates
+            mountPath: /etc/templates
+      volumes:
+      - name: templates
+        configMap:
+          name: templates
+      - name: orchestrator-storage
+        {{- with $storage }}
+        {{- include "render" (dict "value" . "context" $) | nindent 8 }}
+        {{- end }}
 ---
 # Deployment for the Planetary task monitor
 apiVersion: apps/v1
@@ -250,6 +251,8 @@ spec:
             value: "{{ .Release.Namespace }}"
           - name: TASKS_NAMESPACE
             value: {{ .Values.tasks.namespace }}
+          - name: TEMPLATES_DIR
+            value: /etc/templates
           - name: ORCHESTRATOR_URL
             value: "http://planetary-orchestrator:{{ .Values.orchestrator.service.port }}"
           - name: ORCHESTRATOR_API_KEY
@@ -257,6 +260,19 @@ spec:
               secretKeyRef:
                 name: orchestrator-auth
                 key: api-key
+          volumeMounts:
+          - name: orchestrator-storage
+            mountPath: /mnt/orchestrator
+          - name: templates
+            mountPath: /etc/templates
+      volumes:
+      - name: templates
+        configMap:
+          name: templates
+      - name: orchestrator-storage
+        {{- with $storage }}
+        {{- include "render" (dict "value" . "context" $) | nindent 8 }}
+        {{- end }}
 ---
 {{- if .Values.postgresql.enabled }}
 # Deployment for the PostgreSQL database

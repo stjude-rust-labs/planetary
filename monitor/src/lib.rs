@@ -1,6 +1,7 @@
 //! Implements the Planetary task monitor.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +12,9 @@ use planetary_server::DEFAULT_PORT;
 use secrecy::SecretString;
 use url::Url;
 
+use crate::monitor::Intervals;
 use crate::monitor::Monitor;
+use crate::monitor::Namespaces;
 use crate::monitor::OrchestratorServiceInfo;
 
 mod monitor;
@@ -32,22 +35,27 @@ pub struct Server {
     database: Arc<dyn Database>,
 
     /// The Kubernetes namespace for the Planetary services.
-    ///
-    /// Defaults to `planetary`.
     #[builder(into)]
-    planetary_namespace: Option<String>,
+    planetary_namespace: String,
 
     /// The Kubernetes namespace to use for TES task resources.
-    ///
-    /// Defaults to `planetary-tasks`.
     #[builder(into)]
-    tasks_namespace: Option<String>,
+    tasks_namespace: String,
+
+    /// The directory containing the Kubernetes resource templates.
+    #[builder(into)]
+    templates_dir: PathBuf,
 
     /// The interval for which the monitor should check the cluster state.
     ///
     /// Defaults to 60 seconds.
     #[builder(into)]
-    interval: Duration,
+    check_interval: Duration,
+
+    /// The interval for which Kubernetes resources are kept after a task
+    /// enters a terminal state.
+    #[builder(into)]
+    keep_interval: Duration,
 
     /// The Planetary orchestrator service URL.
     #[builder(into)]
@@ -92,9 +100,15 @@ impl Server {
                 url: self.orchestrator_url,
                 api_key: self.orchestrator_api_key,
             },
-            self.planetary_namespace,
-            self.tasks_namespace,
-            self.interval,
+            Namespaces {
+                planetary: self.planetary_namespace,
+                tasks: self.tasks_namespace,
+            },
+            self.templates_dir,
+            Intervals {
+                check: self.check_interval,
+                keep: self.keep_interval,
+            },
         )
         .await?;
 

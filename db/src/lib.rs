@@ -112,9 +112,6 @@ pub trait Database: Send + Sync + 'static {
         params: ListTasksParams,
     ) -> DatabaseResult<(Vec<TaskResponse>, Option<String>)>;
 
-    /// Gets the inputs and outputs of a task.
-    async fn get_task_io(&self, tes_id: &str) -> DatabaseResult<TaskIo>;
-
     /// Gets the TES identifiers of in-progress tasks.
     ///
     /// Only tasks created before the given datetime are returned.
@@ -136,6 +133,10 @@ pub trait Database: Send + Sync + 'static {
     /// if the task is transitioned to the given state; the returned containers
     /// are then recorded in the database.
     ///
+    /// The given output files will be associated with the task if the task
+    /// transitions to the given state; if `None`, the task's output files will
+    /// not be set.
+    ///
     /// Returns `Ok(true)` if the status was updated or `Ok(false)` if the
     /// task's current state cannot be transitioned to the given state.
     async fn update_task_state<'a>(
@@ -144,17 +145,11 @@ pub trait Database: Send + Sync + 'static {
         state: State,
         messages: &[&str],
         containers: Option<BoxFuture<'a, Result<Vec<TerminatedContainer<'a>>>>>,
+        outputs: Option<&[OutputFile]>,
     ) -> DatabaseResult<bool>;
 
     /// Appends the given messages to the task's system log.
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()>;
-
-    /// Updates the output files of the given task.
-    async fn update_task_output_files(
-        &self,
-        tes_id: &str,
-        files: &[OutputFile],
-    ) -> DatabaseResult<()>;
 
     /// Inserts an internal system error with the database.
     async fn insert_error(

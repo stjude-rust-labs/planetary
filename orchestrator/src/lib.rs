@@ -1,6 +1,7 @@
 //! Implements the Planetary task orchestrator.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,35 +13,27 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::routing::delete;
-use axum::routing::get;
 use axum::routing::patch;
 use axum::routing::post;
-use axum::routing::put;
 use axum_extra::TypedHeader;
 use axum_extra::headers::Authorization;
 use axum_extra::headers::authorization::Bearer;
 use bon::Builder;
 use planetary_db::Database;
-use planetary_db::TaskIo;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
 use planetary_server::Error;
-use planetary_server::Json;
 use planetary_server::Path;
 use planetary_server::ServerResponse;
 use secrecy::ExposeSecret;
 use secrecy::SecretString;
-use tes::v1::types::responses::OutputFile;
 use tokio_retry2::RetryError;
 use tokio_retry2::strategy::ExponentialFactorBackoff;
 use tokio_retry2::strategy::MaxInterval;
 use tracing::warn;
-use url::Url;
 
 use crate::orchestrator::Monitor;
-use crate::orchestrator::PreemptibleConfig;
 use crate::orchestrator::TaskOrchestrator;
-use crate::orchestrator::TransporterInfo;
 
 mod orchestrator;
 
@@ -124,10 +117,6 @@ pub struct Server {
     #[builder(into)]
     pod_name: String,
 
-    /// The URL of the orchestrator service.
-    #[builder(into)]
-    service_url: Url,
-
     /// The API key of the orchestrator service.
     #[builder(into)]
     service_api_key: SecretString,
@@ -136,41 +125,13 @@ pub struct Server {
     #[builder(name = "shared_database")]
     database: Arc<dyn Database>,
 
-    /// The Kubernetes storage class to use for tasks.
+    /// The directory containing the Kubernetes resource templates.
     #[builder(into)]
-    storage_class: Option<String>,
+    templates_dir: PathBuf,
 
-    /// The transporter image to use.
-    ///
-    /// Defaults to `stjude-rust-labs/planetary-transporter:latest`.
+    /// The namespace to monitor for task pod events
     #[builder(into)]
-    transporter_image: Option<String>,
-
-    /// The Kubernetes namespace to use for TES task resources.
-    ///
-    /// Defaults to `planetary-tasks`.
-    #[builder(into)]
-    tasks_namespace: Option<String>,
-
-    /// The number of CPU cores to request for transporter pods.
-    ///
-    /// Defaults to `1` CPU core.
-    #[builder(into)]
-    transporter_cpu: Option<i32>,
-
-    /// The amount of memory (in GB) to request for transporter pods.
-    ///
-    /// Defaults to `0.268435455` GB (i.e. 256 MiB).
-    #[builder(into)]
-    transporter_memory: Option<f64>,
-
-    /// The node selector to apply to preemptible tasks.
-    #[builder(into)]
-    preemptible_node_selector: Option<String>,
-
-    /// The taint to apply to preemptible tasks.
-    #[builder(into)]
-    preemptible_taint: Option<String>,
+    tasks_namespace: String,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -195,32 +156,13 @@ impl Server {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        // Build the preemptible config if both fields are present
-        let preemptible_config = match (self.preemptible_node_selector, self.preemptible_taint) {
-            (Some(node_selector), Some(taint)) => {
-                Some(PreemptibleConfig::new(node_selector, taint)?)
-            }
-            (None, None) => None,
-            _ => anyhow::bail!(
-                "preemptive task execution requires both the node selector and taint to be \
-                 configured"
-            ),
-        };
-
         let state = Arc::new(State {
             service_api_key: self.service_api_key,
             orchestrator: TaskOrchestrator::new(
                 self.database,
                 self.pod_name,
-                self.service_url,
+                self.templates_dir,
                 self.tasks_namespace,
-                self.storage_class,
-                TransporterInfo {
-                    image: self.transporter_image,
-                    cpu: self.transporter_cpu,
-                    memory: self.transporter_memory,
-                },
-                preemptible_config,
             )
             .await?,
         });
@@ -232,8 +174,6 @@ impl Server {
                 Router::new()
                     .route("/v1/tasks/{tes_id}", post(Self::start_task))
                     .route("/v1/tasks/{tes_id}", delete(Self::cancel_task))
-                    .route("/v1/tasks/{tes_id}/io", get(Self::get_task_io))
-                    .route("/v1/tasks/{tes_id}/outputs", put(Self::put_task_outputs))
                     .route("/v1/pods/{name}", patch(Self::adopt_pod))
                     .layer(middleware::from_fn_with_state(state.clone(), auth))
             ])
@@ -275,34 +215,6 @@ impl Server {
             state.orchestrator.cancel_task(&tes_id).await;
         });
 
-        Ok(())
-    }
-
-    /// Implements the API endpoint for getting a task's inputs and outputs.
-    ///
-    /// This endpoint is used by the transporter.
-    async fn get_task_io(
-        ExtractState(state): ExtractState<Arc<State>>,
-        Path(tes_id): Path<String>,
-    ) -> ServerResponse<Json<TaskIo>> {
-        Ok(Json(
-            state.orchestrator.database().get_task_io(&tes_id).await?,
-        ))
-    }
-
-    /// Implements the API endpoint for updating a task's output files.
-    ///
-    /// This endpoint is used by the transporter.
-    async fn put_task_outputs(
-        ExtractState(state): ExtractState<Arc<State>>,
-        Path(tes_id): Path<String>,
-        Json(files): Json<Vec<OutputFile>>,
-    ) -> ServerResponse<()> {
-        state
-            .orchestrator
-            .database()
-            .update_task_output_files(&tes_id, &files)
-            .await?;
         Ok(())
     }
 

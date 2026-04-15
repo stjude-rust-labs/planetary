@@ -62,7 +62,7 @@ consider in your situation.
 - **Ingress and external exposure.** The services provided by Planetary
   include **no authentication or authorization at all and will accept and
   execute unauthenticated requests if you do not take action to secure them
-  further**. It is imperitive that you restrict these services using external
+  further**. It is imperative that you restrict these services using external
   authentication and authorization mechanisms. Further, we encourage you to
   review any Services or Ingress resources included in the chart to confirm they
   are exposed only as needed. Ensure TLS termination, authentication,
@@ -168,7 +168,16 @@ configuring a Planetary deployment.
 
 ### Task Execution
 
-Planetary runs each TES task by scheduling a single Kubernetes pod for the task.
+Planetary runs each TES task by evaluating a template file for creating
+Kubernetes resources associated with the task.
+
+The task resource template is stored in a `ConfigMap` resource named
+`templates`. See [`configmap.yaml`](./chart/templates/configmap.yaml)
+for more information.
+
+By default, the template creates a `PersistentVolumeClaim` resource to
+provision storage for the task and a single `Pod` resource for executing the
+task.
 
 The task pod consists of several containers:
 
@@ -211,6 +220,17 @@ Running a TES task as a single pod has some performance benefits:
 * By attaching a volume at most once to a node for a task, a pod being
   scheduled on one node doesn't need to wait for the same volume to detach from
   a node where a task pod was executing previously.
+
+#### RBAC Authorization
+
+RBAC authorization is used to grant permissions to the Planetary orchestrator
+and monitor for creating and deleting Kubernetes resources, respectively.
+
+If additional resource kinds are required in the task template, ensure that the
+Planetary orchestrator is granted the `create` verb and that the Planetary
+monitor is granted the `delete` verb for the resource.
+
+See [`rbac.yaml`](./chart/templates/rbac.yaml) for more information.
 
 ## 🚀 Getting Started
 
@@ -306,7 +326,9 @@ docker build . --target planetary-migration --tag stjude-rust-labs/planetary-mig
 
 ### Loading the Container Images
 
-As `kind` cluster nodes run isolated from the host system, local container images must be explicitly loaded onto the nodes. To load the images, run the following command:
+As `kind` cluster nodes run isolated from the host system, local container
+images must be explicitly loaded onto the nodes. To load the images, run the
+following command:
 
 ```bash
 kind load docker-image -n planetary \
@@ -320,43 +342,53 @@ kind load docker-image -n planetary \
 ## ✨ Deploying Planetary
 
 > [!NOTE]
-> The Planetary Helm chart includes an optional pod-based PostgreSQL database for
-> local development and testing (enabled below with `postgresql.enabled=true`). In
-> this guide, we'll deploy Planetary using this ephemeral database. **This is for
-> demonstration purposes only—for anything other than local testing, we recommend
-> using an external managed database service that is backed up rather than the
-> included pod-based database.**
+> The Planetary Helm chart includes an optional pod-based PostgreSQL database
+> for local development and testing (enabled with `postgresql.enabled=true` in
+> `./chart/examples/staging.yaml`).
+>
+> In this guide, we'll deploy Planetary using this
+> ephemeral database. **This is for demonstration purposes only—for anything
+> other than local testing, we recommend using an external managed database
+> service that is backed up rather than the included pod-based database.**
+
+### Installing NFS
+
+The `planetary` orchestrator uses shared storage to communicate with task pods
+to coordinate the transfer of remote inputs and outputs into the storage
+attached to the pod.
+
+It is up to the cluster administrator to provide this storage to the
+orchestrator and task pods.
+
+For the purpose of deploying `planetary` into a development Kubernetes cluster,
+this guide will use an NFS server to provide the shared storage.
+
+Install [`nfs-operator`](https://github.com/krestomatio/nfs-operator)
+into the cluster:
+
+```bash
+kubectl apply -k 'https://github.com/krestomatio/nfs-operator/config/default?ref=v0.4.25'
+```
+
+`nfs-operator` will define a new Custom Resource Definition named `Ganesha` for
+managing [nfs-ganesha](https://github.com/nfs-ganesha/nfs-ganesha) services.
+
+### Installing Planetary
 
 To deploy Planetary with the included PostgreSQL database into a local
 Kubernetes cluster, run the following command:
 
 ```bash
-cd chart
-helm upgrade --install --create-namespace -n planetary planetary . \
-  --set api.image.name=stjude-rust-labs/planetary-api \
-  --set api.image.tag=staging \
-  --set orchestrator.image.name=stjude-rust-labs/planetary-orchestrator \
-  --set orchestrator.image.tag=staging \
-  --set monitor.image.name=stjude-rust-labs/planetary-monitor \
-  --set monitor.image.tag=staging \
-  --set transporter.image.name=stjude-rust-labs/planetary-transporter \
-  --set transporter.image.tag=staging \
-  --set migration.image.name=stjude-rust-labs/planetary-migration \
-  --set migration.image.tag=staging \
-  --set postgresql.enabled=true \
-  # Set a secure password here!
-  --set postgresql.password=mypassword \
-  # You may also need to reduce the resources for a local installation.
-  --set api.resources.limits.memory=1Gi \
-  --set orchestrator.resources.limits.memory=1Gi \
-  --set monitor.resources.limits.memory=1Gi \
-  --set postgresql.resources.limits.memory=1Gi
-cd ..
+helm upgrade --install --create-namespace -n planetary planetary chart \
+  --set postgresql.password='<mypassword>' \
+  -f chart/examples/staging.yaml
 ```
 
-**Note:** Replace `mypassword` with a secure password of your choice.
+**Note:** Replace `<mypassword>` with a secure password of your choice.
 
-The database schema will be automatically set up by a post-install Helm hook that runs after the chart is deployed. The migration job waits for the database to be ready (up to 10 minutes) and then runs the necessary migrations.
+The database schema will be automatically set up by a post-install Helm hook
+that runs after the chart is deployed. The migration job waits for the database
+to be ready (up to 10 minutes) and then runs the necessary migrations.
 
 ### Verifying the Deployment
 
@@ -365,8 +397,11 @@ Check the status of the Planetary pods to see if they are `Running`:
 ```bash
 kubectl get pods -n planetary
 ```
+Note: it may take a little while for the `planetary-orchestrator` and
+`planetary-monitor` pods to become `Running` as they have dependencies on the
+NFS service.
 
-Once the Planetary service is running, you may forward the service port for
+Once the Planetary pods are running, you may forward the service port for
 accessing the TES API locally:
 
 ```bash

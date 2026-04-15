@@ -3,8 +3,8 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  namespace: {{ .Values.tasks.namespace }}
   name: orchestrator-role
+  namespace: {{ .Values.tasks.namespace }}
 rules:
 - apiGroups: [""]
   resources: ["pods"]
@@ -14,7 +14,7 @@ rules:
   verbs: ["get"]
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
-  verbs: ["create", "patch"]
+  verbs: ["create"]
 ---
 # Service account for the orchestrator
 apiVersion: v1
@@ -56,15 +56,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  namespace: {{ .Values.tasks.namespace }}
   name: monitor-role
+  namespace: {{ .Values.tasks.namespace }}
 rules:
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["list", "deletecollection", "patch"]
+  verbs: ["list", "watch", "delete"]
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
-  verbs: ["deletecollection", "patch"]
+  verbs: ["delete"]
 ---
 # Service account for the monitor
 apiVersion: v1

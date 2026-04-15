@@ -30,15 +30,12 @@ use tes::v1::types::responses::OutputFile;
 use tes::v1::types::responses::Task;
 use tes::v1::types::responses::TaskLog;
 use tes::v1::types::responses::TaskResponse;
-use tes::v1::types::task::Input;
-use tes::v1::types::task::Output;
 use tes::v1::types::task::State;
 use tracing::debug;
 use tracing::info;
 
 use super::Database;
 use super::DatabaseResult;
-use super::TaskIo;
 use crate::TerminatedContainer;
 
 pub(crate) mod models;
@@ -427,30 +424,6 @@ impl Database for PostgresDatabase {
         }
     }
 
-    async fn get_task_io(&self, tes_id: &str) -> DatabaseResult<TaskIo> {
-        use diesel::*;
-        use diesel_async::RunQueryDsl;
-
-        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
-
-        let (inputs, outputs): (
-            Option<models::Json<Vec<Input>>>,
-            Option<models::Json<Vec<Output>>>,
-        ) = schema::tasks::table
-            .select((schema::tasks::inputs, schema::tasks::outputs))
-            .filter(schema::tasks::tes_id.eq(tes_id))
-            .first(&mut conn)
-            .await
-            .optional()
-            .map_err(Error::Diesel)?
-            .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?;
-
-        Ok(TaskIo {
-            inputs: inputs.map(models::Json::into_inner).unwrap_or_default(),
-            outputs: outputs.map(models::Json::into_inner).unwrap_or_default(),
-        })
-    }
-
     async fn get_in_progress_tasks(&self, before: DateTime<Utc>) -> DatabaseResult<Vec<String>> {
         use diesel::pg::sql_types::Timestamptz;
         use diesel::*;
@@ -482,6 +455,7 @@ impl Database for PostgresDatabase {
         state: State,
         messages: &[&str],
         containers: Option<BoxFuture<'a, Result<Vec<TerminatedContainer<'a>>>>>,
+        outputs: Option<&[OutputFile]>,
     ) -> DatabaseResult<bool> {
         use diesel::pg::sql_types::Array;
         use diesel::sql_types::Text;
@@ -563,6 +537,19 @@ impl Database for PostgresDatabase {
 
                     match updated {
                         Some(UpdatedTask { id }) => {
+                            if let Some(outputs) = outputs {
+                                diesel::update(schema::tasks::table)
+                                    .filter(
+                                        schema::tasks::tes_id
+                                            .eq(tes_id)
+                                            .and(schema::tasks::output_files.is_null()),
+                                    )
+                                    .set(schema::tasks::output_files.eq(models::Json(outputs)))
+                                    .execute(conn)
+                                    .await
+                                    .map_err(Error::Diesel)?;
+                            }
+
                             if let Some(containers) = containers {
                                 // Insert the containers
                                 let containers = containers.await?;
@@ -605,30 +592,6 @@ impl Database for PostgresDatabase {
         sql_query("UPDATE tasks SET system_logs = array_cat(system_logs, $1) WHERE tes_id = $2")
             .bind::<Array<Text>, _>(messages)
             .bind::<Text, _>(tes_id)
-            .execute(&mut conn)
-            .await
-            .map_err(Error::Diesel)?;
-
-        Ok(())
-    }
-
-    async fn update_task_output_files(
-        &self,
-        tes_id: &str,
-        files: &[OutputFile],
-    ) -> DatabaseResult<()> {
-        use diesel::*;
-        use diesel_async::RunQueryDsl;
-
-        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
-
-        diesel::update(schema::tasks::table)
-            .filter(
-                schema::tasks::tes_id
-                    .eq(tes_id)
-                    .and(schema::tasks::output_files.is_null()),
-            )
-            .set(schema::tasks::output_files.eq(models::Json(files)))
             .execute(&mut conn)
             .await
             .map_err(Error::Diesel)?;

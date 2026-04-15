@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Added creating Kubernetes resources via a template ([#38](https://github.com/stjude-rust-labs/planetary/pull/38)).
+* Added shared storage for communicating inputs and outputs to task pods ([#38](https://github.com/stjude-rust-labs/planetary/pull/38)).
 * Added support for reading Azure Storage credentials from the K8s secret ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).
 
 #### Fixed

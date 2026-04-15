@@ -36,7 +36,7 @@ futures.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
 planetary-db = { version = "0.1.0", path = "../db" }
-planetary-server = { version = "0.1.0", path = "../server" }
+planetary-server = { version = "0.1.0", path = "../server", features = ["templating"] }
 reqwest.workspace = true
 secrecy.workspace = true
 tes.workspace = true

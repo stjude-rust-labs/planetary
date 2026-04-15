@@ -88,25 +88,29 @@ orchestrator:
   service:
     type: ClusterIP
     port: 8080
-  storageClass: null # use default storage class
   resources:
     requests:
       cpu: 2000m
     limits:
       memory: 4Gi
+  # Properties for the orchestrator storage volume
+  # This is a required value and the volume must support a shared file system.
+  storage:
   log: info
   # Configuration for scheduling preemptible tasks.
-  preemptible: null
+  # preemptible:
   #   # The node selector to apply to preemptible tasks.
   #   #
-  #   # - For Azure Kubernetes Service (AKS), this should be
-  #   #   "kubernetes.azure.com/scalesetpriority=spot".
-  #   nodeSelector: "kubernetes.azure.com/scalesetpriority=spot"
-  #   # The taint to apply to preemptible tasks.
+  #   # - For Azure Kubernetes Service (AKS), this should be:
+  #   nodeSelector:
+  #     key: kubernetes.azure.com/scalesetpriority
+  #     value: spot
+  #   # The toleration to apply to preemptible tasks.
   #   #
-  #   # - For Azure Kubernetes Service (AKS), this should be
-  #   #   "kubernetes.azure.com/scalesetpriority=spot:NoSchedule".
-  #   taint: "kubernetes.azure.com/scalesetpriority=spot:NoSchedule"
+  #   # - For Azure Kubernetes Service (AKS), this should be:
+  #   toleration:
+  #     key: kubernetes.azure.com/scalesetpriority
+  #     value: spot:NoSchedule
 
 # Configuration relating to the monitor service that is responsible
 # for ensuring tasks do not become orphaned.
@@ -133,6 +137,9 @@ transporter:
   image:
     name: ghcr.io/stjude-rust-labs/planetary-transporter
     tag: null
+  cpu: 1
+  memory: 256Mi
+  log: info
   storage:
     # Configuration for Azure Storage
     azure: null
@@ -174,22 +181,24 @@ migration:
 # If you need other access, add egress rules below.
 networkPolicies:
   enabled: false
-  egressRules:
   # Allows for custom egress rules from the tasks namespace.
+  egressRules:
   # Below is an example that allows public internet access but blocks a
-  # common pod and service CIDR range.
-  #
+  # common pod and service CIDR range:
   # - to:
   #   - ipBlock:
   #       cidr: 0.0.0.0/0
   #       except:
   #         - 10.244.0.0/16
   #         - 10.0.0.0/16
-  #
-  # The default when enabled is allow all HTTPS traffic.
-    - to:
-      - ipBlock:
-          cidr: 0.0.0.0/0
-      ports:
-        - port: 443
-          protocol: TCP
+
+  # The default rule (when enabled) is to allow all HTTPS traffic.
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+      - port: 443
+        protocol: TCP
+
+# Extra Kubernetes resources to deploy along with Planetary
+extra: []
