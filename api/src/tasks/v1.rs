@@ -6,8 +6,8 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use axum::Extension;
 use axum::extract::State;
-use axum::http::StatusCode;
 use glob::Pattern;
 use planetary_db::format_log_message;
 use planetary_server::Error;
@@ -22,6 +22,7 @@ use tes::v1::types::requests::GetTaskParams;
 use tes::v1::types::requests::ListTasksParams;
 use tes::v1::types::requests::MAX_PAGE_SIZE;
 use tes::v1::types::requests::Task as RequestTask;
+use tes::v1::types::requests::View;
 use tes::v1::types::responses::CreatedTask;
 use tes::v1::types::responses::ListTasks;
 use tes::v1::types::responses::TaskResponse;
@@ -35,6 +36,7 @@ use tokio_retry2::Retry;
 use tokio_retry2::RetryError;
 use url::Url;
 
+use crate::Username;
 use crate::notify_retry;
 use crate::retry_durations;
 
@@ -260,6 +262,7 @@ fn validate_task(task: &RequestTask) -> Result<()> {
 
 /// The `POST /tasks` route.
 pub async fn create_task(
+    Extension(username): Extension<Username>,
     State(state): State<crate::State>,
     Json(task): Json<RequestTask>,
 ) -> ServerResponse<Json<CreatedTask>> {
@@ -267,7 +270,7 @@ pub async fn create_task(
         return Err(Error::bad_request(e.to_string()));
     }
 
-    let id = state.database.insert_task(&task).await?;
+    let id = state.database.insert_task(&username.0, &task).await?;
 
     // Notify an orchestrator service to start the task
     Retry::spawn_notify(
@@ -306,6 +309,7 @@ pub async fn create_task(
 
 /// The `GET /tasks` route.
 pub async fn list_tasks(
+    Extension(username): Extension<Username>,
     Query(params): Query<ListTasksParams>,
     State(state): State<crate::State>,
 ) -> ServerResponse<Json<ListTasks<TaskResponse>>> {
@@ -328,7 +332,7 @@ pub async fn list_tasks(
         ));
     }
 
-    let (tasks, next_page_token) = state.database.get_tasks(params).await?;
+    let (tasks, next_page_token) = state.database.get_tasks(&username.0, params).await?;
 
     Ok(Json(ListTasks {
         tasks,
@@ -339,20 +343,44 @@ pub async fn list_tasks(
 /// The `GET /tasks/:id` route.
 pub async fn get_task(
     Path(id): Path<String>,
+    Extension(username): Extension<Username>,
     Query(params): Query<GetTaskParams>,
     State(state): State<crate::State>,
 ) -> ServerResponse<Json<TaskResponse>> {
-    let task = state.database.get_task(&id, params).await?;
+    let task = state.database.get_task(&username.0, &id, params).await?;
     Ok(Json(task))
 }
 
 /// The `POST /tasks/:id:cancel` route.
 pub async fn cancel_task(
     Path(id): Path<String>,
+    Extension(username): Extension<Username>,
     State(state): State<crate::State>,
 ) -> ServerResponse<Json<serde_json::Value>> {
     // TODO: remove this once `matchit` 0.8.6 can be used
     let id = id.strip_suffix(":cancel").ok_or_else(Error::not_found)?;
+
+    // Check that the task is currently in a running state
+    // This also ensures that the task is associated with the request's user
+    let task = state
+        .database
+        .get_task(
+            &username.0,
+            id,
+            GetTaskParams {
+                view: View::Minimal,
+            },
+        )
+        .await?;
+    if !task
+        .as_minimal()
+        .expect("should be a minimal task")
+        .state
+        .unwrap_or_default()
+        .is_executing()
+    {
+        return Err(Error::not_cancelable());
+    }
 
     // Mark the task as canceling
     if !state
@@ -366,10 +394,7 @@ pub async fn cancel_task(
         )
         .await?
     {
-        return Err(Error {
-            status: StatusCode::BAD_REQUEST,
-            message: "task is not in a cancelable state".into(),
-        });
+        return Err(Error::not_cancelable());
     }
 
     // Notify the orchestrator service to cancel the task

@@ -164,6 +164,8 @@ impl Serialize for TagFilter {
 pub struct NewTask<'a> {
     /// The state of the task.
     pub state: TaskState,
+    /// The username associated with the task.
+    pub username: &'a str,
     /// The generated TES id for the task.
     pub tes_id: String,
     /// The optional name of the new task.
@@ -200,11 +202,12 @@ pub struct NewTask<'a> {
 
 impl<'a> NewTask<'a> {
     /// Constructs a new task model from the given create task request.
-    pub fn new(task: &'a RequestTask) -> Self {
+    pub fn new(username: &'a str, task: &'a RequestTask) -> Self {
         let resources = task.resources.as_ref();
 
         Self {
             state: TaskState::Unknown,
+            username,
             tes_id: format!("{:#}", Alphanumeric::new(20)),
             name: task.name.as_deref(),
             description: task.description.as_deref(),
@@ -460,6 +463,52 @@ impl From<FullTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
                 .map(|l| l.into_iter().map(Option::unwrap_or_default).collect())
                 .unwrap_or_default(),
         )
+    }
+}
+
+/// Represents template data of a task.
+#[derive(Debug, Queryable, Selectable, Identifiable)]
+#[diesel(table_name = super::schema::tasks)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct TaskTemplateData {
+    /// The task database identifier.
+    pub id: i32,
+    /// The TES identifier of the task.
+    pub tes_id: String,
+    /// The task inputs.
+    pub inputs: Option<Json<Vec<Input>>>,
+    /// The task outputs.
+    pub outputs: Option<Json<Vec<Output>>>,
+    /// The requested task CPU cores.
+    pub cpu_cores: Option<i32>,
+    /// Whether or not the task may be preemptible.
+    pub preemptible: Option<bool>,
+    /// The requested task memory (in GB).
+    pub ram_gb: Option<f64>,
+    /// The requested task disk (in GB).
+    pub disk_gb: Option<f64>,
+    /// The task executors.
+    pub executors: Json<Vec<Executor>>,
+    /// The requested volumes for the task.
+    pub volumes: Option<Vec<Option<String>>>,
+}
+
+impl From<TaskTemplateData> for crate::TaskTemplateData {
+    fn from(data: TaskTemplateData) -> Self {
+        Self {
+            id: data.tes_id,
+            preemptible: data.preemptible.unwrap_or(false),
+            cpu: data.cpu_cores,
+            memory: data.ram_gb,
+            disk: data.disk_gb,
+            inputs: data.inputs.map(Json::into_inner).unwrap_or_default(),
+            outputs: data.outputs.map(Json::into_inner).unwrap_or_default(),
+            volumes: data
+                .volumes
+                .map(|c| c.into_iter().map(Option::unwrap).collect())
+                .unwrap_or_default(),
+            executors: data.executors.into_inner(),
+        }
     }
 }
 

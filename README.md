@@ -149,6 +149,29 @@ There are currently four images created for use with Planetary:
 * `stjude-rust-labs/planetary-transporter` - implements the _Transporter_ used
   for downloading task inputs and uploading task outputs.
 
+### API Server Request Authentication
+
+The Planetary API server ***performs no authentication of requests***.
+
+However, requests must be associated with a username in one of two ways (in
+order of precedence):
+
+* The request includes a `X-Forwarded-User` header. This is typically set by
+  upstream authentication proxies that sit between the TES client and Planetary.
+
+* The request includes a basic `Authorization` header with a non-empty
+  username (***the password is ignored***). This can be used for testing
+  purposes with TES clients that support basic authentication.
+
+If a TES API request has neither header present, a 403 is returned from the
+Planetary API Server.
+
+Planetary uses the username specified in the header to associate tasks with
+that user.
+
+The user may only retrieve, list, and cancel tasks that with the _same_
+username.
+
 ### Supported Cloud Storage
 
 Planetary supports the following cloud storage services:

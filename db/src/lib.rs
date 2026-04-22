@@ -14,6 +14,7 @@ use tes::v1::types::requests::ListTasksParams;
 use tes::v1::types::requests::Task as RequestTask;
 use tes::v1::types::responses::OutputFile;
 use tes::v1::types::responses::TaskResponse;
+use tes::v1::types::task::Executor;
 use tes::v1::types::task::Input;
 use tes::v1::types::task::Output;
 use tes::v1::types::task::State;
@@ -90,27 +91,66 @@ pub struct TerminatedContainer<'a> {
     pub exit_code: i32,
 }
 
+/// Represents data used for rendering task resource templates.
+#[derive(Debug, Clone)]
+pub struct TaskTemplateData {
+    /// The TES identifier of the task.
+    pub id: String,
+    /// Whether or not the task is preemptible.
+    pub preemptible: bool,
+    /// The requested CPU cores for the task.
+    ///
+    /// This is `None` when the default CPU cores should be used.
+    pub cpu: Option<i32>,
+    /// The requested memory for the task (in gigabytes).
+    ///
+    /// This is `None` when the default memory should be used.
+    pub memory: Option<f64>,
+    /// The requested disk for the task (in gigabytes).
+    ///
+    /// This is `None` when the default disk size should be used.
+    pub disk: Option<f64>,
+    /// The task's inputs.
+    pub inputs: Vec<Input>,
+    /// The task's outputs.
+    pub outputs: Vec<Output>,
+    /// The task's volumes.
+    pub volumes: Vec<String>,
+    /// The task's executors.
+    pub executors: Vec<Executor>,
+}
+
 /// An abstraction for the planetary database.
 #[async_trait::async_trait]
 pub trait Database: Send + Sync + 'static {
-    /// Inserts a task into the database.
+    /// Inserts a task into the database for the specified user.
     ///
     /// Note: it is expected that the newly inserted task has the `UNKNOWN`
     /// state.
     ///
     /// Returns the generated TES task identifier.
-    async fn insert_task(&self, task: &RequestTask) -> DatabaseResult<String>;
+    async fn insert_task(&self, username: &str, task: &RequestTask) -> DatabaseResult<String>;
 
-    /// Gets a task from the database.
-    async fn get_task(&self, tes_id: &str, params: GetTaskParams) -> DatabaseResult<TaskResponse>;
+    /// Gets a task from the database for the specified user.
+    async fn get_task(
+        &self,
+        username: &str,
+        tes_id: &str,
+        params: GetTaskParams,
+    ) -> DatabaseResult<TaskResponse>;
 
-    /// Gets tasks from the database.
+    /// Gets tasks from the database for the specified user.
     ///
     /// Returns a list of tasks and the page token to use for the next request.
     async fn get_tasks(
         &self,
+        username: &str,
         params: ListTasksParams,
     ) -> DatabaseResult<(Vec<TaskResponse>, Option<String>)>;
+
+    /// Gets a task's template data for use in rendering Kubernetes resource
+    /// templates.
+    async fn get_task_template_data(&self, tes_id: &str) -> DatabaseResult<TaskTemplateData>;
 
     /// Gets the TES identifiers of in-progress tasks.
     ///

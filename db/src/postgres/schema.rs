@@ -44,6 +44,7 @@ diesel::table! {
 
     tasks (id) {
         id -> Int4,
+        username -> Text,
         tes_id -> Text,
         state -> TaskState,
         name -> Nullable<Text>,

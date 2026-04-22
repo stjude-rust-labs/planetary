@@ -1,6 +1,7 @@
 //! Routes related to tasks.
 
 use axum::Router;
+use axum::middleware;
 use axum::routing::get;
 use axum::routing::post;
 
@@ -18,4 +19,5 @@ pub fn router() -> Router<State> {
         // TODO: the path should be `/v1/tasks/{id}:cancel`, but that's not supported until
         // `matchit`` 0.8.6; we're currently on 0.8.4 via `axum`
         .route("/v1/tasks/{id}", post(v1::cancel_task))
+        .layer(middleware::from_fn(crate::auth))
 }

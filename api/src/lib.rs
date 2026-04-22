@@ -4,10 +4,18 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::IntoResponse;
+use axum::response::Response;
+use axum_extra::TypedHeader;
+use axum_extra::headers::Authorization;
+use axum_extra::headers::authorization::Basic;
 use bon::Builder;
 use planetary_db::Database;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
+use planetary_server::Error;
 use reqwest::Client;
 use secrecy::SecretString;
 use tes::v1::types::responses::ServiceInfo;
@@ -40,6 +48,43 @@ fn notify_retry(e: &reqwest::Error, duration: Duration) {
         "network operation failed: {e} (retrying after {duration} seconds)",
         duration = duration.as_secs()
     );
+}
+
+/// An extension for passing the request username through from the
+/// authentication middleware.
+#[derive(Clone)]
+struct Username(String);
+
+/// Middleware function to perform auth lookup against the request.
+///
+/// This middleware does not actually perform any authentication of the user.
+///
+/// If the `X-Forwarded-User` header is present, it is respected over the
+/// `Authorization` header.
+///
+/// The intention of this middleware is to simply to enforce that a username was
+/// sent with the request.
+async fn auth(
+    authorization: Option<TypedHeader<Authorization<Basic>>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    // First respect the `X-Forwarded-User` header, then the `Authorization` header
+    let username = match (
+        request
+            .headers()
+            .get("X-Forwarded-User")
+            .map(|v| v.to_str()),
+        &authorization,
+    ) {
+        (Some(Ok(username)), _) if !username.is_empty() => username,
+        (None, Some(auth)) if !auth.username().is_empty() => auth.username(),
+        _ => return Error::forbidden().into_response(),
+    }
+    .to_string();
+
+    request.extensions_mut().insert(Username(username));
+    next.run(request).await
 }
 
 /// Represents information about the orchestrator service.

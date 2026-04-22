@@ -15,13 +15,13 @@ use kube::api::GroupVersionKind;
 use kube::discovery::ApiCapabilities;
 use kube::discovery::Scope;
 use kube::runtime::reflector::Lookup;
+use planetary_db::TaskTemplateData;
 use serde::Deserialize as _;
 use serde_yaml_ng::Deserializer;
 use tera::Context;
 use tera::Map;
 use tera::Tera;
 use tera::Value;
-use tes::v1::types::responses::Task;
 use tes::v1::types::task::Executor;
 
 /// The orchestrator id label.
@@ -98,23 +98,18 @@ impl Template {
     /// with a restart policy of `Never`.
     pub fn render(
         &self,
-        task: &Task,
+        data: &TaskTemplateData,
         discovery: &Discovery,
         namespace: &str,
         script: impl Fn(&Executor) -> Result<String>,
     ) -> Result<Vec<TaskResource>> {
         let rendered = self
             .0
-            .render(TEMPLATE_NAME, &Self::create_context(task, script)?)
+            .render(TEMPLATE_NAME, &Self::create_context(data, script)?)
             .context("failed to render task resource template")?;
 
-        let id = task
-            .id
-            .as_deref()
-            .context("task does not have an identifier")?;
-
         let resources = serde_yaml_ng::Deserializer::from_str(&rendered)
-            .map(|de| self.deserialize_object(id, discovery, namespace, de))
+            .map(|de| self.deserialize_object(&data.id, discovery, namespace, de))
             .collect::<Result<Vec<_>>>()?;
 
         // Ensure there is exactly one pod that has a restart policy of `Never`
@@ -156,9 +151,16 @@ impl Template {
     ) -> Result<Vec<TaskResource>> {
         // Render the template using only the identifier of the task
         self.render(
-            &Task {
-                id: Some(id.into()),
-                ..Default::default()
+            &TaskTemplateData {
+                id: id.into(),
+                preemptible: false,
+                cpu: None,
+                memory: None,
+                disk: None,
+                inputs: Default::default(),
+                outputs: Default::default(),
+                volumes: Default::default(),
+                executors: Default::default(),
             },
             discovery,
             namespace,
@@ -173,7 +175,7 @@ impl Template {
     ///
     /// Returns an error if the task was invalid.
     fn create_context(
-        task: &Task,
+        data: &TaskTemplateData,
         script: impl Fn(&Executor) -> Result<String>,
     ) -> Result<Context> {
         /// Helper for inserting items into the context.
@@ -185,35 +187,18 @@ impl Template {
             context.insert(name.into(), value.into());
         }
 
-        let resources = task.resources.as_ref();
-
         let mut context = Map::new();
-        insert(
-            &mut context,
-            "id",
-            task.id.as_deref().context("task should have id")?,
-        );
-        insert(
-            &mut context,
-            "preemptible",
-            resources.and_then(|r| r.preemptible).unwrap_or(false),
-        );
+        insert(&mut context, "id", data.id.as_str());
+        insert(&mut context, "preemptible", data.preemptible);
 
         // Set the requested resources
-        insert(
-            &mut context,
-            "cpu",
-            resources.and_then(|r| r.cpu_cores).unwrap_or(DEFAULT_CPU),
-        );
+        insert(&mut context, "cpu", data.cpu.unwrap_or(DEFAULT_CPU));
         insert(
             &mut context,
             "memory",
             format!(
                 "{memory}G",
-                memory = resources
-                    .and_then(|r| r.ram_gb)
-                    .unwrap_or(DEFAULT_MEMORY)
-                    .ceil()
+                memory = data.memory.unwrap_or(DEFAULT_MEMORY).ceil()
             ),
         );
         insert(
@@ -221,42 +206,23 @@ impl Template {
             "disk",
             format!(
                 "{disk}G",
-                disk = resources
-                    .and_then(|r| r.disk_gb)
-                    .unwrap_or(0.0)
-                    .max(DEFAULT_STORAGE_SIZE)
+                disk = data.disk.unwrap_or(0.0).max(DEFAULT_STORAGE_SIZE)
             ),
         );
 
         // Set the inputs
-        let inputs: Vec<Value> = task
-            .inputs
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .map(|i| i.path.clone().into())
-            .collect();
+        let inputs: Vec<Value> = data.inputs.iter().map(|i| i.path.clone().into()).collect();
         insert(&mut context, "inputs", inputs);
 
         // Set the outputs
-        let outputs: Vec<Value> = task
-            .outputs
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .map(|o| o.path.clone().into())
-            .collect();
+        let outputs: Vec<Value> = data.outputs.iter().map(|o| o.path.clone().into()).collect();
         insert(&mut context, "outputs", outputs);
 
         // Set the volumes
-        insert(
-            &mut context,
-            "volumes",
-            task.volumes.as_deref().unwrap_or_default(),
-        );
+        insert(&mut context, "volumes", data.volumes.as_slice());
 
         // Set the executors
-        let executors: Vec<Value> = task
+        let executors: Vec<Value> = data
             .executors
             .iter()
             .map(|e| {
