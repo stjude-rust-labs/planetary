@@ -169,7 +169,7 @@ Planetary API Server.
 Planetary uses the username specified in the header to associate tasks with
 that user.
 
-The user may only retrieve, list, and cancel tasks that with the _same_
+The user may only retrieve, list, and cancel tasks with the _same_
 username.
 
 ### Supported Cloud Storage
