@@ -1,4 +1,4 @@
-# This file is used to install the Planetary chart into a "staging" cluster.
+# This file is used to install the Planetary chart into a "development" cluster.
 # See README.md for a walkthrough on installing the chart.
 api:
   replicas: 1
@@ -6,14 +6,14 @@ api:
   log: info
   image:
     name: stjude-rust-labs/planetary-api
-    tag: staging
+    tag: dev
 
 orchestrator:
   replicas: 1
   log: info
   image:
     name: stjude-rust-labs/planetary-orchestrator
-    tag: staging
+    tag: dev
   storage:
     nfs:
       server: 10.96.85.10
@@ -23,18 +23,18 @@ monitor:
   log: info
   image:
     name: stjude-rust-labs/planetary-monitor
-    tag: staging
+    tag: dev
 
 transporter:
   log: info
   image:
     name: stjude-rust-labs/planetary-transporter
-    tag: staging
+    tag: dev
 
 migration:
   image:
     name: stjude-rust-labs/planetary-migration
-    tag: staging
+    tag: dev
 
 postgresql:
   enabled: true

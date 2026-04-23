@@ -380,35 +380,35 @@ To build the `stjude-rust-labs/planetary-api` container image, run the
 following command:
 
 ```bash
-docker build . --target planetary-api --tag stjude-rust-labs/planetary-api:staging
+docker build . --target planetary-api --tag stjude-rust-labs/planetary-api:dev
 ```
 
 To build the `stjude-rust-labs/planetary-orchestrator` container image, run the
 following command:
 
 ```bash
-docker build . --target planetary-orchestrator --tag stjude-rust-labs/planetary-orchestrator:staging
+docker build . --target planetary-orchestrator --tag stjude-rust-labs/planetary-orchestrator:dev
 ```
 
 To build the `stjude-rust-labs/planetary-orchestrator` container image, run the
 following command:
 
 ```bash
-docker build . --target planetary-monitor --tag stjude-rust-labs/planetary-monitor:staging
+docker build . --target planetary-monitor --tag stjude-rust-labs/planetary-monitor:dev
 ```
 
 To build the `stjude-rust-labs/planetary-transporter` container image,
 run the following command:
 
 ```bash
-docker build . --target planetary-transporter --tag stjude-rust-labs/planetary-transporter:staging
+docker build . --target planetary-transporter --tag stjude-rust-labs/planetary-transporter:dev
 ```
 
 To build the `stjude-rust-labs/planetary-migration` container image (for database migrations),
 run the following command:
 
 ```bash
-docker build . --target planetary-migration --tag stjude-rust-labs/planetary-migration:staging
+docker build . --target planetary-migration --tag stjude-rust-labs/planetary-migration:dev
 ```
 
 ### Loading the Container Images
@@ -419,11 +419,11 @@ following command:
 
 ```bash
 kind load docker-image -n planetary \
-  stjude-rust-labs/planetary-api:staging \
-  stjude-rust-labs/planetary-orchestrator:staging \
-  stjude-rust-labs/planetary-monitor:staging \
-  stjude-rust-labs/planetary-transporter:staging \
-  stjude-rust-labs/planetary-migration:staging
+  stjude-rust-labs/planetary-api:dev \
+  stjude-rust-labs/planetary-orchestrator:dev \
+  stjude-rust-labs/planetary-monitor:dev \
+  stjude-rust-labs/planetary-transporter:dev \
+  stjude-rust-labs/planetary-migration:dev
 ```
 
 ## ✨ Deploying Planetary
@@ -431,7 +431,7 @@ kind load docker-image -n planetary \
 > [!NOTE]
 > The Planetary Helm chart includes an optional pod-based PostgreSQL database
 > for local development and testing (enabled with `postgresql.enabled=true` in
-> `./chart/examples/staging.yaml`).
+> `./chart/examples/development.yaml`).
 >
 > In this guide, we'll deploy Planetary using this
 > ephemeral database. **This is for demonstration purposes only—for anything
@@ -463,12 +463,12 @@ managing [nfs-ganesha](https://github.com/nfs-ganesha/nfs-ganesha) services.
 ### Installing Planetary
 
 To deploy Planetary with the included PostgreSQL database into a local
-Kubernetes cluster, run the following command:
+development Kubernetes cluster, run the following command:
 
 ```bash
 helm upgrade --install --create-namespace -n planetary planetary chart \
   --set postgresql.password='<mypassword>' \
-  -f chart/examples/staging.yaml
+  -f chart/examples/development.yaml
 ```
 
 **Note:** Replace `<mypassword>` with a secure password of your choice.
