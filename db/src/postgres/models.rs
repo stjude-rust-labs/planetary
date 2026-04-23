@@ -323,7 +323,7 @@ impl From<BasicTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
                 disk_gb: task.disk_gb,
                 zones: task
                     .zones
-                    .map(|z| z.into_iter().map(Option::unwrap).collect()),
+                    .map(|z| z.into_iter().map(Option::unwrap_or_default).collect()),
                 backend_parameters: task.backend_parameters.map(Json::into_inner),
                 backend_parameters_strict: task.backend_parameters_strict,
             })
@@ -350,7 +350,7 @@ impl From<BasicTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
                 executors: task.executors.into_inner(),
                 volumes: task
                     .volumes
-                    .map(|z| z.into_iter().map(Option::unwrap).collect()),
+                    .map(|z| z.into_iter().map(Option::unwrap_or_default).collect()),
                 tags: task.tags.map(Json::into_inner),
                 logs: None,
                 creation_time: Some(task.creation_time),
@@ -433,7 +433,7 @@ impl From<FullTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
                 disk_gb: task.disk_gb,
                 zones: task
                     .zones
-                    .map(|z| z.into_iter().map(Option::unwrap).collect()),
+                    .map(|z| z.into_iter().map(Option::unwrap_or_default).collect()),
                 backend_parameters: task.backend_parameters.map(Json::into_inner),
                 backend_parameters_strict: task.backend_parameters_strict,
             })
@@ -453,7 +453,7 @@ impl From<FullTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
                 executors: task.executors.into_inner(),
                 volumes: task
                     .volumes
-                    .map(|z| z.into_iter().map(Option::unwrap).collect()),
+                    .map(|z| z.into_iter().map(Option::unwrap_or_default).collect()),
                 tags: task.tags.map(Json::into_inner),
                 logs: None,
                 creation_time: Some(task.creation_time),
@@ -505,7 +505,7 @@ impl From<TaskTemplateData> for crate::TaskTemplateData {
             outputs: data.outputs.map(Json::into_inner).unwrap_or_default(),
             volumes: data
                 .volumes
-                .map(|c| c.into_iter().map(Option::unwrap).collect())
+                .map(|c| c.into_iter().map(Option::unwrap_or_default).collect())
                 .unwrap_or_default(),
             executors: data.executors.into_inner(),
         }

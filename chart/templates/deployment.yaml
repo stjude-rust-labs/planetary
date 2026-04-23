@@ -81,6 +81,8 @@ spec:
               secretKeyRef:
                 name: orchestrator-auth
                 key: api-key
+          - name: ALLOW_AUTHORIZATION_FALLBACK
+            value: "{{ .Values.api.allowAuthorizationFallback }}"
 ---
 # Deployment for the Planetary orchestrator service
 apiVersion: apps/v1

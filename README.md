@@ -55,62 +55,124 @@ aspects of security to ensure they meet your standards and adequately protect
 your environment.
 
 As a starting point, we recommend you review the following aspects of your
-deployment and the Helm chart. Keep in mind that this list is non-exhaustive, so
-you should do your own research to create a complete list of concerns to
-consider in your situation.
+deployment and the Helm chart.
 
-- **Ingress and external exposure.** The services provided by Planetary
-  include **no authentication or authorization at all and will accept and
-  execute unauthenticated requests if you do not take action to secure them
-  further**. It is imperative that you restrict these services using external
-  authentication and authorization mechanisms. Further, we encourage you to
-  review any Services or Ingress resources included in the chart to confirm they
-  are exposed only as needed. Ensure TLS termination, authentication,
-  authorization, and rate-limiting are configured according to your policies,
-  and integrate the service with a web application firewall.
-- **RBAC permissions.** We've scoped roles and bindings according to what we
-  believe to be least-privilege access. Review these to ensure they align with
-  your internal access control policies and compliance standards.
-- **Pod security contexts.** We’ve configured workloads to run as non-root
-  and use read-only file systems where possible. These measures help limit
-  container privileges and reduce the attack surface. Confirm these settings
-  meet your container hardening requirements for all deployments and containers.
-- **Network policies.** We include policies to restrict pod-to-pod ingress
-  and egress traffic, balancing security with ease of configuration. Validate
-  that these meet your segmentation, isolation, and ingress/egress control
-  goals.
-- **Secrets management.** We've defined Kubernetes Secrets where needed and
-  structured their use for secure injection. Verify these secrets meet your
-  standards for confidentiality, access control, and rotation.
-- **Credentials.** This chart does not provide default passwords or API
-  keys. You must set secure, unique credentials for all components before
-  deployment.
-- **Resource limits and requests.** We've set default CPU and memory
-  constraints to encourage efficient scheduling and prevent resource exhaustion.
+Keep in mind that this list is non-exhaustive, so you should do your own
+research to create a complete list of concerns to consider in your situation:
+
+- **Ingress and external exposure.**
+
+  The services provided by Planetary include ***no authentication at all and
+  will accept and execute unauthenticated requests if you do not take action to
+  secure them further***.
+
+  It is ***imperative*** that you restrict access to these services using
+  external authentication mechanisms.
+
+  The Planetary API server expects the authentication process to send the
+  request with the `X-Forwarded-User` header set to the username resulting from
+  authentication.
+
+  The header's value is ***implicitly trusted*** by the API server and is
+  unverified by Planetary. Allowing external clients direct access to the
+  Planetary API server would result in trivial authorization bypass.
+
+  Further, we encourage you to review any Services or Ingress resources
+  included in the chart to confirm they are exposed only as needed.
+
+  Ensure TLS termination, authentication, authorization, and rate-limiting are
+  configured according to your policies, and integrate the service with a web
+  application firewall.
+
+- **RBAC permissions.**
+
+  We've scoped roles and bindings according to what we believe to be
+  least-privilege access.
+
+  Review these to ensure they align with your internal access control policies
+  and compliance standards.
+
+- **Pod security contexts.**
+
+  We’ve configured workloads to run as non-root and use read-only file systems
+  where possible. These measures help limit container privileges and reduce the
+  attack surface.
+
+  Confirm these settings meet your container hardening requirements for all
+  deployments and containers.
+
+- **Network policies.**
+
+  We include policies to restrict pod-to-pod ingress and egress traffic,
+  balancing security with ease of configuration.
+
+  Validate that these meet your segmentation, isolation, and ingress/egress
+  control goals.
+
+- **Secrets management.**
+
+  We've defined Kubernetes Secrets where needed and structured their use for
+  secure injection.
+
+  Verify these secrets meet your standards for confidentiality, access control,
+  and rotation.
+
+- **Credentials.**
+
+  This chart does not provide default passwords or API keys.
+
+  You must set secure, unique credentials for all components before deployment.
+
+- **Resource limits and requests.**
+
+  We've set default CPU and memory constraints to encourage efficient
+  scheduling and prevent resource exhaustion.
+
   Adjust these for your expected workloads.
-- **Container images and supply chain security.** We use version-pinned
-  images from known registries. Review these to ensure they come from sources
-  you trust, are vulnerability-scanned, and, where appropriate, have verified
-  signatures.
-- **Monitoring, logging, and alerting.** Implement robust observability for
-  timely incident detection and response. Configure logging to avoid exposing
-  sensitive information, and ensure log retention complies with your policies.
-- **Automated compliance scanning.** Use automated Kubernetes security
-  scanners to verify compliance with your organizational policies.
-- **Upgrades and patch management.** Keep Planetary and its dependencies
-  up-to-date. We may publish chart updates in response to vulnerabilities, but
-  you are responsible for monitoring for published updates and applying them
-  promptly.
-- **Cluster environment assumptions.** This chart assumes it is deployed
-  into a hardened Kubernetes cluster (e.g., restricted API server access,
-  encrypted etcd, secure CSI drivers). Ensure your cluster meets these
-  prerequisites.
-- **Backups and disaster recovery.** If Planetary stores persistent state in
-  your environment, implement a tested backup and restore process.
+
+- **Container images and supply chain security.**
+
+  We use version-pinned images from known registries.
+
+  Review these to ensure they come from sources you trust, are
+  vulnerability-scanned, and, where appropriate, have verified signatures.
+
+- **Monitoring, logging, and alerting.**
+
+  Implement robust observability for timely incident detection and response.
+
+  Configure logging to avoid exposing sensitive information, and ensure log
+  retention complies with your policies.
+
+- **Automated compliance scanning.**
+
+  Use automated Kubernetes security scanners to verify compliance with your
+  organizational policies.
+
+- **Upgrades and patch management.**
+
+  Keep Planetary and its dependencies up-to-date.
+
+  We may publish chart updates in response to vulnerabilities, but you are
+  responsible for monitoring for published updates and applying them promptly.
+
+- **Cluster environment assumptions.**
+
+  This chart assumes it is deployed into a hardened Kubernetes cluster (e.g.,
+  restricted API server access, encrypted etcd, secure CSI drivers).
+
+  Ensure your cluster meets these prerequisites.
+
+- **Backups and disaster recovery.**
+
+  If Planetary stores persistent state in your environment, implement a tested
+  backup and restore process.
 
 We recommend regularly auditing your deployment to ensure continued security and
-operational integrity. Default settings may not be sufficient for all use
-cases—review and customize configurations as appropriate for your environment.
+operational integrity.
+
+Default settings may not be sufficient for all use cases; please review and
+customize configurations as appropriate for your environment.
 
 ### Architecture
 
@@ -160,8 +222,10 @@ order of precedence):
   upstream authentication proxies that sit between the TES client and Planetary.
 
 * The request includes a basic `Authorization` header with a non-empty
-  username (***the password is ignored***). This can be used for testing
-  purposes with TES clients that support basic authentication.
+  username (***the password is ignored***). The check for this header is
+  disabled by default and is only enabled if the `api.allowAuthorizationFallback`
+  value in the chart is set to `true`. This can be used for testing purposes
+  with TES clients that support basic authentication.
 
 If a TES API request has neither header present, a 403 is returned from the
 Planetary API Server.

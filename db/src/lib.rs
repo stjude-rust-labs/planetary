@@ -150,6 +150,10 @@ pub trait Database: Send + Sync + 'static {
 
     /// Gets a task's template data for use in rendering Kubernetes resource
     /// templates.
+    ///
+    /// NOTE: this database operation does _not_ filter the template data by
+    /// user; it should only be used from internal contexts (e.g. from the
+    /// Orchestrator) where authorization is assumed.
     async fn get_task_template_data(&self, tes_id: &str) -> DatabaseResult<TaskTemplateData>;
 
     /// Gets the TES identifiers of in-progress tasks.

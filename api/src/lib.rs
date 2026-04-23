@@ -65,6 +65,7 @@ struct Username(String);
 /// The intention of this middleware is to simply to enforce that a username was
 /// sent with the request.
 async fn auth(
+    allow_authorization_fallback: bool,
     authorization: Option<TypedHeader<Authorization<Basic>>>,
     mut request: Request,
     next: Next,
@@ -77,8 +78,12 @@ async fn auth(
             .map(|v| v.to_str()),
         &authorization,
     ) {
+        // Note: if the `X-Forwarded-User` is present but malformed (i.e. `Some(Err(_))`), then we
+        // intentionally return forbidden rather than look at the `Authorization` header
         (Some(Ok(username)), _) if !username.is_empty() => username,
-        (None, Some(auth)) if !auth.username().is_empty() => auth.username(),
+        (None, Some(auth)) if allow_authorization_fallback && !auth.username().is_empty() => {
+            auth.username()
+        }
         _ => return Error::forbidden().into_response(),
     }
     .to_string();
@@ -100,13 +105,10 @@ struct OrchestratorServiceInfo {
 struct State {
     /// The HTTP client for communicating with the orchestration service.
     client: Arc<Client>,
-
     /// The service information.
     info: Arc<ServiceInfo>,
-
     /// The TES database.
     database: Arc<dyn Database>,
-
     /// The orchestrator service information.
     orchestrator: Arc<OrchestratorServiceInfo>,
 }
@@ -158,6 +160,9 @@ pub struct Server {
     /// The Planetary orchestrator service API key.
     #[builder(into)]
     orchestrator_api_key: SecretString,
+
+    /// Whether or not to allow fallback to the `Authorization` header.
+    allow_authorization_fallback: bool,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -185,7 +190,10 @@ impl Server {
         let server = planetary_server::Server::builder()
             .address(self.address)
             .port(self.port)
-            .routers(bon::vec![info::router(), tasks::router()])
+            .routers(bon::vec![
+                info::router(),
+                tasks::router(self.allow_authorization_fallback)
+            ])
             .build();
 
         let state = State::new(
@@ -194,6 +202,7 @@ impl Server {
             self.orchestrator_url,
             self.orchestrator_api_key,
         );
+
         server.run(state, shutdown).await?;
         Ok(())
     }

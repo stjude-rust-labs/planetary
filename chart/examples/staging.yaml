@@ -2,6 +2,7 @@
 # See README.md for a walkthrough on installing the chart.
 api:
   replicas: 1
+  allowAuthorizationFallback: true
   log: info
   image:
     name: stjude-rust-labs/planetary-api
