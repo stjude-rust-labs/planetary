@@ -42,7 +42,7 @@ CREATE TABLE tasks (
 -- Create an index on the `name` column for list operations.
 CREATE INDEX idx_tasks_name ON tasks (name text_pattern_ops);
 
--- Create an index on the `user` column for all task operations.
+-- Create an index on the `username` column for all task operations.
 CREATE INDEX idx_tasks_username ON tasks (username);
 
 -- Create an index on the `state` column for list operations.
