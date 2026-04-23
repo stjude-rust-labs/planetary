@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Added
+
+* Added `username` column to `tasks` table to associate tasks with TES API
+  users ([#40](https://github.com/stjude-rust-labs/planetary/pull/40)).
+
 #### Dependencies
 
 * Updated dependencies to latest ([#37](https://github.com/stjude-rust-labs/planetary/pull/37)).
