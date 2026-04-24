@@ -4,10 +4,18 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::IntoResponse;
+use axum::response::Response;
+use axum_extra::TypedHeader;
+use axum_extra::headers::Authorization;
+use axum_extra::headers::authorization::Basic;
 use bon::Builder;
 use planetary_db::Database;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
+use planetary_server::Error;
 use reqwest::Client;
 use secrecy::SecretString;
 use tes::v1::types::responses::ServiceInfo;
@@ -42,6 +50,48 @@ fn notify_retry(e: &reqwest::Error, duration: Duration) {
     );
 }
 
+/// An extension for passing the request username through from the
+/// authentication middleware.
+#[derive(Clone)]
+struct Username(String);
+
+/// Middleware function to perform auth lookup against the request.
+///
+/// This middleware does not actually perform any authentication of the user.
+///
+/// If the `X-Forwarded-User` header is present, it is respected over the
+/// `Authorization` header.
+///
+/// The intention of this middleware is to simply to enforce that a username was
+/// sent with the request.
+async fn auth(
+    allow_authorization_fallback: bool,
+    authorization: Option<TypedHeader<Authorization<Basic>>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    // First respect the `X-Forwarded-User` header, then the `Authorization` header
+    let username = match (
+        request
+            .headers()
+            .get("X-Forwarded-User")
+            .map(|v| v.to_str()),
+        &authorization,
+    ) {
+        // Note: if the `X-Forwarded-User` is present but malformed (i.e. `Some(Err(_))`), then we
+        // intentionally return forbidden rather than look at the `Authorization` header
+        (Some(Ok(username)), _) if !username.is_empty() => username,
+        (None, Some(auth)) if allow_authorization_fallback && !auth.username().is_empty() => {
+            auth.username()
+        }
+        _ => return Error::forbidden().into_response(),
+    }
+    .to_string();
+
+    request.extensions_mut().insert(Username(username));
+    next.run(request).await
+}
+
 /// Represents information about the orchestrator service.
 struct OrchestratorServiceInfo {
     /// The URL of the orchestrator service.
@@ -55,13 +105,10 @@ struct OrchestratorServiceInfo {
 struct State {
     /// The HTTP client for communicating with the orchestration service.
     client: Arc<Client>,
-
     /// The service information.
     info: Arc<ServiceInfo>,
-
     /// The TES database.
     database: Arc<dyn Database>,
-
     /// The orchestrator service information.
     orchestrator: Arc<OrchestratorServiceInfo>,
 }
@@ -113,6 +160,9 @@ pub struct Server {
     /// The Planetary orchestrator service API key.
     #[builder(into)]
     orchestrator_api_key: SecretString,
+
+    /// Whether or not to allow fallback to the `Authorization` header.
+    allow_authorization_fallback: bool,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -140,7 +190,10 @@ impl Server {
         let server = planetary_server::Server::builder()
             .address(self.address)
             .port(self.port)
-            .routers(bon::vec![info::router(), tasks::router()])
+            .routers(bon::vec![
+                info::router(),
+                tasks::router(self.allow_authorization_fallback)
+            ])
             .build();
 
         let state = State::new(
@@ -149,6 +202,7 @@ impl Server {
             self.orchestrator_url,
             self.orchestrator_api_key,
         );
+
         server.run(state, shutdown).await?;
         Ok(())
     }

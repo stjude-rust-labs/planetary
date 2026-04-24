@@ -62,6 +62,10 @@ postgresql:
 # implementing the TES API.
 api:
   replicas: 2
+  # By default, only the `X-Forwarded-User` header is respected for API requests
+  # Setting this to true will allow the `Authorization` header to be used as a fallback
+  # when the `X-Forwarded-User` header is not present.
+  allowAuthorizationFallback: false
   image:
     name: ghcr.io/stjude-rust-labs/planetary-api
     tag: null

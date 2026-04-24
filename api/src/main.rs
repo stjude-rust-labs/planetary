@@ -155,6 +155,12 @@ pub struct Args {
     /// The Planetary orchestrator service API key.
     #[clap(long, env, hide_env_values(true))]
     orchestrator_api_key: SecretString,
+
+    /// Whether or not to allow fallback to the `Authorization` header.
+    ///
+    /// By default, only the `X-Forwarded-User` header is checked.
+    #[clap(long, env)]
+    allow_authorization_fallback: bool,
 }
 
 impl Args {
@@ -234,6 +240,7 @@ pub async fn main() -> anyhow::Result<()> {
         .shared_database(database)
         .orchestrator_url(args.orchestrator_url)
         .orchestrator_api_key(args.orchestrator_api_key)
+        .allow_authorization_fallback(args.allow_authorization_fallback)
         .info(ServiceInfo::try_from(args.service_info)?)
         .build()
         .run(terminate())

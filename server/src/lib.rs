@@ -95,23 +95,23 @@ pub struct Error {
 
 impl Error {
     /// Returns a "not found" JSON error response.
-    pub fn not_found() -> Error {
-        Error {
+    pub fn not_found() -> Self {
+        Self {
             status: StatusCode::NOT_FOUND,
             message: "the requested resource was not found".to_string(),
         }
     }
 
     /// Returns a "bad request" JSON error response.
-    pub fn bad_request(message: impl Into<String>) -> Error {
-        Error {
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
         }
     }
 
     /// Returns a "forbidden" JSON error response.
-    pub fn forbidden() -> Error {
+    pub fn forbidden() -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
             message: StatusCode::FORBIDDEN.to_string(),
@@ -119,10 +119,18 @@ impl Error {
     }
 
     /// Returns an "internal server error" JSON error response.
-    pub fn internal() -> Error {
+    pub fn internal() -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: StatusCode::INTERNAL_SERVER_ERROR.to_string(),
+        }
+    }
+
+    /// Returns a "task is not cancelable" error.
+    pub fn not_cancelable() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: "task is not in a cancelable state".into(),
         }
     }
 }

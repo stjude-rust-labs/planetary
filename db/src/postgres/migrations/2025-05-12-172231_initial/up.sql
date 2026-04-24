@@ -16,6 +16,7 @@ CREATE TYPE task_state AS ENUM(
 -- The tasks table.
 CREATE TABLE tasks (
     id SERIAL PRIMARY KEY,
+    username TEXT NOT NULL,
     tes_id TEXT NOT NULL,
     state task_state NOT NULL DEFAULT 'UNKNOWN',
     name TEXT NULL,
@@ -40,6 +41,9 @@ CREATE TABLE tasks (
 
 -- Create an index on the `name` column for list operations.
 CREATE INDEX idx_tasks_name ON tasks (name text_pattern_ops);
+
+-- Create an index on the `username` column for all task operations.
+CREATE INDEX idx_tasks_username ON tasks (username);
 
 -- Create an index on the `state` column for list operations.
 CREATE INDEX idx_tasks_state ON tasks (state);

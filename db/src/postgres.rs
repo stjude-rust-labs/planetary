@@ -23,7 +23,7 @@ use secrecy::SecretString;
 use tes::v1::types::requests::DEFAULT_PAGE_SIZE;
 use tes::v1::types::requests::GetTaskParams;
 use tes::v1::types::requests::ListTasksParams;
-use tes::v1::types::requests::Task as TesTask;
+use tes::v1::types::requests::Task as RequestTask;
 use tes::v1::types::requests::View;
 use tes::v1::types::responses::ExecutorLog;
 use tes::v1::types::responses::OutputFile;
@@ -36,6 +36,7 @@ use tracing::info;
 
 use super::Database;
 use super::DatabaseResult;
+use crate::TaskTemplateData;
 use crate::TerminatedContainer;
 
 pub(crate) mod models;
@@ -205,10 +206,10 @@ impl PostgresDatabase {
 
 #[async_trait::async_trait]
 impl Database for PostgresDatabase {
-    async fn insert_task(&self, task: &TesTask) -> DatabaseResult<String> {
+    async fn insert_task(&self, username: &str, task: &RequestTask) -> DatabaseResult<String> {
         use diesel_async::RunQueryDsl;
 
-        let task = models::NewTask::new(task);
+        let task = models::NewTask::new(username, task);
 
         // Insert the task
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
@@ -221,7 +222,12 @@ impl Database for PostgresDatabase {
         Ok(task.tes_id)
     }
 
-    async fn get_task(&self, tes_id: &str, params: GetTaskParams) -> DatabaseResult<TaskResponse> {
+    async fn get_task(
+        &self,
+        username: &str,
+        tes_id: &str,
+        params: GetTaskParams,
+    ) -> DatabaseResult<TaskResponse> {
         use diesel::*;
         use diesel_async::RunQueryDsl;
 
@@ -231,7 +237,11 @@ impl Database for PostgresDatabase {
             View::Minimal => Ok(TaskResponse::Minimal(
                 schema::tasks::table
                     .select(models::MinimalTask::as_select())
-                    .filter(schema::tasks::tes_id.eq(tes_id))
+                    .filter(
+                        schema::tasks::username
+                            .eq(username)
+                            .and(schema::tasks::tes_id.eq(tes_id)),
+                    )
                     .first(&mut conn)
                     .await
                     .optional()
@@ -242,7 +252,11 @@ impl Database for PostgresDatabase {
             View::Basic => {
                 let task = schema::tasks::table
                     .select(models::BasicTask::as_select())
-                    .filter(schema::tasks::tes_id.eq(tes_id))
+                    .filter(
+                        schema::tasks::username
+                            .eq(username)
+                            .and(schema::tasks::tes_id.eq(tes_id)),
+                    )
                     .first(&mut conn)
                     .await
                     .optional()
@@ -262,7 +276,11 @@ impl Database for PostgresDatabase {
             View::Full => {
                 let task = schema::tasks::table
                     .select(models::FullTask::as_select())
-                    .filter(schema::tasks::tes_id.eq(tes_id))
+                    .filter(
+                        schema::tasks::username
+                            .eq(username)
+                            .and(schema::tasks::tes_id.eq(tes_id)),
+                    )
                     .first(&mut conn)
                     .await
                     .optional()
@@ -282,14 +300,33 @@ impl Database for PostgresDatabase {
         }
     }
 
+    async fn get_task_template_data(&self, tes_id: &str) -> DatabaseResult<TaskTemplateData> {
+        use diesel::*;
+        use diesel_async::RunQueryDsl;
+
+        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
+        Ok(schema::tasks::table
+            .select(models::TaskTemplateData::as_select())
+            .filter(schema::tasks::tes_id.eq(tes_id))
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(Error::Diesel)?
+            .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?
+            .into())
+    }
+
     async fn get_tasks(
         &self,
+        username: &str,
         params: ListTasksParams,
     ) -> DatabaseResult<(Vec<TaskResponse>, Option<String>)> {
         use diesel::*;
         use diesel_async::RunQueryDsl;
 
         let mut query = schema::tasks::table.into_boxed();
+
+        query = query.filter(schema::tasks::username.eq(username));
 
         // Add the name prefix to the query
         if let Some(prefix) = &params.name_prefix {

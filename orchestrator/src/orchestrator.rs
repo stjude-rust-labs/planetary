@@ -50,8 +50,6 @@ use planetary_server::templating::TASK_LABEL;
 use planetary_server::templating::Template;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tes::v1::types::requests::GetTaskParams;
-use tes::v1::types::requests::View;
 use tes::v1::types::task::Executor;
 use tes::v1::types::task::State;
 use tokio::pin;
@@ -533,13 +531,8 @@ impl TaskOrchestrator {
         debug!("task `{tes_id}` is starting");
 
         let start = async {
-            // Get the full task for the inputs and outputs
-            let task = self
-                .database
-                .get_task(tes_id, GetTaskParams { view: View::Full })
-                .await?
-                .into_task()
-                .expect("should have full task");
+            // Get the task's template data
+            let data = self.database.get_task_template_data(tes_id).await?;
 
             self.database
                 .append_system_log(
@@ -549,21 +542,15 @@ impl TaskOrchestrator {
                 .await?;
 
             // Serialize the task's inputs
-            serialize_items(
-                inputs_file_path(tes_id),
-                task.inputs.as_deref().unwrap_or_default(),
-            )?;
+            serialize_items(inputs_file_path(tes_id), &data.inputs)?;
 
             // Serialize the task's outputs
-            serialize_items(
-                outputs_file_path(tes_id),
-                task.outputs.as_deref().unwrap_or_default(),
-            )?;
+            serialize_items(outputs_file_path(tes_id), &data.outputs)?;
 
             // Create the task's resources from the template
             for mut resource in
                 self.template
-                    .render(&task, &self.discovery, &self.tasks_namespace, |e| {
+                    .render(&data, &self.discovery, &self.tasks_namespace, |e| {
                         format_executor_script(e)
                     })?
             {
