@@ -1,3 +1,5 @@
+{{- $storage := .Values.local.storage | required "The `local.storage` value is required." -}}
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,7 +10,8 @@ data:
   # NOTE: all Tera template tags must be escaped for the Helm chart.
   task.yaml: |
     # This is the PVC used for the task's `disk` requirement.
-    # The task's inputs, outputs, work directory, and `/tmp` are all mounted from this volume.
+    # The task's non-local inputs, non-local outputs, work directory, and
+    # `/tmp` are all mounted from this volume.
     apiVersion: v1
     kind: PersistentVolumeClaim
     metadata:
@@ -44,7 +47,7 @@ data:
       # The first init container is responsible for downloading inputs and creating empty outputs to mount
       - name: inputs
         image: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
-        args: ["-v", "--mode", "inputs", "--orchestrator-dir", "/mnt/orchestrator", "--inputs-dir", "/mnt/inputs", "--outputs-dir", "/mnt/outputs", {{ `{{ id | json_encode }}` }}]
+        args: ["-v", "--mode", "inputs", "--orchestrator-dir", "/mnt/orchestrator", "--inputs-dir", "/mnt/storage/inputs", "--outputs-dir", "/mnt/storage/outputs", "--local-dir", "/mnt/local", {{ `{{ id | json_encode }}` }}]
         envFrom:
         - secretRef:
             name: azure-storage-credentials
@@ -60,11 +63,9 @@ data:
           value: {{ .Values.transporter.log }}
         volumeMounts:
         - name: storage
-          mountPath: /mnt/inputs
-          subPath: inputs
-        - name: storage
-          mountPath: /mnt/outputs
-          subPath: outputs
+          mountPath: /mnt/storage
+        - name: local
+          mountPath: /mnt/local
         - name: orchestrator-storage
           mountPath: /mnt/orchestrator
           readOnly: true
@@ -93,29 +94,29 @@ data:
           - name: storage
             mountPath: /tmp
             subPath: tmp
-          {{ `{%- for input in inputs %}` }}
-          - name: storage
-            mountPath: {{ `{{ input }}` }}
-            subPath: inputs/{{ `{{ loop.index0 }}` }}
-            readOnly: true
-            recursiveReadOnly: IfPossible
-          {{ `{%- endfor -%}` }}
-          {{ `{%- for output in outputs %}` }}
-          - name: storage
-            mountPath: {{ `{{ output }}` }}
-            subPath: outputs/{{ `{{ loop.index0 }}` }}
-            {{ `{%- endfor -%}` }}
           {{ `{%- for volume in volumes %}` }}
           - name: storage
             mountPath: {{ `{{ volume }}` }}
             subPath: volumes/{{ `{{ loop.index0 }}` }}
           {{ `{%- endfor -%}` }}
+          {{ `{%- for input in inputs %}` }}
+          - name: {{ `{% if input.local_path %}local{% else %}storage{% endif %}` }}
+            mountPath: {{ `{{ input.path }}` }}
+            subPath: {{ `{% if input.local_path %}{{ input.local_path }}{% else %}inputs/{{loop.index0}}{% endif %}` }}
+            readOnly: true
+            recursiveReadOnly: IfPossible
+          {{ `{%- endfor -%}` }}
+          {{ `{%- for output in outputs %}` }}
+          - name: {{ `{% if output.local_path %}local{% else %}storage{% endif %}` }}
+            mountPath: {{ `{{ output.path }}` }}
+            subPath: {{ `{% if output.local_path %}{{ output.local_path }}{% else %}outputs/{{loop.index0}}{% endif %}` }}
+            {{ `{%- endfor -%}` }}
       {{ `{%- endfor %}` }}
       containers:
       # The primary container of the task pod is responsible for uploading the task's outputs
       - name: outputs
         image: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
-        args: ["-v", "--mode", "outputs", "--orchestrator-dir", "/mnt/orchestrator", "--outputs-dir", "/mnt/outputs", {{ `{{ id | json_encode }}` }}]
+        args: ["-v", "--mode", "outputs", "--orchestrator-dir", "/mnt/orchestrator", "--outputs-dir", "/mnt/outputs", "--local-dir", "/mnt/local", {{ `{{ id | json_encode }}` }}]
         envFrom:
         - secretRef:
             name: azure-storage-credentials
@@ -135,6 +136,10 @@ data:
           subPath: outputs
           readOnly: true
           recursiveReadOnly: IfPossible
+        - name: local
+          mountPath: /mnt/local
+          readOnly: true
+          recursiveReadOnly: IfPossible
         - name: orchestrator-storage
           mountPath: /mnt/orchestrator
         resources:
@@ -145,6 +150,10 @@ data:
       - name: storage
         persistentVolumeClaim:
           claimName: {{ `{{ id }}` }}
+      - name: local
+        {{- with .Values.local.storage }}
+        {{- include "render" (dict "value" . "context" $) | nindent 8 }}
+        {{- end }}
       - name: orchestrator-storage
         {{- with .Values.orchestrator.storage }}
         {{- include "render" (dict "value" . "context" $) | nindent 8 }}

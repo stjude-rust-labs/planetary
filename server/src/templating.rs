@@ -24,6 +24,28 @@ use tera::Tera;
 use tera::Value;
 use tes::v1::types::task::Executor;
 
+/// Helper for stripping the `file:///` prefix from a file-schemed URL.
+///
+/// Ignores casing for the URL's scheme.
+///
+/// Returns `None` if the URL is not for the `file` scheme or if the URL is not
+/// absolute.
+fn url_to_relative_path(url: &str) -> Option<&str> {
+    const PREFIX: &str = "file:///";
+
+    let url = url.trim_start();
+
+    if url.len() < PREFIX.len() {
+        return None;
+    }
+
+    if !url[0..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        return None;
+    }
+
+    Some(&url[PREFIX.len()..])
+}
+
 /// The orchestrator id label.
 pub const ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
 
@@ -153,6 +175,7 @@ impl Template {
         self.render(
             &TaskTemplateData {
                 id: id.into(),
+                username: String::new(),
                 preemptible: false,
                 cpu: None,
                 memory: None,
@@ -189,6 +212,7 @@ impl Template {
 
         let mut context = Map::new();
         insert(&mut context, "id", data.id.as_str());
+        insert(&mut context, "username", data.username.as_str());
         insert(&mut context, "preemptible", data.preemptible);
 
         // Set the requested resources
@@ -211,11 +235,39 @@ impl Template {
         );
 
         // Set the inputs
-        let inputs: Vec<Value> = data.inputs.iter().map(|i| i.path.clone().into()).collect();
+        let inputs: Vec<Value> = data
+            .inputs
+            .iter()
+            .map(|input| {
+                let mut value = Map::new();
+                value.insert("path".to_string(), input.path.clone().into());
+
+                if let Some(local_path) =
+                    input.url.as_ref().and_then(|url| url_to_relative_path(url))
+                {
+                    value.insert("local_path".to_string(), local_path.to_string().into());
+                }
+
+                value.into()
+            })
+            .collect();
         insert(&mut context, "inputs", inputs);
 
         // Set the outputs
-        let outputs: Vec<Value> = data.outputs.iter().map(|o| o.path.clone().into()).collect();
+        let outputs: Vec<Value> = data
+            .outputs
+            .iter()
+            .map(|output| {
+                let mut value = Map::new();
+                value.insert("path".to_string(), output.path.clone().into());
+
+                if let Some(local_path) = url_to_relative_path(&output.url) {
+                    value.insert("local_path".to_string(), local_path.to_string().into());
+                }
+
+                value.into()
+            })
+            .collect();
         insert(&mut context, "outputs", outputs);
 
         // Set the volumes

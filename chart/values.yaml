@@ -204,5 +204,9 @@ networkPolicies:
       - port: 443
         protocol: TCP
 
+# The configuration for local (i.e. `file://` URLs) storage 
+local:
+  storage:
+
 # Extra Kubernetes resources to deploy along with Planetary
 extra: []

@@ -473,6 +473,8 @@ impl From<FullTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
 pub struct TaskTemplateData {
     /// The task database identifier.
     pub id: i32,
+    /// The username associated with the task.
+    pub username: String,
     /// The TES identifier of the task.
     pub tes_id: String,
     /// The task inputs.
@@ -497,6 +499,7 @@ impl From<TaskTemplateData> for crate::TaskTemplateData {
     fn from(data: TaskTemplateData) -> Self {
         Self {
             id: data.tes_id,
+            username: data.username,
             preemptible: data.preemptible.unwrap_or(false),
             cpu: data.cpu_cores,
             memory: data.ram_gb,

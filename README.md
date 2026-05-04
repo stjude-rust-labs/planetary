@@ -253,6 +253,38 @@ Planetary supports the following cloud storage services:
 See the [`transporter.storage` Helm chart values](./chart/values.yaml) for
 configuring a Planetary deployment.
 
+### Local Inputs and Outputs
+
+TES API clients may specify inputs and outputs with a `file://` schemed URL to
+indicate a desire to access a "local" input or output.
+
+Due to the isolation of pods in Kubernetes, a shared file system is not
+inherently available to tasks and, therefore without a configured "local"
+shared volume, task pods would have only ephemeral container storage for
+resolving `file://` schemed URLs.
+
+To assist in a unified local file system, Cluster administrators can configure
+Planetary to use a shared volume that is automatically used as the storage for
+`file://` schemed inputs and outputs.
+
+An input or output using a `file://` schemed URL is considered to be a path
+relative to the root of the local shared volume. For example, if the shared
+local volume is an NFS share at path `/local/$USERNAME`, an input of `file:///mydir/myfile.txt`
+would map to the actual share path of `/local/$USERNAME/mydir/myfile.txt`
+(note: input and output URLs may not contain `..` parent directory references).
+
+Local input and output files aren't copied to and from cloud storage by the
+Planetary transporter, but instead are directly mounted at the requested paths
+into the executor containers.
+
+However, the transporter still needs access to the local shared volume to ensure
+specified inputs exist and also to create the specified outputs at their
+expected locations.
+
+If support for local storage isn't necessary, use an `emptyDir` volume for the
+shared storage or remove the volume and mounts from the task pod definition in
+the task resource template.
+
 ### Task Execution
 
 Planetary runs each TES task by evaluating a template file for creating
