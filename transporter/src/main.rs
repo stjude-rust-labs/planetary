@@ -527,7 +527,7 @@ async fn download_inputs(
                     if let Some(sub_path) = input.url.as_deref().and_then(url_to_relative_path) {
                         local_dir.join(sub_path)
                     } else {
-                        outputs_dir.join(index.to_string())
+                        inputs_dir.join(index.to_string())
                     };
                 let ctx = ctx.clone();
                 tokio::spawn(async move { download_input(ctx, &input, &path).await })
