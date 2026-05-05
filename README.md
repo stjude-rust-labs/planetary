@@ -263,7 +263,7 @@ inherently available to tasks and, therefore without a configured "local"
 shared volume, task pods would have only ephemeral container storage for
 resolving `file://` schemed URLs.
 
-To assist in a unified local file system, Cluster administrators can configure
+To assist in a unified local file system, cluster administrators can configure
 Planetary to use a shared volume that is automatically used as the storage for
 `file://` schemed inputs and outputs.
 
