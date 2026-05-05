@@ -255,35 +255,30 @@ configuring a Planetary deployment.
 
 ### Local Inputs and Outputs
 
-TES API clients may specify inputs and outputs with a `file://` schemed URL to
-indicate a desire to access a "local" input or output.
+When the Helm chart is supplied a value for `local.storage`, Planetary will use
+the specified volume for "local" inputs and outputs. When a value is not
+supplied (the default), support for local inputs and outputs is disabled.
 
-Due to the isolation of pods in Kubernetes, a shared file system is not
-inherently available to tasks and, therefore without a configured "local"
-shared volume, task pods would have only ephemeral container storage for
-resolving `file://` schemed URLs.
+An input or output is considered "local" if its URL uses the `file://` scheme.
 
-To assist in a unified local file system, cluster administrators can configure
-Planetary to use a shared volume that is automatically used as the storage for
-`file://` schemed inputs and outputs.
+Unlike other URL schemes, local inputs are not downloaded from cloud storage
+and local outputs are not uploaded to cloud storage. Instead they are directly
+accessed by the task from the local storage volume.
 
-An input or output using a `file://` schemed URL is considered to be a path
-relative to the root of the local shared volume. For example, if the shared
-local volume is an NFS share at path `/local/$USERNAME`, an input of `file:///mydir/myfile.txt`
-would map to the actual share path of `/local/$USERNAME/mydir/myfile.txt`
-(note: input and output URLs may not contain `..` parent directory references).
+Local inputs and outputs will not count towards the requested disk size for the
+task as they are not copied to the task's storage volume.
 
-Local input and output files aren't copied to and from cloud storage by the
-Planetary transporter, but instead are directly mounted at the requested paths
-into the executor containers.
+The path specified in the URL is treated as relative to the configured volume
+root. For example, an input with URL `file:///foo/bar.txt` will be treated as
+`$ROOT/foo/bar.txt`, where $ROOT is the path at which the `local.storage`
+volume mounts.
 
-The transporter still needs access to the local shared volume to ensure
-specified inputs exist and also to create the specified outputs at their
-expected locations.
+It is strongly recommended that the local storage be associated ***only*** for
+the user of the task. That can be accomplished by using the `{{ username }}`
+value in the task resource template.
 
-If support for local storage isn't necessary, use an `emptyDir` volume for the
-shared storage or remove the volume and mounts from the task pod definition in
-the task resource template.
+See an example of using an NFS share to provide per-user local storage in the
+[development deployment](chart/examples/development.yaml).
 
 ### Task Execution
 
