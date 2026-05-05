@@ -570,8 +570,8 @@ async fn download_inputs(
     // We also need to create any file outputs so that Kubernetes will mount them as
     // files and not directories
     for (index, output) in outputs.into_iter().enumerate() {
-        // For local file output URls, just create the file or directory at the expected
-        // output location Executor containers will directly mount it
+        // For local `file://` output URLs, create the file or directory at the
+        // expected output location; executor containers will mount it directly.
         if let Some(path) = url_to_relative_path(&output.url) {
             let path = local_dir.join(path);
 
