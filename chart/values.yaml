@@ -205,8 +205,9 @@ networkPolicies:
         protocol: TCP
 
 # The configuration for local (i.e., `file://` URLs) storage.
+# By default, support for local storage will be disabled.
 local:
-  storage:
+  storage: null
 
 # Extra Kubernetes resources to deploy along with Planetary
 extra: []

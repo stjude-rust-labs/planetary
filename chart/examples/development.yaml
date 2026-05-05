@@ -42,11 +42,13 @@ postgresql:
     limits:
       memory: '8Gi'
 
+# Enable support for "local" (file://) URLs using NFS-backed storage. 
+# This will segment the local storage by user name so that task pods
+# can only access the files for the user related to the task.
 local:
   storage:
     nfs:
       server: 10.96.85.10
-      # By default, local storage is segmented by user name
       path: /local/{{ `{{ username }}` }}
 
 extra:
@@ -82,19 +84,11 @@ extra:
         securityContext:
           fsGroup: 1000
         containers:
-        - name: create-local-dir
+        - name: create-dirs
           securityContext:
             runAsUser: 1000
           image: alpine:latest
-          command: ["mkdir",  "-p", "/mnt/nfs/local"]
-          volumeMounts:
-          - name: nfs
-            mountPath: /mnt/nfs
-        - name: create-orchestrator-dir
-          securityContext:
-            runAsUser: 1000
-          image: alpine:latest
-          command: ["mkdir",  "-p", "/mnt/nfs/orchestrator"]
+          command: ["mkdir",  "-p", "/mnt/nfs/local", "/mnt/nfs/orchestrator"]
           volumeMounts:
           - name: nfs
             mountPath: /mnt/nfs

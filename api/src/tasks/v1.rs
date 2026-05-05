@@ -41,25 +41,24 @@ use crate::notify_retry;
 use crate::retry_durations;
 
 /// Determines if the given URL is supported by Planetary.
-fn ensure_supported_url(url: &Url, kind: &str) -> Result<()> {
+fn ensure_supported_url(url: &str, kind: &str) -> Result<()> {
+    let url: Url = url
+        .parse()
+        .map_err(|_| anyhow!("invalid {kind} URL `{url}`"))?;
+
     match url.scheme() {
-        "https" | "az" | "s3" | "gs" | "file" => {}
+        "file" | "http" | "https" | "az" | "s3" | "gs" => {}
         scheme => bail!("{kind} URL `{url}` uses unsupported scheme `{scheme}`"),
     }
 
-    // For file URLs, the path must be absolute and not contain any `..`
+    // File URLs are required to be convertible to a file path
     if url.scheme() == "file" {
         let path = url
             .to_file_path()
             .map_err(|_| anyhow!("invalid {kind} file URL `{url}`"))?;
 
-        if !path.is_absolute() {
-            bail!("path specified by {kind} file URL `{url}` must be absolute");
-        }
-
-        // The path cannot contain `..` segments
-        if path.components().any(|c| matches!(c, Component::ParentDir)) {
-            bail!("{kind} file URL `{url}` cannot contain `..` path segments");
+        if path.into_os_string().into_string().is_err() {
+            bail!("{kind} URL `{url}` cannot be represented in UTF-8");
         }
     }
 
@@ -87,12 +86,8 @@ fn validate_task(task: &RequestTask) -> Result<()> {
         match (&input.url, &input.content) {
             (None, None) => bail!("input URL is required"),
             (Some(url), None) => {
-                let url: Url = url
-                    .parse()
-                    .map_err(|_| anyhow!("invalid input URL `{url}`"))?;
-
                 // Check for supported URL schemes
-                ensure_supported_url(&url, "input")?;
+                ensure_supported_url(url, "input")?;
             }
             (_, Some(_)) => {
                 // If content is specified, URL is ignored; it must be a file type
@@ -112,30 +107,17 @@ fn validate_task(task: &RequestTask) -> Result<()> {
             bail!("output path `{path}` is not absolute", path = output.path);
         }
 
-        if output.url.is_empty() {
-            bail!("output URL is required");
-        }
-
-        // The URL must parse
-        let url = output
-            .url
-            .parse::<Url>()
-            .map_err(|_| anyhow!("invalid output URL `{url}`", url = output.url))?;
-
-        // Check for supported URL schemes
-        ensure_supported_url(&url, "output")?;
-
-        // The output path cannot be root
-        if output.path == "/" {
-            bail!("output path cannot be `/`");
-        }
-
         // The output path cannot contain `..` segments
         if path.components().any(|c| matches!(c, Component::ParentDir)) {
             bail!(
                 "output path `{path}` cannot contain `..` path segments",
                 path = output.path
             );
+        }
+
+        // The output path cannot be root
+        if output.path == "/" {
+            bail!("output path cannot be `/`");
         }
 
         // If a path prefix was specified, then the output must be a directory
@@ -167,6 +149,9 @@ fn validate_task(task: &RequestTask) -> Result<()> {
                 );
             }
         }
+
+        // Check for supported URL schemes
+        ensure_supported_url(&output.url, "output")?;
 
         Ok(())
     }

@@ -17,8 +17,8 @@
 //!
 //! For the `outputs` mode, the transporter only reads from `outputs.json` and
 //! uploads the outputs to the expected cloud storage location. The transporter
-//! will then create an `uploaded.json` file in orchestrator shared storage to
-//! record what was uploaded by the transporter. The orchestrator uses that
+//! will then create a `files.json` file in orchestrator shared storage to
+//! record the files the TES task actually output. The orchestrator uses that
 //! information to record output files for the TES task.
 //!
 //! The entries of the target directory will be created or accessed based on
@@ -50,9 +50,6 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -72,6 +69,7 @@ use cloud_copy::S3Config;
 use cloud_copy::TransferEvent;
 use cloud_copy::UrlExt;
 use cloud_copy::cli::TimeDeltaExt;
+use cloud_copy::cli::TransferStats;
 use cloud_copy::cli::handle_events;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -103,30 +101,23 @@ use walkdir::WalkDir;
 /// lagged.
 const EVENTS_CAPACITY: usize = 1000;
 
-/// Helper for stripping the `file:///` prefix from a file-schemed URL.
+/// Helper for converting a URL to a file path.
 ///
-/// Ignores casing for the URL's scheme.
+/// The returned path is guaranteed to be absolute.
 ///
-/// Returns `None` if the URL is not for the `file` scheme or if the URL is not
-/// absolute.
-fn url_to_relative_path(url: &str) -> Option<&str> {
-    const PREFIX: &str = "file:///";
-
-    let url = url.trim_start();
-
-    if url.len() < PREFIX.len() {
+/// Returns `None` if the URL is invalid or if the URL does not represent a file
+/// path.
+fn url_to_file_path(url: &str) -> Option<PathBuf> {
+    let url: Url = Url::parse(url).ok()?;
+    if url.scheme() != "file" {
         return None;
     }
 
-    if !url[0..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-        return None;
-    }
-
-    Some(&url[PREFIX.len()..])
+    url.to_file_path().ok()
 }
 
 /// Prints the statistics after transferring inputs or outputs.
-fn print_stats(delta: TimeDelta, files: usize, bytes: u64) {
+fn print_stats(delta: TimeDelta, TransferStats { files, bytes }: TransferStats) {
     let seconds = delta.num_seconds();
 
     println!(
@@ -186,9 +177,11 @@ struct Args {
     #[arg(long)]
     outputs_dir: PathBuf,
 
-    /// The path to the "local" directory for `file://` inputs and outputs.
+    /// The optional path to the "local" directory for `file://` inputs and outputs.
+    ///
+    /// `file://` inputs and outputs will be disabled if not specified.
     #[arg(long)]
-    local_dir: PathBuf,
+    local_dir: Option<PathBuf>,
 
     /// The verbosity level.
     #[command(flatten)]
@@ -268,9 +261,9 @@ fn outputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
     orchestrator_dir.join(tes_id).join("outputs.json")
 }
 
-/// Gets the uploaded outputs file path for a TES task.
-fn uploaded_outputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
-    orchestrator_dir.join(tes_id).join("uploaded.json")
+/// Gets the final outputs file path for a TES task.
+fn output_files_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
+    orchestrator_dir.join(tes_id).join("final.json")
 }
 
 /// Helper function for serializing an array of serializable items to a file.
@@ -307,66 +300,42 @@ fn deserialize_items<T: DeserializeOwned>(path: impl AsRef<Path>) -> anyhow::Res
         .with_context(|| format!("failed to read file `{path}`", path = path.display()))
 }
 
-/// Represents context for transferring inputs.
+/// Represents context for file transfers.
 #[derive(Clone)]
-struct InputTransferContext {
+struct TransferContext {
     /// The cloud copy configuration to use for copy operations.
     config: Config,
     /// The HTTP client to use for copy operations.
     client: HttpClient,
-    /// The count of files created by the transporter.
-    ///
-    /// This is for inputs with specified contents that are not being
-    /// downloaded.
-    created: Arc<AtomicUsize>,
     /// The cancellation token to use for cancelling input downloads.
     cancel: CancellationToken,
     /// The transfer events channel.
     events: broadcast::Sender<TransferEvent>,
 }
 
-impl InputTransferContext {
+impl TransferContext {
     /// Constructs a new input transfer context from the given cloud copy
     /// configuration and cancellation token.
     fn new(config: Config, cancel: CancellationToken) -> Self {
         Self {
             config,
             client: HttpClient::new(),
-            created: Arc::default(),
             cancel,
             events: broadcast::channel(EVENTS_CAPACITY).0,
         }
     }
 }
 
-/// Represents context for transferring outputs.
-#[derive(Clone)]
-struct OutputTransferContext {
-    /// The cloud copy configuration to use for copy operations.
-    config: Config,
-    /// The HTTP client to use for copy operations.
-    client: HttpClient,
-    /// The cancellation token to use for cancelling input downloads.
-    cancel: CancellationToken,
-    /// The transfer events channel.
-    events: broadcast::Sender<TransferEvent>,
-}
-
-impl OutputTransferContext {
-    /// Constructs a new output transfer context from the given cloud copy
-    /// configuration and cancellation token.
-    fn new(config: Config, cancel: CancellationToken) -> Self {
-        Self {
-            config,
-            client: HttpClient::new(),
-            cancel,
-            events: broadcast::channel(EVENTS_CAPACITY).0,
-        }
-    }
-}
-
-/// Downloads an individual input to the specified path.
-async fn download_input(context: InputTransferContext, input: &Input, path: &Path) -> Result<()> {
+/// Prepares an individual input at the specified path.
+///
+/// For inputs with specified contents, a new file will be created at the
+/// specified path with the requested content.
+///
+/// For remote inputs, this will download the file to the specified path.
+///
+/// For local inputs, this will ensure that the specified path exists and is the
+/// expected type.
+async fn prepare_input(context: TransferContext, input: &Input, path: &Path) -> Result<()> {
     let permissions = if let Some(contents) = &input.content {
         // Write the contents if directly given, but only if the input is a file
         match input.ty {
@@ -386,7 +355,6 @@ async fn download_input(context: InputTransferContext, input: &Input, path: &Pat
             .await
             .with_context(|| format!("failed to create input file `{path}`", path = input.path))?;
 
-        context.created.fetch_add(1, Ordering::SeqCst);
         0o444
     } else {
         let url = input
@@ -482,18 +450,21 @@ async fn download_input(context: InputTransferContext, input: &Input, path: &Pat
     Ok(())
 }
 
-/// Downloads inputs into the inputs directory.
+/// Prepares task inputs.
+///
+/// Remote inputs are copied locally and local inputs are checked for existence.
 ///
 /// This will also create empty files and directories for outputs in the outputs
-/// directory.
-async fn download_inputs(
-    context: InputTransferContext,
+/// directory; this is required because Kubernetes will create directory mounts
+/// if the file doesn't exist.
+async fn prepare_inputs(
+    context: TransferContext,
     tes_id: &str,
     orchestrator_dir: &Path,
     inputs_dir: &Path,
     outputs_dir: &Path,
-    local_dir: &Path,
-) -> Result<()> {
+    local_dir: Option<&Path>,
+) -> Result<(TimeDelta, Option<TransferStats>)> {
     let inputs: Vec<Input> = deserialize_items(inputs_file_path(orchestrator_dir, tes_id))?;
     let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
 
@@ -518,25 +489,38 @@ async fn download_inputs(
     let cancel = context.cancel.clone();
     let handler = tokio::spawn(async move { handle_events(events, false, cancel).await });
 
-    // Create a transfer task for downloading each input
+    // Create a task for preparing each input
     let ctx = context.clone();
-    let transfer = async move || {
-        let mut downloads = stream::iter(inputs.into_iter().enumerate())
+    let prepare = async move || {
+        let mut tasks = stream::iter(inputs.into_iter().enumerate())
             .map(|(index, input)| {
-                let path =
-                    if let Some(sub_path) = input.url.as_deref().and_then(url_to_relative_path) {
-                        local_dir.join(sub_path)
+                let inputs_dir = inputs_dir.to_path_buf();
+                let local_dir = local_dir.map(Path::to_path_buf);
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let path = if let Some(url) = input.url.as_deref()
+                        && let Some(path) = url_to_file_path(url)
+                    {
+                        match local_dir {
+                            Some(local_dir) => {
+                                local_dir.join(path.strip_prefix("/").with_context(|| {
+                                    format!("input URL `{url}` is not absolute")
+                                })?)
+                            }
+                            None => bail!("input file URL `{url}` is not supported"),
+                        }
                     } else {
                         inputs_dir.join(index.to_string())
                     };
-                let ctx = ctx.clone();
-                tokio::spawn(async move { download_input(ctx, &input, &path).await })
-                    .map(|r| r.expect("task panicked"))
+
+                    prepare_input(ctx, &input, &path).await
+                })
+                .map(|r| r.expect("task panicked"))
             })
             .buffer_unordered(context.config.parallelism());
 
         loop {
-            let result = downloads.next().await;
+            let result = tasks.next().await;
             match result {
                 Some(r) => r?,
                 None => break,
@@ -546,25 +530,13 @@ async fn download_inputs(
         anyhow::Ok(())
     };
 
-    // Perform the transfer
+    // Prepare (and potentially download) the inputs
     let start = Utc::now();
-    let result = transfer().await;
+    let result = prepare().await;
     let end = Utc::now();
 
     drop(context.events);
     let stats = handler.await.expect("failed to join events handler");
-
-    // Print the statistics upon success
-    if result.is_ok()
-        && let Some(stats) = stats
-    {
-        print_stats(
-            end - start,
-            context.created.load(Ordering::SeqCst) + stats.files,
-            stats.bytes,
-        );
-    }
-
     result?;
 
     // We also need to create any file outputs so that Kubernetes will mount them as
@@ -572,8 +544,13 @@ async fn download_inputs(
     for (index, output) in outputs.into_iter().enumerate() {
         // For local `file://` output URLs, create the file or directory at the
         // expected output location; executor containers will mount it directly.
-        if let Some(path) = url_to_relative_path(&output.url) {
-            let path = local_dir.join(path);
+        if let Some(path) = url_to_file_path(&output.url) {
+            let path = match local_dir {
+                Some(local_dir) => local_dir.join(path.strip_prefix("/").with_context(|| {
+                    format!("output URL `{url}` is not absolute", url = output.url)
+                })?),
+                None => bail!("output file URL `{url}` is not supported", url = output.url),
+            };
 
             // Create the parent directory for the output
             if let Some(parent) = path.parent() {
@@ -629,12 +606,21 @@ async fn download_inputs(
             })?;
     }
 
-    Ok(())
+    Ok((end - start, stats))
 }
 
-/// Uploads an output at the given path to the requested location.
-async fn upload_output(
-    context: OutputTransferContext,
+/// Prepares an output.
+///
+/// For remote outputs, the output is uploaded to the requested location.
+///
+/// For local outputs, the output is not uploaded.
+///
+/// If the output is a directory it is recursively scanned for files.
+///
+/// Returns the set of discovered output files that will be used for associating
+/// a TES task with its actual output files.
+async fn prepare_output(
+    context: TransferContext,
     output: &Output,
     path: &Path,
 ) -> Result<Vec<OutputFile>> {
@@ -648,7 +634,7 @@ async fn upload_output(
     })?;
 
     if metadata.is_dir() {
-        return upload_directory(context, output, &url, path).await;
+        return prepare_directory_output(context, output, &url, path).await;
     }
 
     if output.ty != IoType::File {
@@ -695,75 +681,16 @@ async fn upload_output(
     }])
 }
 
-/// Uploads outputs from the specified outputs directory.
-async fn upload_outputs(
-    context: OutputTransferContext,
-    tes_id: &str,
-    orchestrator_dir: &Path,
-    outputs_dir: &Path,
-    local_dir: &Path,
-) -> Result<()> {
-    let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
-
-    // Create an event handling task
-    let events = context.events.subscribe();
-    let cancel = context.cancel.clone();
-    let handler = tokio::spawn(async move { handle_events(events, false, cancel).await });
-
-    // Transfer the outputs
-    let transfer = async || {
-        let mut files = Vec::new();
-        let mut uploads = stream::iter(outputs.into_iter().enumerate())
-            .map(|(index, output)| {
-                let path = if let Some(sub_path) = output.url.strip_prefix("file:///") {
-                    local_dir.join(sub_path)
-                } else {
-                    outputs_dir.join(index.to_string())
-                };
-                let ctx = context.clone();
-                tokio::spawn(async move { upload_output(ctx, &output, &path).await })
-                    .map(|r| r.expect("task panicked"))
-            })
-            .buffer_unordered(context.config.parallelism());
-
-        loop {
-            let result = uploads.next().await;
-            match result {
-                Some(r) => files.extend(r?),
-                None => break,
-            }
-        }
-
-        anyhow::Ok(files)
-    };
-
-    // Perform the transfer
-    let start = Utc::now();
-    let result = transfer().await;
-    let end = Utc::now();
-
-    drop(context.events);
-    let stats = handler.await.expect("failed to join events handler");
-
-    let outputs = result?;
-
-    // Write the uploads file
-    serialize_items(
-        uploaded_outputs_file_path(orchestrator_dir, tes_id),
-        &outputs,
-    )?;
-
-    // Print the statistics
-    if let Some(stats) = stats {
-        print_stats(end - start, stats.files, stats.bytes);
-    }
-
-    Ok(())
-}
-
-/// Uploads a directory output.
-async fn upload_directory(
-    context: OutputTransferContext,
+/// Prepares a directory output.
+///
+/// This will recursively search the directory for files.
+///
+/// If the URL of the output is remote, each file is uploaded to cloud storage
+/// at the corresponding relative path.
+///
+/// Returns the output files discovered during the walk of the directory.
+async fn prepare_directory_output(
+    context: TransferContext,
     output: &Output,
     url: &Url,
     directory: &Path,
@@ -872,6 +799,82 @@ async fn upload_directory(
     Ok(files)
 }
 
+/// Prepares outputs from the specified outputs and local directory.
+///
+/// Each remote output is uploaded to cloud storage.
+///
+/// Responsible for writing the `outputs.json`
+async fn prepare_outputs(
+    context: TransferContext,
+    tes_id: &str,
+    orchestrator_dir: &Path,
+    outputs_dir: &Path,
+    local_dir: Option<&Path>,
+) -> Result<(TimeDelta, Option<TransferStats>)> {
+    let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
+
+    // Create an event handling task
+    let events = context.events.subscribe();
+    let cancel = context.cancel.clone();
+    let handler = tokio::spawn(async move { handle_events(events, false, cancel).await });
+
+    // Create a task for preparing each output
+    let prepare = async || {
+        let mut files = Vec::new();
+        let mut tasks = stream::iter(outputs.into_iter().enumerate())
+            .map(|(index, output)| {
+                let outputs_dir = outputs_dir.to_path_buf();
+                let local_dir = local_dir.map(Path::to_path_buf);
+                let ctx = context.clone();
+                tokio::spawn(async move {
+                    let path = if let Some(path) = url_to_file_path(&output.url) {
+                        match local_dir {
+                            Some(local_dir) => {
+                                local_dir.join(path.strip_prefix("/").with_context(|| {
+                                    format!("output URL `{url}` is not absolute", url = output.url)
+                                })?)
+                            }
+                            None => {
+                                bail!("output file URL `{url}` is not supported", url = output.url)
+                            }
+                        }
+                    } else {
+                        outputs_dir.join(index.to_string())
+                    };
+
+                    prepare_output(ctx, &output, &path).await
+                })
+                .map(|r| r.expect("task panicked"))
+            })
+            .buffer_unordered(context.config.parallelism());
+
+        loop {
+            let result = tasks.next().await;
+            match result {
+                Some(r) => files.extend(r?),
+                None => break,
+            }
+        }
+
+        anyhow::Ok(files)
+    };
+
+    // Prepare (and potentially upload) the outputs
+    let start = Utc::now();
+    let result = prepare().await;
+    let end = Utc::now();
+
+    drop(context.events);
+    let stats = handler.await.expect("failed to join events handler");
+
+    let outputs = result?;
+
+    // Write the output files for the task
+    serialize_items(output_files_file_path(orchestrator_dir, tes_id), &outputs)?;
+
+    Ok((end - start, stats))
+}
+
 #[cfg(unix)]
 /// An async function that waits for a termination signal.
 async fn terminate(cancel: CancellationToken) {
@@ -965,31 +968,38 @@ async fn run(cancel: CancellationToken) -> Result<()> {
         .with_google(google)
         .build();
 
-    match args.mode {
+    let context = TransferContext::new(config, cancel);
+
+    let (delta, stats) = match args.mode {
         Mode::Inputs => {
-            let context = InputTransferContext::new(config, cancel);
-            download_inputs(
+            prepare_inputs(
                 context,
                 &args.tes_id,
                 &args.orchestrator_dir,
                 &args.inputs_dir.expect("option should be present"),
                 &args.outputs_dir,
-                &args.local_dir,
+                args.local_dir.as_deref(),
             )
-            .await
+            .await?
         }
         Mode::Outputs => {
-            let context = OutputTransferContext::new(config, cancel);
-            upload_outputs(
+            prepare_outputs(
                 context,
                 &args.tes_id,
                 &args.orchestrator_dir,
                 &args.outputs_dir,
-                &args.local_dir,
+                args.local_dir.as_deref(),
             )
-            .await
+            .await?
         }
+    };
+
+    // Print the statistics if there are some
+    if let Some(stats) = stats {
+        print_stats(delta, stats);
     }
+
+    Ok(())
 }
 
 #[tokio::main]

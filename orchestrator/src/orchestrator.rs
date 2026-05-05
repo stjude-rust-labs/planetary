@@ -74,7 +74,7 @@ use crate::retry_durations;
 ///   orchestrator.
 /// * `outputs.json` - the task's outputs serialized as JSON; created by the
 ///   orchestrator.
-/// * `uploaded.json` - the task's uploaded outputs serialized as JSON; created
+/// * `files.json` - the task's actual output files serialized as JSON; created
 ///   by the transporter.
 ///
 /// A task's directory will be deleted when the task transitions to a terminal
@@ -130,9 +130,9 @@ fn outputs_file_path(tes_id: &str) -> PathBuf {
     task_directory_path(tes_id).join("outputs.json")
 }
 
-/// Gets the uploaded outputs file path for a TES task.
-fn uploaded_outputs_file_path(tes_id: &str) -> PathBuf {
-    task_directory_path(tes_id).join("uploaded.json")
+/// Gets the output files file path for a TES task.
+fn output_files_file_path(tes_id: &str) -> PathBuf {
+    task_directory_path(tes_id).join("files.json")
 }
 
 /// Helper function for serializing an array of serializable items to a file.
@@ -823,7 +823,7 @@ impl TaskOrchestrator {
 
     /// Handles a succeeded task.
     async fn handle_succeeded_task(&self, tes_id: &str, pod: &Pod) -> Result<(), Error> {
-        let outputs = deserialize_items(uploaded_outputs_file_path(tes_id))?;
+        let outputs = deserialize_items(output_files_file_path(tes_id))?;
 
         if self
             .database
@@ -849,7 +849,7 @@ impl TaskOrchestrator {
         index: usize,
         pod: &Pod,
     ) -> Result<(), Error> {
-        let outputs = deserialize_items(uploaded_outputs_file_path(tes_id))?;
+        let outputs = deserialize_items(output_files_file_path(tes_id))?;
 
         if self
             .database
@@ -872,7 +872,7 @@ impl TaskOrchestrator {
 
     /// Handles a system error.
     async fn handle_system_error(&self, tes_id: &str, pod: &Pod) -> Result<(), Error> {
-        let outputs = deserialize_items(uploaded_outputs_file_path(tes_id))?;
+        let outputs = deserialize_items(output_files_file_path(tes_id))?;
 
         if self
             .database
@@ -895,7 +895,7 @@ impl TaskOrchestrator {
 
     /// Handles a pod in an unknown state.
     async fn handle_unknown_pod(&self, tes_id: &str, pod: &Pod) -> Result<(), Error> {
-        let outputs = deserialize_items(uploaded_outputs_file_path(tes_id))?;
+        let outputs = deserialize_items(output_files_file_path(tes_id))?;
 
         if self
             .database

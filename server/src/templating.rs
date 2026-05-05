@@ -4,6 +4,7 @@
 //! the monitor when tasks are garbage collected.
 
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use anyhow::Result;
@@ -16,6 +17,7 @@ use kube::discovery::ApiCapabilities;
 use kube::discovery::Scope;
 use kube::runtime::reflector::Lookup;
 use planetary_db::TaskTemplateData;
+use reqwest::Url;
 use serde::Deserialize as _;
 use serde_yaml_ng::Deserializer;
 use tera::Context;
@@ -23,28 +25,6 @@ use tera::Map;
 use tera::Tera;
 use tera::Value;
 use tes::v1::types::task::Executor;
-
-/// Helper for stripping the `file:///` prefix from a file-schemed URL.
-///
-/// Ignores casing for the URL's scheme.
-///
-/// Returns `None` if the URL is not for the `file` scheme or if the URL is not
-/// absolute.
-fn url_to_relative_path(url: &str) -> Option<&str> {
-    const PREFIX: &str = "file:///";
-
-    let url = url.trim_start();
-
-    if url.len() < PREFIX.len() {
-        return None;
-    }
-
-    if !url[0..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-        return None;
-    }
-
-    Some(&url[PREFIX.len()..])
-}
 
 /// The orchestrator id label.
 pub const ORCHESTRATOR_LABEL: &str = "planetary/orchestrator";
@@ -70,6 +50,19 @@ const DEFAULT_CPU: i32 = 1;
 ///
 /// Uses a 256 MiB default.
 const DEFAULT_MEMORY: f64 = 0.268435455;
+
+/// Helper for converting a URL to a file path.
+///
+/// Returns `None` if the URL is invalid or if the URL does not represent a file
+/// path.
+fn url_to_file_path(url: &str) -> Option<PathBuf> {
+    let url = Url::parse(url).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+
+    url.to_file_path().ok()
+}
 
 /// Represents a Planetary task template.
 ///
@@ -242,10 +235,16 @@ impl Template {
                 let mut value = Map::new();
                 value.insert("path".to_string(), input.path.clone().into());
 
-                if let Some(local_path) =
-                    input.url.as_ref().and_then(|url| url_to_relative_path(url))
-                {
-                    value.insert("local_path".to_string(), local_path.to_string().into());
+                if let Some(local_path) = input.url.as_ref().and_then(|url| {
+                    Some(
+                        url_to_file_path(url)?
+                            .strip_prefix("/")
+                            .expect("path should be absolute")
+                            .to_str()?
+                            .to_string(),
+                    )
+                }) {
+                    value.insert("local_path".to_string(), local_path.into());
                 }
 
                 value.into()
@@ -261,8 +260,13 @@ impl Template {
                 let mut value = Map::new();
                 value.insert("path".to_string(), output.path.clone().into());
 
-                if let Some(local_path) = url_to_relative_path(&output.url) {
-                    value.insert("local_path".to_string(), local_path.to_string().into());
+                if let Some(path) = url_to_file_path(&output.url)
+                    && let Some(local_path) = path
+                        .strip_prefix("/")
+                        .expect("path should be absolute")
+                        .to_str()
+                {
+                    value.insert("local_path".to_string(), local_path.into());
                 }
 
                 value.into()
