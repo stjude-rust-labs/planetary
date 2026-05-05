@@ -803,7 +803,8 @@ async fn prepare_directory_output(
 ///
 /// Each remote output is uploaded to cloud storage.
 ///
-/// Responsible for writing the `outputs.json`
+/// Responsible for creating the `files.json` file for the task that is read by
+/// the orchestrator.
 async fn prepare_outputs(
     context: TransferContext,
     tes_id: &str,
