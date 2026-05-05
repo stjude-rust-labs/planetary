@@ -28,7 +28,7 @@
 //! will create entries such as `/mnt/inputs/0`, `/mnt/inputs/1`, etc.
 //!
 //! Likewise, with the `--outputs-dir /mnt/outputs` option, the transporter will
-//! create (for `inputs`` mode) or access (for `outputs` mode) entries such as
+//! create (for `inputs` mode) or access (for `outputs` mode) entries such as
 //! `/mnt/outputs/0`, `/mnt/outputs/1`, etc.
 //!
 //! For "local" inputs (those with `file://` URLs), the transporter will verify
