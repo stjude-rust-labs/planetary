@@ -277,7 +277,7 @@ Local input and output files aren't copied to and from cloud storage by the
 Planetary transporter, but instead are directly mounted at the requested paths
 into the executor containers.
 
-However, the transporter still needs access to the local shared volume to ensure
+The transporter still needs access to the local shared volume to ensure
 specified inputs exist and also to create the specified outputs at their
 expected locations.
 
