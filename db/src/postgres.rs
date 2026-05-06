@@ -265,8 +265,11 @@ impl Database for PostgresDatabase {
 
                 let containers = models::BasicContainer::belonging_to(&task)
                     .select(models::BasicContainer::as_select())
-                    .filter(schema::containers::executor_index.is_not_null())
-                    .order_by(schema::containers::executor_index)
+                    .filter(
+                        schema::containers::name.like(concat!(_EXECUTOR_CONTAINER_PREFIX!(), "%")),
+                    )
+                    .order_by(schema::containers::id)
+                    .order_by(schema::containers::id)
                     .load(&mut conn)
                     .await
                     .map_err(Error::Diesel)?;
@@ -289,8 +292,10 @@ impl Database for PostgresDatabase {
 
                 let containers = models::FullContainer::belonging_to(&task)
                     .select(models::FullContainer::as_select())
-                    .filter(schema::containers::executor_index.is_not_null())
-                    .order_by(schema::containers::executor_index)
+                    .filter(
+                        schema::containers::name.like(concat!(_EXECUTOR_CONTAINER_PREFIX!(), "%")),
+                    )
+                    .order_by(schema::containers::id)
                     .load(&mut conn)
                     .await
                     .map_err(Error::Diesel)?;
@@ -414,8 +419,11 @@ impl Database for PostgresDatabase {
                 Ok((
                     models::BasicContainer::belonging_to(&tasks)
                         .select(models::BasicContainer::as_select())
-                        .filter(schema::containers::executor_index.is_not_null())
-                        .order_by(schema::containers::executor_index)
+                        .filter(
+                            schema::containers::name
+                                .like(concat!(_EXECUTOR_CONTAINER_PREFIX!(), "%")),
+                        )
+                        .order_by(schema::containers::id)
                         .load(&mut conn)
                         .await
                         .map_err(Error::Diesel)?
@@ -445,8 +453,11 @@ impl Database for PostgresDatabase {
                 Ok((
                     models::FullContainer::belonging_to(&tasks)
                         .select(models::FullContainer::as_select())
-                        .filter(schema::containers::executor_index.is_not_null())
-                        .order_by(schema::containers::executor_index)
+                        .filter(
+                            schema::containers::name
+                                .like(concat!(_EXECUTOR_CONTAINER_PREFIX!(), "%")),
+                        )
+                        .order_by(schema::containers::id)
                         .load(&mut conn)
                         .await
                         .map_err(Error::Diesel)?

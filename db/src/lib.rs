@@ -1,7 +1,6 @@
 //! Implementation of database support for Planetary.
 
 use std::borrow::Cow;
-use std::fmt;
 
 use anyhow::Result;
 use chrono::DateTime;
@@ -18,6 +17,19 @@ use tes::v1::types::task::Executor;
 use tes::v1::types::task::Input;
 use tes::v1::types::task::Output;
 use tes::v1::types::task::State;
+
+/// Helper macro for exposing the prefix constant and for joining with `%` in
+/// `like` clauses.
+///
+/// This is necessary because `concat!` only supports literals.
+macro_rules! _EXECUTOR_CONTAINER_PREFIX {
+    () => {
+        "executor-"
+    };
+}
+
+/// The expected prefix for executor container names.
+pub const EXECUTOR_CONTAINER_PREFIX: &str = _EXECUTOR_CONTAINER_PREFIX!();
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
@@ -49,36 +61,11 @@ pub struct TaskIo {
     pub outputs: Vec<Output>,
 }
 
-/// Represents a kind of container.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ContainerKind {
-    /// The container is for downloading a task's inputs.
-    Inputs,
-    /// The container is a task executor.
-    Executor,
-    /// The container is for uploading a task's outputs.
-    Outputs,
-}
-
-impl fmt::Display for ContainerKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Inputs => write!(f, "inputs"),
-            Self::Executor => write!(f, "executor"),
-            Self::Outputs => write!(f, "outputs"),
-        }
-    }
-}
-
 /// Represents information about a terminated container.
 #[derive(Debug, Clone)]
 pub struct TerminatedContainer<'a> {
-    /// The kind of the container.
-    pub kind: ContainerKind,
-    /// The index of the executor.
-    ///
-    /// This is `None` when the container was not an executor.
-    pub executor_index: Option<i32>,
+    /// The name of the container.
+    pub name: &'a str,
     /// The start time of the container.
     pub start_time: DateTime<Utc>,
     /// The end time of the container.

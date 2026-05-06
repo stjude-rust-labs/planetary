@@ -40,8 +40,8 @@ use kube::runtime::WatchStreamExt;
 use kube::runtime::reflector::Lookup;
 use kube::runtime::watcher;
 use kube::runtime::watcher::Event;
-use planetary_db::ContainerKind;
 use planetary_db::Database;
+use planetary_db::EXECUTOR_CONTAINER_PREFIX;
 use planetary_db::TerminatedContainer;
 use planetary_db::format_log_message;
 use planetary_server::templating::CANCELED_LABEL;
@@ -81,11 +81,11 @@ use crate::retry_durations;
 /// state.
 const ORCHESTRATOR_MOUNT: &str = "/mnt/orchestrator";
 
-/// The maximum number of lines to tail for an executor pod's logs.
+/// The maximum number of lines to tail for a task pod container.
 ///
 /// This is 16 because there is always an extra line of output in the executor's
 /// log to maybe contain the executors real exit code.
-const MAX_EXECUTOR_LOG_LINES: i64 = 16;
+const MAX_LOG_LINES: i64 = 16;
 
 /// The reason for an image pull backoff wait.
 const IMAGE_PULL_BACKOFF_REASON: &str = "ImagePullBackOff";
@@ -103,17 +103,11 @@ const IMAGE_PULL_BACKOFF_REASON: &str = "ImagePullBackOff";
 /// exit code.
 const EXIT_PREFIX: &str = "exit: ";
 
-/// Formats a container name given the container kind.
-fn format_container_name(kind: ContainerKind, executor_index: Option<usize>) -> String {
-    match kind {
-        ContainerKind::Inputs => "inputs".into(),
-        ContainerKind::Executor => format!(
-            "executor-{index}",
-            index = executor_index.expect("should have index")
-        ),
-        ContainerKind::Outputs => "outputs".into(),
-    }
-}
+/// The expected container name for transporting inputs.
+const INPUTS_CONTAINER_NAME: &str = "inputs";
+
+/// The expected container name for transporting outputs.
+const OUTPUTS_CONTAINER_NAME: &str = "outputs";
 
 /// Gets the task directory path for a TES task.
 fn task_directory_path(tes_id: &str) -> PathBuf {
@@ -297,9 +291,13 @@ enum TaskPodState<'a> {
     Running,
     /// The pod succeeded and the task is complete.
     Succeeded,
+    /// The inputs container has failed.
+    InputsError,
     /// The pod failed due to executor error (exited with non-zero).
     ExecutorError(usize),
-    /// The pod failed due to system error.
+    /// The outputs container has failed.
+    OutputsError,
+    /// The pod failed due to an unspecified system error.
     SystemError,
     /// The pod failed to pull its image and has backed off.
     ImagePullBackOff(&'a str),
@@ -313,7 +311,9 @@ impl fmt::Display for TaskPodState<'_> {
             Self::Initializing => write!(f, "initializing"),
             Self::Running => write!(f, "running"),
             Self::Succeeded => write!(f, "succeeded"),
+            Self::InputsError => write!(f, "inputs error"),
             Self::ExecutorError(_) => write!(f, "executor error"),
+            Self::OutputsError => write!(f, "outputs error"),
             Self::SystemError => write!(f, "system error"),
             Self::ImagePullBackOff(_) => write!(f, "image pull backoff"),
         }
@@ -405,20 +405,35 @@ impl PodExt for Pod {
             "Running" => TaskPodState::Running,
             "Succeeded" => TaskPodState::Succeeded,
             "Failed" => {
-                let init_statuses = status
+                // Search for the failed container
+                if let Some(failed) = status
                     .init_container_statuses
                     .as_deref()
-                    .unwrap_or_default();
-
-                // Check for any failed executor
-                if let Some(index) = init_statuses.iter().position(|s| {
-                    s.state
-                        .as_ref()
-                        .and_then(|s| s.terminated.as_ref().map(|s| s.exit_code != 0))
-                        .unwrap_or(false)
-                }) && index > 0
+                    .unwrap_or_default()
+                    .iter()
+                    .chain(status.container_statuses.as_deref().unwrap_or_default())
+                    .find(|s| {
+                        s.state
+                            .as_ref()
+                            .and_then(|s| s.terminated.as_ref().map(|s| s.exit_code != 0))
+                            .unwrap_or(false)
+                    })
                 {
-                    return Ok(TaskPodState::ExecutorError(index - 1));
+                    if failed.name == INPUTS_CONTAINER_NAME {
+                        return Ok(TaskPodState::InputsError);
+                    }
+
+                    if failed.name == OUTPUTS_CONTAINER_NAME {
+                        return Ok(TaskPodState::OutputsError);
+                    }
+
+                    if let Some(index) = failed
+                        .name
+                        .strip_prefix(EXECUTOR_CONTAINER_PREFIX)
+                        .and_then(|n| n.parse().ok())
+                    {
+                        return Ok(TaskPodState::ExecutorError(index));
+                    }
                 }
 
                 TaskPodState::SystemError
@@ -752,9 +767,11 @@ impl TaskOrchestrator {
             TaskPodState::Initializing => self.handle_initializing_task(tes_id).await?,
             TaskPodState::Running => self.handle_running_task(tes_id).await?,
             TaskPodState::Succeeded => self.handle_succeeded_task(tes_id, pod).await?,
+            TaskPodState::InputsError => self.handle_io_error(tes_id, pod, true).await?,
             TaskPodState::ExecutorError(index) => {
                 self.handle_executor_error(tes_id, index, pod).await?
             }
+            TaskPodState::OutputsError => self.handle_io_error(tes_id, pod, false).await?,
             TaskPodState::SystemError => self.handle_system_error(tes_id, pod).await?,
             TaskPodState::ImagePullBackOff(message) => {
                 self.handle_image_pull_backoff(tes_id, message, pod).await?
@@ -842,6 +859,70 @@ impl TaskOrchestrator {
         Ok(())
     }
 
+    /// Handles an error for processing inputs or outputs.
+    async fn handle_io_error(&self, tes_id: &str, pod: &Pod, inputs: bool) -> Result<(), Error> {
+        let name = pod.name().context("pod is missing a name")?;
+        let ns = pod.namespace().context("pod is missing a namespace")?;
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &ns);
+
+        // Get the input container's output to record in the system log
+        let output = Retry::spawn_notify(
+            retry_durations(),
+            || async {
+                match pods
+                    .logs(
+                        &name,
+                        &LogParams {
+                            container: Some(
+                                if inputs {
+                                    INPUTS_CONTAINER_NAME
+                                } else {
+                                    OUTPUTS_CONTAINER_NAME
+                                }
+                                .to_string(),
+                            ),
+                            tail_lines: Some(MAX_LOG_LINES),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    Ok(output) => Ok(output),
+                    Err(kube::Error::Api(s)) if s.is_not_found() || s.code == 400 => {
+                        // The pod or container no longer exists; treat as empty output
+                        Ok(String::new())
+                    }
+                    Err(e) => Err(into_retry_error(e)),
+                }
+            },
+            notify_retry,
+        )
+        .await?;
+
+        let message = format_log_message!(
+            "task `{tes_id}` has failed due to an error encountered while processing {kind} (last \
+             {MAX_LOG_LINES} lines of output):\n{output}",
+            kind = if inputs { "inputs" } else { "outputs" },
+            output = output.trim()
+        );
+
+        if self
+            .database
+            .update_task_state(
+                tes_id,
+                State::SystemError,
+                &[&message],
+                Some(self.get_terminated_containers(pod).boxed()),
+                None,
+            )
+            .await?
+        {
+            debug!("{message}");
+        }
+
+        Ok(())
+    }
+
     /// Handles an executor error.
     async fn handle_executor_error(
         &self,
@@ -870,7 +951,7 @@ impl TaskOrchestrator {
         Ok(())
     }
 
-    /// Handles a system error.
+    /// Handles an unspecified system error.
     async fn handle_system_error(&self, tes_id: &str, pod: &Pod) -> Result<(), Error> {
         let outputs = deserialize_items(output_files_file_path(tes_id))?;
 
@@ -880,14 +961,15 @@ impl TaskOrchestrator {
                 tes_id,
                 State::SystemError,
                 &[&format_log_message!(
-                    "task `{tes_id}` has failed due to a system error"
+                    "task `{tes_id}` has failed due to an unspecified system error; contact the \
+                     administrator to diagnose the issue"
                 )],
                 Some(self.get_terminated_containers(pod).boxed()),
                 outputs.as_deref(),
             )
             .await?
         {
-            debug!("task `{tes_id}` has failed due to a system error");
+            debug!("task `{tes_id}` has failed due to an unspecified system error");
         }
 
         Ok(())
@@ -979,31 +1061,22 @@ impl TaskOrchestrator {
         let name = pod.name().context("pod is missing a name")?;
         let ns = pod.namespace().context("pod is missing a namespace")?;
         let status = pod.status.as_ref().context("pod has no status")?;
-
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &ns);
-
-        let init_statuses = status
-            .init_container_statuses
-            .as_deref()
-            .unwrap_or_default();
-
-        let statuses = status.container_statuses.as_deref().unwrap_or_default();
-
         let now = Timestamp::now();
         let mut containers = Vec::new();
-        for (kind, executor_index, state) in init_statuses
+
+        for status in status
+            .init_container_statuses
+            .as_deref()
+            .unwrap_or_default()
             .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                if i == 0 {
-                    (ContainerKind::Inputs, None, s)
-                } else {
-                    (ContainerKind::Executor, Some(i - 1), s)
-                }
-            })
-            .chain(statuses.iter().map(|s| (ContainerKind::Outputs, None, s)))
-            .filter_map(|(k, i, s)| Some((k, i, s.state.as_ref()?.terminated.as_ref()?)))
+            .chain(status.container_statuses.as_deref().unwrap_or_default())
         {
+            // Only save terminated containers
+            let Some(terminated) = status.state.as_ref().and_then(|s| s.terminated.as_ref()) else {
+                continue;
+            };
+
             // Get the container's output
             let mut output = Retry::spawn_notify(
                 retry_durations(),
@@ -1012,14 +1085,8 @@ impl TaskOrchestrator {
                         .logs(
                             &name,
                             &LogParams {
-                                container: Some(format_container_name(kind, executor_index)),
-                                tail_lines: match kind {
-                                    ContainerKind::Inputs | ContainerKind::Outputs => {
-                                        // For an inputs and outputs pod, read all the log
-                                        None
-                                    }
-                                    ContainerKind::Executor => Some(MAX_EXECUTOR_LOG_LINES),
-                                },
+                                container: Some(status.name.clone()),
+                                tail_lines: Some(MAX_LOG_LINES),
                                 ..Default::default()
                             },
                         )
@@ -1037,18 +1104,15 @@ impl TaskOrchestrator {
             )
             .await?;
 
-            // For executors, extract the real error code which is printed at the end of the
-            // output
-            let exit_code = if kind == ContainerKind::Executor
-                && let Some(pos) = output.rfind(EXIT_PREFIX)
-            {
+            // If the output contains the magic exit prefix, use the contained exit code
+            // rather than the containers
+            let exit_code = if let Some(pos) = output.rfind(EXIT_PREFIX) {
                 let exit = output.split_off(pos);
-                exit[EXIT_PREFIX.len()..]
-                    .trim()
-                    .parse()
-                    .unwrap_or(state.exit_code)
+                exit.get(EXIT_PREFIX.len()..)
+                    .and_then(|code| code.trim().parse().ok())
+                    .unwrap_or(terminated.exit_code)
             } else {
-                state.exit_code
+                terminated.exit_code
             };
 
             // TODO: once k8s supports split logs, read both stdout and stderr streams
@@ -1060,10 +1124,9 @@ impl TaskOrchestrator {
             };
 
             containers.push(TerminatedContainer {
-                kind,
-                executor_index: executor_index.map(|i| i as i32),
+                name: &status.name,
                 start_time: DateTime::from_timestamp_micros(
-                    state
+                    terminated
                         .started_at
                         .as_ref()
                         .map(|t| t.0)
@@ -1072,7 +1135,7 @@ impl TaskOrchestrator {
                 )
                 .context("timestamp out of range")?,
                 end_time: DateTime::from_timestamp_micros(
-                    state
+                    terminated
                         .finished_at
                         .as_ref()
                         .map(|t| t.0)
