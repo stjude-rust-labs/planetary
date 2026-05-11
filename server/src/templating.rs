@@ -237,10 +237,12 @@ impl Template {
 
                 if let Some(local_path) = input.url.as_ref().and_then(|url| {
                     Some(
+                        // SAFETY: URLs are validated when tasks are created
                         url_to_file_path(url)?
                             .strip_prefix("/")
                             .expect("path should be absolute")
-                            .to_str()?
+                            .to_str()
+                            .expect("path should be UTF-8")
                             .to_string(),
                     )
                 }) {
@@ -260,12 +262,13 @@ impl Template {
                 let mut value = Map::new();
                 value.insert("path".to_string(), output.path.clone().into());
 
-                if let Some(path) = url_to_file_path(&output.url)
-                    && let Some(local_path) = path
+                if let Some(path) = url_to_file_path(&output.url) {
+                    // SAFETY: URLs are validated when tasks are created
+                    let local_path = path
                         .strip_prefix("/")
                         .expect("path should be absolute")
                         .to_str()
-                {
+                        .expect("path should be UTF-8");
                     value.insert("local_path".to_string(), local_path.into());
                 }
 

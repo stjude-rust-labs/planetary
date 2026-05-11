@@ -111,6 +111,8 @@ struct State {
     database: Arc<dyn Database>,
     /// The orchestrator service information.
     orchestrator: Arc<OrchestratorServiceInfo>,
+    /// Whether or not to allow `file://` URLs for task inputs and outputs.
+    allow_file_urls: bool,
 }
 
 impl State {
@@ -121,6 +123,7 @@ impl State {
         database: Arc<dyn Database>,
         orchestrator_url: Url,
         orchestrator_api_key: SecretString,
+        allow_file_urls: bool,
     ) -> Self {
         Self {
             client: Arc::new(Client::new()),
@@ -130,6 +133,7 @@ impl State {
                 url: orchestrator_url,
                 api_key: orchestrator_api_key,
             }),
+            allow_file_urls,
         }
     }
 }
@@ -163,6 +167,9 @@ pub struct Server {
 
     /// Whether or not to allow fallback to the `Authorization` header.
     allow_authorization_fallback: bool,
+
+    /// Whether or not to allow `file://` URLs for task inputs and outputs.
+    allow_file_urls: bool,
 }
 
 impl<S: server_builder::State> ServerBuilder<S> {
@@ -201,6 +208,7 @@ impl Server {
             self.database,
             self.orchestrator_url,
             self.orchestrator_api_key,
+            self.allow_file_urls,
         );
 
         server.run(state, shutdown).await?;

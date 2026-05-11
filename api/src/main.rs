@@ -161,6 +161,10 @@ pub struct Args {
     /// By default, only the `X-Forwarded-User` header is checked.
     #[clap(long, env)]
     allow_authorization_fallback: bool,
+
+    /// Whether or not to allow `file://` URLs for task inputs and outputs.
+    #[clap(long, env)]
+    allow_file_urls: bool,
 }
 
 impl Args {
@@ -241,6 +245,7 @@ pub async fn main() -> anyhow::Result<()> {
         .orchestrator_url(args.orchestrator_url)
         .orchestrator_api_key(args.orchestrator_api_key)
         .allow_authorization_fallback(args.allow_authorization_fallback)
+        .allow_file_urls(args.allow_file_urls)
         .info(ServiceInfo::try_from(args.service_info)?)
         .build()
         .run(terminate())

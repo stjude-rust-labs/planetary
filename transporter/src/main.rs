@@ -502,11 +502,8 @@ async fn prepare_inputs(
                         && let Some(path) = url_to_file_path(url)
                     {
                         match local_dir {
-                            Some(local_dir) => {
-                                local_dir.join(path.strip_prefix("/").with_context(|| {
-                                    format!("input URL `{url}` is not absolute")
-                                })?)
-                            }
+                            Some(local_dir) => local_dir
+                                .join(path.strip_prefix("/").expect("path should be absolute")),
                             None => bail!("input file URL `{url}` is not supported"),
                         }
                     } else {
@@ -546,9 +543,9 @@ async fn prepare_inputs(
         // expected output location; executor containers will mount it directly.
         if let Some(path) = url_to_file_path(&output.url) {
             let path = match local_dir {
-                Some(local_dir) => local_dir.join(path.strip_prefix("/").with_context(|| {
-                    format!("output URL `{url}` is not absolute", url = output.url)
-                })?),
+                Some(local_dir) => {
+                    local_dir.join(path.strip_prefix("/").expect("path should be absolute"))
+                }
                 None => bail!("output file URL `{url}` is not supported", url = output.url),
             };
 
@@ -830,11 +827,8 @@ async fn prepare_outputs(
                 tokio::spawn(async move {
                     let path = if let Some(path) = url_to_file_path(&output.url) {
                         match local_dir {
-                            Some(local_dir) => {
-                                local_dir.join(path.strip_prefix("/").with_context(|| {
-                                    format!("output URL `{url}` is not absolute", url = output.url)
-                                })?)
-                            }
+                            Some(local_dir) => local_dir
+                                .join(path.strip_prefix("/").expect("path should be absolute")),
                             None => {
                                 bail!("output file URL `{url}` is not supported", url = output.url)
                             }

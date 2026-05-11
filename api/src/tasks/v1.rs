@@ -41,13 +41,14 @@ use crate::notify_retry;
 use crate::retry_durations;
 
 /// Ensures that the given URL is supported by Planetary.
-fn ensure_supported_url(url: &str, kind: &str) -> Result<()> {
+fn ensure_supported_url(url: &str, kind: &str, allow_file_urls: bool) -> Result<()> {
     let url: Url = url
         .parse()
         .map_err(|_| anyhow!("invalid {kind} URL `{url}`"))?;
 
     match url.scheme() {
-        "file" | "http" | "https" | "az" | "s3" | "gs" => {}
+        "http" | "https" | "az" | "s3" | "gs" => {}
+        "file" if allow_file_urls => {}
         scheme => bail!("{kind} URL `{url}` uses unsupported scheme `{scheme}`"),
     }
 
@@ -71,10 +72,10 @@ fn ensure_supported_url(url: &str, kind: &str) -> Result<()> {
 }
 
 /// Performs validation on the request.
-fn validate_task(task: &RequestTask) -> Result<()> {
+fn validate_task(task: &RequestTask, allow_file_urls: bool) -> Result<()> {
     use std::path::Path;
 
-    fn validate_input(input: &Input) -> Result<()> {
+    fn validate_input(input: &Input, allow_file_urls: bool) -> Result<()> {
         let path = Path::new(&input.path);
         if !path.is_absolute() {
             bail!("input path `{path}` is not absolute", path = input.path);
@@ -92,7 +93,7 @@ fn validate_task(task: &RequestTask) -> Result<()> {
             (None, None) => bail!("input URL is required"),
             (Some(url), None) => {
                 // Check for supported URL schemes
-                ensure_supported_url(url, "input")?;
+                ensure_supported_url(url, "input", allow_file_urls)?;
             }
             (_, Some(_)) => {
                 // If content is specified, URL is ignored; it must be a file type
@@ -105,7 +106,7 @@ fn validate_task(task: &RequestTask) -> Result<()> {
         Ok(())
     }
 
-    fn validate_output(output: &Output) -> Result<()> {
+    fn validate_output(output: &Output, allow_file_urls: bool) -> Result<()> {
         // The output path must be absolute
         let path = Path::new(&output.path);
         if !path.is_absolute() {
@@ -156,7 +157,7 @@ fn validate_task(task: &RequestTask) -> Result<()> {
         }
 
         // Check for supported URL schemes
-        ensure_supported_url(&output.url, "output")?;
+        ensure_supported_url(&output.url, "output", allow_file_urls)?;
 
         Ok(())
     }
@@ -251,11 +252,11 @@ fn validate_task(task: &RequestTask) -> Result<()> {
     }
 
     for input in task.inputs.as_deref().unwrap_or_default() {
-        validate_input(input)?;
+        validate_input(input, allow_file_urls)?;
     }
 
     for output in task.outputs.as_deref().unwrap_or_default() {
-        validate_output(output)?;
+        validate_output(output, allow_file_urls)?;
     }
 
     if task.executors.is_empty() {
@@ -283,7 +284,7 @@ pub async fn create_task(
     State(state): State<crate::State>,
     Json(task): Json<RequestTask>,
 ) -> ServerResponse<Json<CreatedTask>> {
-    if let Err(e) = validate_task(&task) {
+    if let Err(e) = validate_task(&task, state.allow_file_urls) {
         return Err(Error::bad_request(e.to_string()));
     }
 
