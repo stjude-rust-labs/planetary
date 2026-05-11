@@ -40,7 +40,7 @@ use crate::Username;
 use crate::notify_retry;
 use crate::retry_durations;
 
-/// Determines if the given URL is supported by Planetary.
+/// Ensures that the given URL is supported by Planetary.
 fn ensure_supported_url(url: &str, kind: &str) -> Result<()> {
     let url: Url = url
         .parse()
