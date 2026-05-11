@@ -285,7 +285,7 @@ pub async fn create_task(
     Json(task): Json<RequestTask>,
 ) -> ServerResponse<Json<CreatedTask>> {
     if let Err(e) = validate_task(&task, state.allow_file_urls) {
-        return Err(Error::bad_request(e.to_string()));
+        return Err(Error::bad_request(format!("{e:#}")));
     }
 
     let id = state.database.insert_task(&username.0, &task).await?;
