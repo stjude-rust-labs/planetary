@@ -273,7 +273,7 @@ root. For example, an input with URL `file:///foo/bar.txt` will be treated as
 `$ROOT/foo/bar.txt`, where $ROOT is the path at which the `local.storage`
 volume mounts.
 
-It is strongly recommended that the local storage be associated ***only*** for
+It is strongly recommended that the local storage be scoped ***only*** to
 the user of the task. That can be accomplished by using the `{{ username }}`
 value in the task resource template.
 
