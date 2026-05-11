@@ -44,7 +44,7 @@ use crate::retry_durations;
 fn ensure_supported_url(url: &str, kind: &str, allow_file_urls: bool) -> Result<()> {
     let url: Url = url
         .parse()
-        .map_err(|_| anyhow!("invalid {kind} URL `{url}`"))?;
+        .with_context(|| format!("invalid {kind} URL `{url}`"))?;
 
     match url.scheme() {
         "http" | "https" | "az" | "s3" | "gs" => {}
@@ -55,9 +55,9 @@ fn ensure_supported_url(url: &str, kind: &str, allow_file_urls: bool) -> Result<
     // File URLs are required to be convertible to a UTF-8 file path with no
     // parent-directory segments
     if url.scheme() == "file" {
-        let path = url
-            .to_file_path()
-            .map_err(|_| anyhow!("invalid {kind} file URL `{url}`"))?;
+        let path = url.to_file_path().map_err(|_| {
+            anyhow!("invalid {kind} file URL `{url}`: host must be empty or `localhost`")
+        })?;
 
         if path.components().any(|c| matches!(c, Component::ParentDir)) {
             bail!("{kind} file URL `{url}` cannot contain `..` path segments");
