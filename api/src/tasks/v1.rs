@@ -51,11 +51,16 @@ fn ensure_supported_url(url: &str, kind: &str) -> Result<()> {
         scheme => bail!("{kind} URL `{url}` uses unsupported scheme `{scheme}`"),
     }
 
-    // File URLs are required to be convertible to a file path
+    // File URLs are required to be convertible to a UTF-8 file path with no
+    // parent-directory segments
     if url.scheme() == "file" {
         let path = url
             .to_file_path()
             .map_err(|_| anyhow!("invalid {kind} file URL `{url}`"))?;
+
+        if path.components().any(|c| matches!(c, Component::ParentDir)) {
+            bail!("{kind} file URL `{url}` cannot contain `..` path segments");
+        }
 
         if path.into_os_string().into_string().is_err() {
             bail!("{kind} URL `{url}` cannot be represented in UTF-8");
