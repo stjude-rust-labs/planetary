@@ -4,6 +4,7 @@
 //! the monitor when tasks are garbage collected.
 
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use anyhow::Result;
@@ -16,6 +17,7 @@ use kube::discovery::ApiCapabilities;
 use kube::discovery::Scope;
 use kube::runtime::reflector::Lookup;
 use planetary_db::TaskTemplateData;
+use reqwest::Url;
 use serde::Deserialize as _;
 use serde_yaml_ng::Deserializer;
 use tera::Context;
@@ -48,6 +50,19 @@ const DEFAULT_CPU: i32 = 1;
 ///
 /// Uses a 256 MiB default.
 const DEFAULT_MEMORY: f64 = 0.268435455;
+
+/// Helper for converting a URL to a file path.
+///
+/// Returns `None` if the URL is invalid or if the URL does not represent a file
+/// path.
+fn url_to_file_path(url: &str) -> Option<PathBuf> {
+    let url = Url::parse(url).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+
+    url.to_file_path().ok()
+}
 
 /// Represents a Planetary task template.
 ///
@@ -153,6 +168,7 @@ impl Template {
         self.render(
             &TaskTemplateData {
                 id: id.into(),
+                username: String::new(),
                 preemptible: false,
                 cpu: None,
                 memory: None,
@@ -189,6 +205,7 @@ impl Template {
 
         let mut context = Map::new();
         insert(&mut context, "id", data.id.as_str());
+        insert(&mut context, "username", data.username.as_str());
         insert(&mut context, "preemptible", data.preemptible);
 
         // Set the requested resources
@@ -211,11 +228,53 @@ impl Template {
         );
 
         // Set the inputs
-        let inputs: Vec<Value> = data.inputs.iter().map(|i| i.path.clone().into()).collect();
+        let inputs: Vec<Value> = data
+            .inputs
+            .iter()
+            .map(|input| {
+                let mut value = Map::new();
+                value.insert("path".to_string(), input.path.clone().into());
+
+                if let Some(local_path) = input.url.as_ref().and_then(|url| {
+                    Some(
+                        // SAFETY: URLs are validated when tasks are created
+                        url_to_file_path(url)?
+                            .strip_prefix("/")
+                            .expect("path should be absolute")
+                            .to_str()
+                            .expect("path should be UTF-8")
+                            .to_string(),
+                    )
+                }) {
+                    value.insert("local_path".to_string(), local_path.into());
+                }
+
+                value.into()
+            })
+            .collect();
         insert(&mut context, "inputs", inputs);
 
         // Set the outputs
-        let outputs: Vec<Value> = data.outputs.iter().map(|o| o.path.clone().into()).collect();
+        let outputs: Vec<Value> = data
+            .outputs
+            .iter()
+            .map(|output| {
+                let mut value = Map::new();
+                value.insert("path".to_string(), output.path.clone().into());
+
+                if let Some(path) = url_to_file_path(&output.url) {
+                    // SAFETY: URLs are validated when tasks are created
+                    let local_path = path
+                        .strip_prefix("/")
+                        .expect("path should be absolute")
+                        .to_str()
+                        .expect("path should be UTF-8");
+                    value.insert("local_path".to_string(), local_path.into());
+                }
+
+                value.into()
+            })
+            .collect();
         insert(&mut context, "outputs", outputs);
 
         // Set the volumes

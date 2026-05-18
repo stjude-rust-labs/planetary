@@ -253,6 +253,33 @@ Planetary supports the following cloud storage services:
 See the [`transporter.storage` Helm chart values](./chart/values.yaml) for
 configuring a Planetary deployment.
 
+### Local Inputs and Outputs
+
+When the Helm chart is supplied a value for `local.storage`, Planetary will use
+the specified volume for "local" inputs and outputs. When a value is not
+supplied (the default), support for local inputs and outputs is disabled.
+
+An input or output is considered "local" if its URL uses the `file://` scheme.
+
+Unlike other URL schemes, local inputs are not downloaded from cloud storage
+and local outputs are not uploaded to cloud storage. Instead they are directly
+accessed by the task from the local storage volume.
+
+Local inputs and outputs will not count towards the requested disk size for the
+task as they are not copied to the task's storage volume.
+
+The path specified in the URL is treated as relative to the configured volume
+root. For example, an input with URL `file:///foo/bar.txt` will be treated as
+`$ROOT/foo/bar.txt`, where $ROOT is the path at which the `local.storage`
+volume mounts.
+
+It is strongly recommended that the local storage be scoped ***only*** to
+the user of the task. That can be accomplished by using the `{{ username }}`
+value in the task resource template.
+
+See an example of using an NFS share to provide per-user local storage in the
+[development deployment](chart/examples/development.yaml).
+
 ### Task Execution
 
 Planetary runs each TES task by evaluating a template file for creating

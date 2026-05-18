@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Added support for local (file://) inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
 * Added support for the `X-Forwarded-User` header for respecting the user
   associated with TES API requests ([#40](https://github.com/stjude-rust-labs/planetary/pull/40)).
 

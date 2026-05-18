@@ -204,5 +204,10 @@ networkPolicies:
       - port: 443
         protocol: TCP
 
+# The configuration for local (i.e., `file://` URLs) storage.
+# By default, support for local storage will be disabled.
+local:
+  storage: null
+
 # Extra Kubernetes resources to deploy along with Planetary
 extra: []

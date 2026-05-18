@@ -1,27 +1,43 @@
 //! Responsible for "transporting" a Planetary task's inputs and outputs.
 //!
-//! This tool is built into a container image that is used by Planetary.
+//! This tool is built into a container image that is used internally by
+//! Planetary.
 //!
-//! The executable requires either the `--inputs` or `--outputs` option.
+//! The executable requires either the `--mode inputs` or `--mode outputs`
+//! option.
 //!
-//! If the `--inputs` option is specified, the argument is expected to be a path
-//! to a JSON file containing an array of TES inputs.
+//! For the `inputs` mode, the transporter reads the `inputs.json` file from
+//! orchestrator shared storage for the task. The inputs are then downloaded as
+//! required to the expected location for mounting the inputs into executor
+//! containers.
 //!
-//! If the `--outputs` option is specified, the argument is expected to be a
-//! path to a JSON file containing an array of TES outputs.
+//! Additionally, the transporter also reads the `outputs.json` file from
+//! orchestrator shared storage so that it can create a file or directory at the
+//! expected location for mounting the outputs into the executor containers.
 //!
-//! The `--target` argument is the directory where either inputs are created or
-//! the outputs are sourced from.
+//! For the `outputs` mode, the transporter only reads from `outputs.json` and
+//! uploads the outputs to the expected cloud storage location. The transporter
+//! will then create a `final.json` file in orchestrator shared storage to
+//! record the final output files of the TES task. The orchestrator uses that
+//! information to record output files for the TES task.
 //!
 //! The entries of the target directory will be created or accessed based on
 //! their index within the array of inputs or outputs.
 //!
-//! For example, if the `--inputs` option is used with `--targets /mnt/inputs`,
-//! this program will create entries such as `/mnt/inputs/0`, `/mnt/inputs/1`,
-//! etc.
+//! For example, with the `--inputs-dir /mnt/inputs` option, the transporter
+//! will create entries such as `/mnt/inputs/0`, `/mnt/inputs/1`, etc.
 //!
-//! Likewise, if the `--outputs` option is used with `--targets /mnt/outputs`,
-//! it will access `/mnt/outputs/0`, `/mnt/outputs/1`, etc.
+//! Likewise, with the `--outputs-dir /mnt/outputs` option, the transporter will
+//! create (for `inputs` mode) or access (for `outputs` mode) entries such as
+//! `/mnt/outputs/0`, `/mnt/outputs/1`, etc.
+//!
+//! For "local" inputs (those with `file://` URLs), the transporter will verify
+//! that the inputs exist. Local input files aren't copied; instead they are
+//! mounted directly from the local volume.
+//!
+//! For "local" outputs (those with `file://` URLs), the transporter will
+//! recursively search for files for recording outputs of the TES task. Local
+//! output files aren't copied.
 
 use std::fs;
 use std::fs::Permissions;
@@ -34,9 +50,6 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -56,6 +69,7 @@ use cloud_copy::S3Config;
 use cloud_copy::TransferEvent;
 use cloud_copy::UrlExt;
 use cloud_copy::cli::TimeDeltaExt;
+use cloud_copy::cli::TransferStats;
 use cloud_copy::cli::handle_events;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -83,8 +97,27 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use walkdir::WalkDir;
 
+/// The number of transfer events to buffer before the event handler becomes
+/// lagged.
+const EVENTS_CAPACITY: usize = 1000;
+
+/// Helper for converting a URL to a file path.
+///
+/// The returned path is guaranteed to be absolute.
+///
+/// Returns `None` if the URL is invalid or if the URL does not represent a file
+/// path.
+fn url_to_file_path(url: &str) -> Option<PathBuf> {
+    let url: Url = Url::parse(url).ok()?;
+    if url.scheme() != "file" {
+        return None;
+    }
+
+    url.to_file_path().ok()
+}
+
 /// Prints the statistics after transferring inputs or outputs.
-fn print_stats(delta: TimeDelta, files: usize, bytes: u64) {
+fn print_stats(delta: TimeDelta, TransferStats { files, bytes }: TransferStats) {
     let seconds = delta.num_seconds();
 
     println!(
@@ -143,6 +176,12 @@ struct Args {
     /// The path to the task's outputs directory.
     #[arg(long)]
     outputs_dir: PathBuf,
+
+    /// The optional path to the "local" directory for `file://` inputs and outputs.
+    ///
+    /// `file://` inputs and outputs will be disabled if not specified.
+    #[arg(long)]
+    local_dir: Option<PathBuf>,
 
     /// The verbosity level.
     #[command(flatten)]
@@ -222,9 +261,9 @@ fn outputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
     orchestrator_dir.join(tes_id).join("outputs.json")
 }
 
-/// Gets the uploaded outputs file path for a TES task.
-fn uploaded_outputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
-    orchestrator_dir.join(tes_id).join("uploaded.json")
+/// Gets the final outputs file path for a TES task.
+fn output_files_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
+    orchestrator_dir.join(tes_id).join("final.json")
 }
 
 /// Helper function for serializing an array of serializable items to a file.
@@ -261,18 +300,171 @@ fn deserialize_items<T: DeserializeOwned>(path: impl AsRef<Path>) -> anyhow::Res
         .with_context(|| format!("failed to read file `{path}`", path = path.display()))
 }
 
-/// Downloads inputs into the inputs directory.
+/// Represents context for file transfers.
+#[derive(Clone)]
+struct TransferContext {
+    /// The cloud copy configuration to use for copy operations.
+    config: Config,
+    /// The HTTP client to use for copy operations.
+    client: HttpClient,
+    /// The cancellation token to use for cancelling input downloads.
+    cancel: CancellationToken,
+    /// The transfer events channel.
+    events: broadcast::Sender<TransferEvent>,
+}
+
+impl TransferContext {
+    /// Constructs a new input transfer context from the given cloud copy
+    /// configuration and cancellation token.
+    fn new(config: Config, cancel: CancellationToken) -> Self {
+        Self {
+            config,
+            client: HttpClient::new(),
+            cancel,
+            events: broadcast::channel(EVENTS_CAPACITY).0,
+        }
+    }
+}
+
+/// Prepares an individual input at the specified path.
+///
+/// For inputs with specified contents, a new file will be created at the
+/// specified path with the requested content.
+///
+/// For remote inputs, this will download the file to the specified path.
+///
+/// For local inputs, this will ensure that the specified path exists and is the
+/// expected type.
+async fn prepare_input(context: TransferContext, input: &Input, path: &Path) -> Result<()> {
+    let permissions = if let Some(contents) = &input.content {
+        // Write the contents if directly given, but only if the input is a file
+        match input.ty {
+            IoType::File => {}
+            IoType::Directory => bail!(
+                "cannot create content for directory input `{path}`",
+                path = input.path
+            ),
+        }
+
+        info!(
+            "creating input file `{path}` with specified contents",
+            path = input.path,
+        );
+
+        tokio::fs::write(&path, contents)
+            .await
+            .with_context(|| format!("failed to create input file `{path}`", path = input.path))?;
+
+        0o444
+    } else {
+        let url = input
+            .url
+            .as_ref()
+            .context("input is missing a URL")?
+            .parse::<Url>()
+            .context("input URL is invalid")?;
+
+        // For `file://` URLs, just ensure the path exists and is the expected type
+        if url.scheme() == "file" {
+            // Ensure the path exists
+            if !path.exists() {
+                bail!("file input `{url}` does not exist");
+            }
+
+            // Check that the result matches the input type
+            match input.ty {
+                IoType::Directory => {
+                    if path.is_file() {
+                        bail!(
+                            "input `{url}` was a file but the input type was `DIRECTORY`",
+                            url = url.display()
+                        );
+                    }
+                }
+                IoType::File => {
+                    if !path.is_file() {
+                        bail!(
+                            "input `{url}` was a directory but the input type was `FILE`",
+                            url = url.display()
+                        );
+                    }
+                }
+            }
+
+            return Ok(());
+        }
+
+        cloud_copy::copy(
+            context.config,
+            context.client,
+            url.clone(),
+            path,
+            context.cancel,
+            Some(context.events),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to download input `{url}` to `{path}`",
+                url = url.display(),
+                path = input.path
+            )
+        })?;
+
+        // Check that the result matches the input type
+        match input.ty {
+            IoType::Directory => {
+                if path.is_file() {
+                    bail!(
+                        "input `{url}` was a file but the input type was `DIRECTORY`",
+                        url = url.display()
+                    );
+                }
+
+                0o555
+            }
+            IoType::File => {
+                if !path.is_file() {
+                    bail!(
+                        "input `{url}` was a directory but the input type was `FILE`",
+                        url = url.display()
+                    );
+                }
+
+                0o444
+            }
+        }
+    };
+
+    // Set the permissions (world-readable) so any user an executor container runs
+    // as will be able to read the input
+    set_permissions(&path, Permissions::from_mode(permissions))
+        .await
+        .with_context(|| {
+            format!(
+                "failed to set permissions for input `{path}`",
+                path = input.path
+            )
+        })?;
+
+    Ok(())
+}
+
+/// Prepares task inputs.
+///
+/// Remote inputs are copied locally and local inputs are checked for existence.
 ///
 /// This will also create empty files and directories for outputs in the outputs
-/// directory.
-async fn download_inputs(
-    config: Config,
+/// directory; this is required because Kubernetes will create directory mounts
+/// if the file doesn't exist.
+async fn prepare_inputs(
+    context: TransferContext,
     tes_id: &str,
     orchestrator_dir: &Path,
     inputs_dir: &Path,
     outputs_dir: &Path,
-    cancel: CancellationToken,
-) -> Result<()> {
+    local_dir: Option<&Path>,
+) -> Result<(TimeDelta, Option<TransferStats>)> {
     let inputs: Vec<Input> = deserialize_items(inputs_file_path(orchestrator_dir, tes_id))?;
     let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
 
@@ -293,116 +485,39 @@ async fn download_inputs(
     })?;
 
     // Create an event handling task
-    let (events_tx, events_rx) = broadcast::channel(1000);
-    let c = cancel.clone();
-    let handler = tokio::spawn(async move { handle_events(events_rx, false, c).await });
+    let events = context.events.subscribe();
+    let cancel = context.cancel.clone();
+    let handler = tokio::spawn(async move { handle_events(events, false, cancel).await });
 
-    let files_created = Arc::new(AtomicUsize::new(0));
-
-    let client = HttpClient::new();
-    let created = files_created.clone();
-    let transfer = async move || {
-        let mut downloads = stream::iter(inputs.into_iter().enumerate())
+    // Create a task for preparing each input
+    let ctx = context.clone();
+    let prepare = async move || {
+        let mut tasks = stream::iter(inputs.into_iter().enumerate())
             .map(|(index, input)| {
-                let path = inputs_dir.join(index.to_string());
-                let cancel = cancel.clone();
-                let config = config.clone();
-                let client = client.clone();
-                let events_tx = events_tx.clone();
-                let created = created.clone();
+                let inputs_dir = inputs_dir.to_path_buf();
+                let local_dir = local_dir.map(Path::to_path_buf);
+                let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    let permissions = if let Some(contents) = &input.content {
-                        // Write the contents if directly given, but only if the input is a file
-                        match input.ty {
-                            IoType::File => {}
-                            IoType::Directory => bail!(
-                                "cannot create content for directory input `{path}`",
-                                path = input.path
-                            ),
+                    let path = if let Some(url) = input.url.as_deref()
+                        && let Some(path) = url_to_file_path(url)
+                    {
+                        match local_dir {
+                            Some(local_dir) => local_dir
+                                .join(path.strip_prefix("/").expect("path should be absolute")),
+                            None => bail!("input file URL `{url}` is not supported"),
                         }
-
-                        info!(
-                            "creating input file `{path}` with specified contents",
-                            path = input.path,
-                        );
-
-                        tokio::fs::write(&path, contents).await.with_context(|| {
-                            format!("failed to create input file `{path}`", path = input.path)
-                        })?;
-
-                        created.fetch_add(1, Ordering::SeqCst);
-                        0o444
                     } else {
-                        // Perform the cloud copy for a URL
-                        let url = input
-                            .url
-                            .context("input is missing a URL")?
-                            .parse::<Url>()
-                            .context("input URL is invalid")?;
-
-                        cloud_copy::copy(
-                            config,
-                            client.clone(),
-                            url.clone(),
-                            &path,
-                            cancel,
-                            Some(events_tx),
-                        )
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "failed to download input `{url}` to `{path}`",
-                                url = url.display(),
-                                path = input.path
-                            )
-                        })?;
-
-                        // Check that the result matches the input type
-                        match input.ty {
-                            IoType::Directory => {
-                                if path.is_file() {
-                                    bail!(
-                                        "input `{url}` was a file but the input type was \
-                                         `DIRECTORY`",
-                                        url = url.display()
-                                    );
-                                }
-
-                                0o555
-                            }
-                            IoType::File => {
-                                if !path.is_file() {
-                                    bail!(
-                                        "input `{url}` was a directory but the input type was \
-                                         `FILE`",
-                                        url = url.display()
-                                    );
-                                }
-
-                                0o444
-                            }
-                        }
+                        inputs_dir.join(index.to_string())
                     };
 
-                    // Set the permissions (world-readable) so any user an executor container runs
-                    // as will be able to read the input
-                    set_permissions(&path, Permissions::from_mode(permissions))
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "failed to set permissions for input `{path}`",
-                                path = input.path
-                            )
-                        })?;
-
-                    Ok(())
+                    prepare_input(ctx, &input, &path).await
                 })
                 .map(|r| r.expect("task panicked"))
             })
-            .buffer_unordered(config.parallelism());
+            .buffer_unordered(context.config.parallelism());
 
         loop {
-            let result = downloads.next().await;
+            let result = tasks.next().await;
             match result {
                 Some(r) => r?,
                 None => break,
@@ -412,29 +527,53 @@ async fn download_inputs(
         anyhow::Ok(())
     };
 
-    // Perform the transfer
+    // Prepare (and potentially download) the inputs
     let start = Utc::now();
-    let result = transfer().await;
+    let result = prepare().await;
     let end = Utc::now();
 
+    drop(context.events);
     let stats = handler.await.expect("failed to join events handler");
-
-    // Print the statistics upon success
-    if result.is_ok()
-        && let Some(stats) = stats
-    {
-        print_stats(
-            end - start,
-            files_created.load(Ordering::SeqCst) + stats.files,
-            stats.bytes,
-        );
-    }
-
     result?;
 
     // We also need to create any file outputs so that Kubernetes will mount them as
     // files and not directories
     for (index, output) in outputs.into_iter().enumerate() {
+        // For local `file://` output URLs, create the file or directory at the
+        // expected output location; executor containers will mount it directly.
+        if let Some(path) = url_to_file_path(&output.url) {
+            let path = match local_dir {
+                Some(local_dir) => {
+                    local_dir.join(path.strip_prefix("/").expect("path should be absolute"))
+                }
+                None => bail!("output file URL `{url}` is not supported", url = output.url),
+            };
+
+            // Create the parent directory for the output
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).with_context(|| {
+                    format!(
+                        "failed to create parent directory of output `{url}`",
+                        url = output.url
+                    )
+                })?;
+            }
+
+            if output.ty == IoType::File {
+                // Create the file
+                File::create(&path).await.with_context(|| {
+                    format!("failed to create output `{url}`", url = output.url)
+                })?;
+            } else {
+                // Create the directory
+                create_dir_all(&path).await.with_context(|| {
+                    format!("failed to create output `{url}`", url = output.url)
+                })?;
+            }
+
+            continue;
+        }
+
         let path = outputs_dir.join(index.to_string());
         let permissions = if output.ty == IoType::File {
             // Create the file
@@ -464,130 +603,94 @@ async fn download_inputs(
             })?;
     }
 
-    Ok(())
+    Ok((end - start, stats))
 }
 
-/// Uploads outputs from the specified outputs directory.
-async fn upload_outputs(
-    config: Config,
-    tes_id: &str,
-    orchestrator_dir: &Path,
-    outputs_dir: &Path,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
+/// Prepares an output.
+///
+/// For remote outputs, the output is uploaded to the requested location.
+///
+/// For local outputs, the output is not uploaded.
+///
+/// If the output is a directory it is recursively scanned for files.
+///
+/// Returns the set of discovered output files that will be used for associating
+/// a TES task with its actual output files.
+async fn prepare_output(
+    context: TransferContext,
+    output: &Output,
+    path: &Path,
+) -> Result<Vec<OutputFile>> {
+    let mut url = output.url.parse::<Url>().context("output URL is invalid")?;
 
-    // Create an event handling task
-    let (events_tx, events_rx) = broadcast::channel(1000);
-    let c = cancel.clone();
-    let handler = tokio::spawn(async move { handle_events(events_rx, false, c).await });
+    let metadata = path.metadata().with_context(|| {
+        format!(
+            "failed to read metadata of output `{path}`",
+            path = output.path
+        )
+    })?;
 
-    // Transfer the outputs
-    let client = HttpClient::new();
-    let transfer = async || {
-        let mut files = Vec::new();
-        for (index, output) in outputs.iter().enumerate() {
-            let mut url = output.url.parse::<Url>().context("output URL is invalid")?;
-            let path = outputs_dir.join(index.to_string());
-            let metadata = path.metadata().with_context(|| {
-                format!(
-                    "failed to read metadata of output `{path}`",
-                    path = output.path
-                )
-            })?;
-
-            let path = path
-                .to_str()
-                .with_context(|| format!("path `{path}` is not UTF-8", path = path.display()))?;
-
-            if metadata.is_dir() {
-                files.extend(
-                    upload_directory(
-                        config.clone(),
-                        client.clone(),
-                        output,
-                        &url,
-                        path,
-                        Some(events_tx.clone()),
-                        cancel.clone(),
-                    )
-                    .await?,
-                );
-                continue;
-            }
-
-            if output.ty != IoType::File {
-                bail!(
-                    "output `{path}` exists but the output is not a file",
-                    path = output.path
-                );
-            }
-
-            // Perform the copy
-            cloud_copy::copy(
-                config.clone(),
-                client.clone(),
-                path,
-                url.clone(),
-                cancel.clone(),
-                Some(events_tx.clone()),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to upload output `{path}` to `{url}`",
-                    path = output.path,
-                    url = url.display(),
-                )
-            })?;
-
-            // Clear the query and fragment before saving the output
-            url.set_query(None);
-            url.set_fragment(None);
-
-            files.push(OutputFile {
-                url: url.as_str().to_string(),
-                path: output.path.clone(),
-                size_bytes: metadata.len().to_string(),
-            });
-        }
-
-        Ok(files)
-    };
-
-    // Perform the transfer
-    let start = Utc::now();
-    let result = transfer().await;
-    let end = Utc::now();
-
-    drop(events_tx);
-    let stats = handler.await.expect("failed to join events handler");
-
-    let outputs = result?;
-
-    // Write the uploads file
-    serialize_items(
-        uploaded_outputs_file_path(orchestrator_dir, tes_id),
-        &outputs,
-    )?;
-
-    // Print the statistics
-    if let Some(stats) = stats {
-        print_stats(end - start, stats.files, stats.bytes);
+    if metadata.is_dir() {
+        return prepare_directory_output(context, output, &url, path).await;
     }
 
-    Ok(())
+    if output.ty != IoType::File {
+        bail!(
+            "output `{path}` exists but the output is not a file",
+            path = output.path
+        );
+    }
+
+    // Perform the copy if it isn't a `file://` output
+    if url.scheme() != "file" {
+        info!(
+            "uploading output file `{path}` to `{url}`",
+            path = output.path,
+            url = url.display()
+        );
+
+        cloud_copy::copy(
+            context.config,
+            context.client,
+            path,
+            url.clone(),
+            context.cancel,
+            Some(context.events),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to upload output `{path}` to `{url}`",
+                path = output.path,
+                url = url.display(),
+            )
+        })?;
+    }
+
+    // Clear the query and fragment before saving the output
+    url.set_query(None);
+    url.set_fragment(None);
+
+    Ok(vec![OutputFile {
+        url: url.into(),
+        path: output.path.clone(),
+        size_bytes: metadata.len().to_string(),
+    }])
 }
 
-/// Uploads a directory output.
-async fn upload_directory(
-    config: Config,
-    client: HttpClient,
+/// Prepares a directory output.
+///
+/// This will recursively search the directory for files.
+///
+/// If the URL of the output is remote, each file is uploaded to cloud storage
+/// at the corresponding relative path.
+///
+/// Returns the output files discovered during the walk of the directory.
+async fn prepare_directory_output(
+    context: TransferContext,
     output: &Output,
     url: &Url,
-    path: &str,
-    events: Option<broadcast::Sender<TransferEvent>>,
-    cancel: CancellationToken,
+    directory: &Path,
 ) -> Result<Vec<OutputFile>> {
     if output.ty != IoType::Directory {
         bail!(
@@ -606,11 +709,14 @@ async fn upload_directory(
         };
 
     let mut files = Vec::new();
-    for entry in WalkDir::new(path) {
+    for entry in WalkDir::new(directory) {
         let entry = entry
             .with_context(|| format!("failed to read directory `{path}`", path = output.path))?;
 
-        let relative_path = entry.path().strip_prefix(path).expect("should be relative");
+        let relative_path = entry
+            .path()
+            .strip_prefix(directory)
+            .expect("should be relative");
         let container_path = container_base_path.join(relative_path);
         let container_path = container_path.to_str().with_context(|| {
             format!(
@@ -635,13 +741,7 @@ async fn upload_directory(
             continue;
         }
 
-        info!(
-            "uploading output file `{container_path}` to `{url}`",
-            url = url.display()
-        );
-
         let mut url = url.clone();
-
         {
             // Append the relative path to the URL
             let mut segments = url.path_segments_mut().unwrap();
@@ -658,35 +758,116 @@ async fn upload_directory(
             }
         }
 
-        // Perform the copy
-        cloud_copy::copy(
-            config.clone(),
-            client.clone(),
-            entry.path(),
-            url.clone(),
-            cancel.clone(),
-            events.clone(),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to upload output `{container_path}` to `{url}`",
-                url = url.display(),
+        // Perform the copy if it isn't a `file://` output
+        if url.scheme() != "file" {
+            info!(
+                "uploading output file `{container_path}` to `{url}`",
+                url = url.display()
+            );
+
+            cloud_copy::copy(
+                context.config.clone(),
+                context.client.clone(),
+                entry.path(),
+                url.clone(),
+                context.cancel.clone(),
+                Some(context.events.clone()),
             )
-        })?;
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to upload output `{container_path}` to `{url}`",
+                    url = url.display(),
+                )
+            })?;
+        }
 
         // Clear the query and fragment before saving the output
         url.set_query(None);
         url.set_fragment(None);
 
         files.push(OutputFile {
-            url: url.as_str().to_string(),
+            url: url.into(),
             path: container_path.to_string(),
             size_bytes: metadata.len().to_string(),
         });
     }
 
     Ok(files)
+}
+
+/// Prepares outputs from the specified outputs and local directory.
+///
+/// Each remote output is uploaded to cloud storage.
+///
+/// Responsible for creating the `final.json` file for the task that is read by
+/// the orchestrator.
+async fn prepare_outputs(
+    context: TransferContext,
+    tes_id: &str,
+    orchestrator_dir: &Path,
+    outputs_dir: &Path,
+    local_dir: Option<&Path>,
+) -> Result<(TimeDelta, Option<TransferStats>)> {
+    let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
+
+    // Create an event handling task
+    let events = context.events.subscribe();
+    let cancel = context.cancel.clone();
+    let handler = tokio::spawn(async move { handle_events(events, false, cancel).await });
+
+    // Create a task for preparing each output
+    let prepare = async || {
+        let mut files = Vec::new();
+        let mut tasks = stream::iter(outputs.into_iter().enumerate())
+            .map(|(index, output)| {
+                let outputs_dir = outputs_dir.to_path_buf();
+                let local_dir = local_dir.map(Path::to_path_buf);
+                let ctx = context.clone();
+                tokio::spawn(async move {
+                    let path = if let Some(path) = url_to_file_path(&output.url) {
+                        match local_dir {
+                            Some(local_dir) => local_dir
+                                .join(path.strip_prefix("/").expect("path should be absolute")),
+                            None => {
+                                bail!("output file URL `{url}` is not supported", url = output.url)
+                            }
+                        }
+                    } else {
+                        outputs_dir.join(index.to_string())
+                    };
+
+                    prepare_output(ctx, &output, &path).await
+                })
+                .map(|r| r.expect("task panicked"))
+            })
+            .buffer_unordered(context.config.parallelism());
+
+        loop {
+            let result = tasks.next().await;
+            match result {
+                Some(r) => files.extend(r?),
+                None => break,
+            }
+        }
+
+        anyhow::Ok(files)
+    };
+
+    // Prepare (and potentially upload) the outputs
+    let start = Utc::now();
+    let result = prepare().await;
+    let end = Utc::now();
+
+    drop(context.events);
+    let stats = handler.await.expect("failed to join events handler");
+
+    let outputs = result?;
+
+    // Write the output files for the task
+    serialize_items(output_files_file_path(orchestrator_dir, tes_id), &outputs)?;
+
+    Ok((end - start, stats))
 }
 
 #[cfg(unix)]
@@ -782,29 +963,38 @@ async fn run(cancel: CancellationToken) -> Result<()> {
         .with_google(google)
         .build();
 
-    match args.mode {
+    let context = TransferContext::new(config, cancel);
+
+    let (delta, stats) = match args.mode {
         Mode::Inputs => {
-            download_inputs(
-                config,
+            prepare_inputs(
+                context,
                 &args.tes_id,
                 &args.orchestrator_dir,
                 &args.inputs_dir.expect("option should be present"),
                 &args.outputs_dir,
-                cancel,
+                args.local_dir.as_deref(),
             )
-            .await
+            .await?
         }
         Mode::Outputs => {
-            upload_outputs(
-                config,
+            prepare_outputs(
+                context,
                 &args.tes_id,
                 &args.orchestrator_dir,
                 &args.outputs_dir,
-                cancel,
+                args.local_dir.as_deref(),
             )
-            .await
+            .await?
         }
+    };
+
+    // Print the statistics if there are some
+    if let Some(stats) = stats {
+        print_stats(delta, stats);
     }
+
+    Ok(())
 }
 
 #[tokio::main]

@@ -96,6 +96,8 @@ pub struct TerminatedContainer<'a> {
 pub struct TaskTemplateData {
     /// The TES identifier of the task.
     pub id: String,
+    /// The username associated with the task.
+    pub username: String,
     /// Whether or not the task is preemptible.
     pub preemptible: bool,
     /// The requested CPU cores for the task.

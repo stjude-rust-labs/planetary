@@ -83,6 +83,8 @@ spec:
                 key: api-key
           - name: ALLOW_AUTHORIZATION_FALLBACK
             value: "{{ .Values.api.allowAuthorizationFallback }}"
+          - name: ALLOW_FILE_URLS
+            value: "{{ if .Values.local.storage }}true{{ else }}false{{ end }}"
 ---
 # Deployment for the Planetary orchestrator service
 apiVersion: apps/v1
