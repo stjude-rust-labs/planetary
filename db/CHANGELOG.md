@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Added `name` column to containers table ([#43](https://github.com/stjude-rust-labs/planetary/pull/43)).
 * Added support retrieving usernames of tasks for template rendering ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
 * Added `username` column to `tasks` table to associate tasks with TES API
   users ([#40](https://github.com/stjude-rust-labs/planetary/pull/40)).
