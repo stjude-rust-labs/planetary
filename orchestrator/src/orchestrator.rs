@@ -74,7 +74,7 @@ use crate::retry_durations;
 ///   orchestrator.
 /// * `outputs.json` - the task's outputs serialized as JSON; created by the
 ///   orchestrator.
-/// * `files.json` - the task's actual output files serialized as JSON; created
+/// * `final.json` - the task's final output files serialized as JSON; created
 ///   by the transporter.
 ///
 /// A task's directory will be deleted when the task transitions to a terminal
@@ -130,9 +130,9 @@ fn outputs_file_path(tes_id: &str) -> PathBuf {
     task_directory_path(tes_id).join("outputs.json")
 }
 
-/// Gets the output files file path for a TES task.
+/// Gets the final outputs file path for a TES task.
 fn output_files_file_path(tes_id: &str) -> PathBuf {
-    task_directory_path(tes_id).join("files.json")
+    task_directory_path(tes_id).join("final.json")
 }
 
 /// Helper function for serializing an array of serializable items to a file.

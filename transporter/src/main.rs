@@ -17,8 +17,8 @@
 //!
 //! For the `outputs` mode, the transporter only reads from `outputs.json` and
 //! uploads the outputs to the expected cloud storage location. The transporter
-//! will then create a `files.json` file in orchestrator shared storage to
-//! record the files the TES task actually output. The orchestrator uses that
+//! will then create a `final.json` file in orchestrator shared storage to
+//! record the final output files of the TES task. The orchestrator uses that
 //! information to record output files for the TES task.
 //!
 //! The entries of the target directory will be created or accessed based on
@@ -800,7 +800,7 @@ async fn prepare_directory_output(
 ///
 /// Each remote output is uploaded to cloud storage.
 ///
-/// Responsible for creating the `files.json` file for the task that is read by
+/// Responsible for creating the `final.json` file for the task that is read by
 /// the orchestrator.
 async fn prepare_outputs(
     context: TransferContext,
