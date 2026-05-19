@@ -1106,7 +1106,9 @@ impl TaskOrchestrator {
 
             // If the output contains the magic exit prefix, use the contained exit code
             // rather than the containers
-            let exit_code = if let Some(pos) = output.rfind(EXIT_PREFIX) {
+            let exit_code = if status.name.starts_with(EXECUTOR_CONTAINER_PREFIX)
+                && let Some(pos) = output.rfind(EXIT_PREFIX)
+            {
                 let exit = output.split_off(pos);
                 exit.get(EXIT_PREFIX.len()..)
                     .and_then(|code| code.trim().parse().ok())

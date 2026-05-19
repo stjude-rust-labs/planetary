@@ -18,18 +18,11 @@ use tes::v1::types::task::Input;
 use tes::v1::types::task::Output;
 use tes::v1::types::task::State;
 
-/// Helper macro for exposing the prefix constant and for joining with `%` in
-/// `like` clauses.
-///
-/// This is necessary because `concat!` only supports literals.
-macro_rules! _EXECUTOR_CONTAINER_PREFIX {
-    () => {
-        "executor-"
-    };
-}
-
 /// The expected prefix for executor container names.
-pub const EXECUTOR_CONTAINER_PREFIX: &str = _EXECUTOR_CONTAINER_PREFIX!();
+pub const EXECUTOR_CONTAINER_PREFIX: &str = "executor-";
+
+/// The expected LIKE pattern for executor container names.
+pub const EXECUTOR_CONTAINER_PATTERN: &str = "executor-%";
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
