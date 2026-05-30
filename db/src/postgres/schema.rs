@@ -11,6 +11,7 @@ diesel::table! {
         id -> Int4,
         task_id -> Int4,
         name -> Text,
+        executor_index -> Nullable<Int4>,
         start_time -> Timestamptz,
         end_time -> Timestamptz,
         stdout -> Nullable<Text>,

@@ -58,6 +58,7 @@ CREATE TABLE containers (
     id SERIAL PRIMARY KEY,
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
+    executor_index INTEGER NULL,
     start_time TIMESTAMPTZ NOT NULL,
     end_time TIMESTAMPTZ NOT NULL,
     stdout TEXT NULL,

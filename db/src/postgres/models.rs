@@ -524,6 +524,10 @@ pub struct NewContainer<'a> {
     pub task_id: i32,
     /// The name of the container.
     pub name: &'a str,
+    /// The executor index of the container.
+    ///
+    /// This is `NULL` for input and output containers.
+    pub executor_index: Option<i32>,
     /// The start time for the container.
     pub start_time: DateTime<Utc>,
     /// The end time for the container.
@@ -543,6 +547,7 @@ impl<'a> NewContainer<'a> {
         Self {
             task_id,
             name: container.name,
+            executor_index: container.executor_index,
             start_time: container.start_time,
             end_time: container.end_time,
             stdout: container.stdout,

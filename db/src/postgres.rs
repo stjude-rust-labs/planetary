@@ -36,7 +36,6 @@ use tracing::info;
 
 use super::Database;
 use super::DatabaseResult;
-use crate::EXECUTOR_CONTAINER_PATTERN;
 use crate::TaskTemplateData;
 use crate::TerminatedContainer;
 
@@ -266,8 +265,8 @@ impl Database for PostgresDatabase {
 
                 let containers = models::BasicContainer::belonging_to(&task)
                     .select(models::BasicContainer::as_select())
-                    .filter(schema::containers::name.like(EXECUTOR_CONTAINER_PATTERN))
-                    .order_by(schema::containers::name)
+                    .filter(schema::containers::executor_index.is_not_null())
+                    .order_by(schema::containers::executor_index)
                     .load(&mut conn)
                     .await
                     .map_err(Error::Diesel)?;
@@ -290,8 +289,8 @@ impl Database for PostgresDatabase {
 
                 let containers = models::FullContainer::belonging_to(&task)
                     .select(models::FullContainer::as_select())
-                    .filter(schema::containers::name.like(EXECUTOR_CONTAINER_PATTERN))
-                    .order_by(schema::containers::name)
+                    .filter(schema::containers::executor_index.is_not_null())
+                    .order_by(schema::containers::executor_index)
                     .load(&mut conn)
                     .await
                     .map_err(Error::Diesel)?;
@@ -415,8 +414,8 @@ impl Database for PostgresDatabase {
                 Ok((
                     models::BasicContainer::belonging_to(&tasks)
                         .select(models::BasicContainer::as_select())
-                        .filter(schema::containers::name.like(EXECUTOR_CONTAINER_PATTERN))
-                        .order_by(schema::containers::name)
+                        .filter(schema::containers::executor_index.is_not_null())
+                        .order_by(schema::containers::executor_index)
                         .load(&mut conn)
                         .await
                         .map_err(Error::Diesel)?
@@ -446,8 +445,8 @@ impl Database for PostgresDatabase {
                 Ok((
                     models::FullContainer::belonging_to(&tasks)
                         .select(models::FullContainer::as_select())
-                        .filter(schema::containers::name.like(EXECUTOR_CONTAINER_PATTERN))
-                        .order_by(schema::containers::name)
+                        .filter(schema::containers::executor_index.is_not_null())
+                        .order_by(schema::containers::executor_index)
                         .load(&mut conn)
                         .await
                         .map_err(Error::Diesel)?

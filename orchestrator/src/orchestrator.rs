@@ -41,7 +41,6 @@ use kube::runtime::reflector::Lookup;
 use kube::runtime::watcher;
 use kube::runtime::watcher::Event;
 use planetary_db::Database;
-use planetary_db::EXECUTOR_CONTAINER_PREFIX;
 use planetary_db::TerminatedContainer;
 use planetary_db::format_log_message;
 use planetary_server::templating::CANCELED_LABEL;
@@ -108,6 +107,9 @@ const INPUTS_CONTAINER_NAME: &str = "inputs";
 
 /// The expected container name for transporting outputs.
 const OUTPUTS_CONTAINER_NAME: &str = "outputs";
+
+/// The expected prefix for executor container names.
+pub const EXECUTOR_CONTAINER_PREFIX: &str = "executor-";
 
 /// Gets the task directory path for a TES task.
 fn task_directory_path(tes_id: &str) -> PathBuf {
@@ -276,6 +278,12 @@ fn format_executor_script(executor: &Executor) -> Result<String> {
     // not be flushed
     script.push_str("wait $(jobs -p) 2>&1 >/dev/null");
     Ok(script)
+}
+
+/// Gets the executor index given a container name.
+fn executor_index(name: &str) -> Option<i32> {
+    name.strip_prefix(EXECUTOR_CONTAINER_PREFIX)
+        .and_then(|n| n.parse().ok())
 }
 
 /// Used to determine what state a task pod is in.
@@ -1104,9 +1112,11 @@ impl TaskOrchestrator {
             )
             .await?;
 
+            let executor_index = executor_index(&status.name);
+
             // If the output contains the magic exit prefix, use the contained exit code
             // rather than the containers
-            let exit_code = if status.name.starts_with(EXECUTOR_CONTAINER_PREFIX)
+            let exit_code = if executor_index.is_some()
                 && let Some(pos) = output.rfind(EXIT_PREFIX)
             {
                 let exit = output.split_off(pos);
@@ -1127,6 +1137,7 @@ impl TaskOrchestrator {
 
             containers.push(TerminatedContainer {
                 name: &status.name,
+                executor_index,
                 start_time: DateTime::from_timestamp_micros(
                     terminated
                         .started_at

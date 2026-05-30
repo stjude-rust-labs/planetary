@@ -18,12 +18,6 @@ use tes::v1::types::task::Input;
 use tes::v1::types::task::Output;
 use tes::v1::types::task::State;
 
-/// The expected prefix for executor container names.
-pub const EXECUTOR_CONTAINER_PREFIX: &str = "executor-";
-
-/// The expected LIKE pattern for executor container names.
-pub const EXECUTOR_CONTAINER_PATTERN: &str = "executor-%";
-
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
@@ -59,6 +53,10 @@ pub struct TaskIo {
 pub struct TerminatedContainer<'a> {
     /// The name of the container.
     pub name: &'a str,
+    /// The index of the executor.
+    ///
+    /// This is `None` when the container was not an executor.
+    pub executor_index: Option<i32>,
     /// The start time of the container.
     pub start_time: DateTime<Utc>,
     /// The end time of the container.
