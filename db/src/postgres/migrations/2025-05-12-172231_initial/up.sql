@@ -51,20 +51,13 @@ CREATE INDEX idx_tasks_state ON tasks (state);
 -- Create an index on the `tags` column for list operations.
 CREATE INDEX idx_tasks_tags ON tasks USING gin (tags);
 
--- An enumeration for container kind.
-CREATE TYPE container_kind AS ENUM(
-    'INPUTS',
-    'EXECUTOR',
-    'OUTPUTS'
-);
-
 -- The containers table.
 -- This table keeps track of the individual containers used to run a task.
 -- An entry is inserted into this table when the container has completed.
 CREATE TABLE containers (
     id SERIAL PRIMARY KEY,
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    kind container_kind NOT NULL,
+    name TEXT NOT NULL,
     executor_index INTEGER NULL,
     start_time TIMESTAMPTZ NOT NULL,
     end_time TIMESTAMPTZ NOT NULL,

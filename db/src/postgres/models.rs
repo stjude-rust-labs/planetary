@@ -515,43 +515,6 @@ impl From<TaskTemplateData> for crate::TaskTemplateData {
     }
 }
 
-/// Represents the kind of a container.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, diesel_derive_enum::DbEnum)]
-#[db_enum(
-    existing_type_path = "crate::postgres::schema::sql_types::ContainerKind",
-    value_style = "SCREAMING_SNAKE_CASE"
-)]
-pub enum ContainerKind {
-    /// The container is for downloading a task's inputs.
-    Inputs,
-    /// The container is a task executor.
-    Executor,
-    /// The container is for uploading a task's outputs.
-    Outputs,
-}
-
-impl From<ContainerKind> for crate::ContainerKind {
-    fn from(kind: ContainerKind) -> Self {
-        match kind {
-            ContainerKind::Inputs => Self::Inputs,
-            ContainerKind::Executor => Self::Executor,
-            ContainerKind::Outputs => Self::Outputs,
-        }
-    }
-}
-
-impl From<crate::ContainerKind> for ContainerKind {
-    fn from(kind: crate::ContainerKind) -> Self {
-        use crate::ContainerKind::*;
-
-        match kind {
-            Inputs => Self::Inputs,
-            Executor => Self::Executor,
-            Outputs => Self::Outputs,
-        }
-    }
-}
-
 /// Used to insert a new container into the containers table.
 #[derive(Insertable)]
 #[diesel(table_name = super::schema::containers)]
@@ -560,7 +523,7 @@ pub struct NewContainer<'a> {
     /// The task id of the container.
     pub task_id: i32,
     /// The name of the container.
-    pub kind: ContainerKind,
+    pub name: &'a str,
     /// The executor index of the container.
     ///
     /// This is `NULL` for input and output containers.
@@ -583,7 +546,7 @@ impl<'a> NewContainer<'a> {
     pub fn new(task_id: i32, container: crate::TerminatedContainer<'a>) -> Self {
         Self {
             task_id,
-            kind: container.kind.into(),
+            name: container.name,
             executor_index: container.executor_index,
             start_time: container.start_time,
             end_time: container.end_time,

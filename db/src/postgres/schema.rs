@@ -2,22 +2,15 @@
 
 pub mod sql_types {
     #[derive(diesel::query_builder::QueryId, Clone, diesel::sql_types::SqlType)]
-    #[diesel(postgres_type(name = "container_kind"))]
-    pub struct ContainerKind;
-
-    #[derive(diesel::query_builder::QueryId, Clone, diesel::sql_types::SqlType)]
     #[diesel(postgres_type(name = "task_state"))]
     pub struct TaskState;
 }
 
 diesel::table! {
-    use diesel::sql_types::*;
-    use super::sql_types::ContainerKind;
-
     containers (id) {
         id -> Int4,
         task_id -> Int4,
-        kind -> ContainerKind,
+        name -> Text,
         executor_index -> Nullable<Int4>,
         start_time -> Timestamptz,
         end_time -> Timestamptz,

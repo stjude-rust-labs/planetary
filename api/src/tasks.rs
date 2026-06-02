@@ -17,7 +17,7 @@ pub fn router(allow_authorization_fallback: bool) -> Router<State> {
         .route("/v1/tasks", post(v1::create_task))
         .route("/v1/tasks/{id}", get(v1::get_task))
         // TODO: the path should be `/v1/tasks/{id}:cancel`, but that's not supported until
-        // `matchit`` 0.8.6; we're currently on 0.8.4 via `axum`
+        // `matchit` 0.8.6; we're currently on 0.8.4 via `axum`
         .route("/v1/tasks/{id}", post(v1::cancel_task))
         .layer(middleware::from_fn(move |a, r, n| {
             crate::auth(allow_authorization_fallback, a, r, n)
