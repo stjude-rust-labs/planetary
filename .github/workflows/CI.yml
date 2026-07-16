@@ -46,6 +46,29 @@ jobs:
         run: rustup update stable && rustup default stable
       - run: cargo test --all-features --examples
 
+  functional-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update Rust
+        run: rustup update stable && rustup default stable
+      - name: Install kind
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Run the functional tests
+        run: cargo test -p planetary-tests -- --ignored
+      - name: Export the cluster logs
+        if: failure()
+        run: kind export logs --name planetary-tests ./kind-logs || true
+      - name: Upload the cluster logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kind-logs
+          path: ./kind-logs
+          if-no-files-found: ignore
+
   docs:
     runs-on: ubuntu-22.04
     steps:

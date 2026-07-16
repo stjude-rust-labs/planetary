@@ -6,7 +6,7 @@ FROM alpine:latest AS builder
 ARG TARGETPLATFORM
 
 # Install the necessary packages and Rust.
-RUN apk add --update curl clang openssl-libs-static libpq-dev
+RUN apk add --update curl clang gcc musl-dev openssl-libs-static libpq-dev
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --profile minimal
 
@@ -17,6 +17,8 @@ ENV PATH=/root/.cargo/bin:$PATH
 WORKDIR /app
 
 # Add the files needed to build the `planetary` and `transporter` binaries.
+# The `tests` crate is a workspace member, so it must be present for the
+# workspace to load, but it is excluded from the build below.
 COPY ./Cargo.toml ./Cargo.lock ./
 COPY ./api ./api
 COPY ./db ./db
@@ -24,9 +26,10 @@ COPY ./monitor ./monitor
 COPY ./orchestrator ./orchestrator
 COPY ./server ./server
 COPY ./transporter ./transporter
+COPY ./tests ./tests
 
 # Build the tool in release mode.
-RUN PQ_LIB_STATIC=1 RUSTFLAGS="-lpgcommon -lpgport -lpq -lssl -lcrypto" cargo build --release
+RUN PQ_LIB_STATIC=1 RUSTFLAGS="-lpgcommon -lpgport -lpq -lssl -lcrypto" cargo build --release --workspace --exclude planetary-tests
 
 # Remove debug symbols, if present.
 RUN strip target/release/planetary-api

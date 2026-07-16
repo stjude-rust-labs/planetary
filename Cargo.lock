@@ -2842,6 +2842,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "planetary-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "reqwest",
+ "serde_json",
+]
+
+[[package]]
 name = "planetary-transporter"
 version = "0.1.0"
 dependencies = [
@@ -3252,6 +3261,7 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

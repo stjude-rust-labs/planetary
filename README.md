@@ -546,7 +546,34 @@ kubectl rollout restart -n planetary deployments/planetary-monitor
 
 ## 🧠 Running Automated Tests
 
-This section coming soon!
+The `tests` directory contains functional tests that deploy Planetary into a
+local [`kind`](https://kind.sigs.k8s.io/) cluster and exercise the TES API.
+
+The tests require `docker`, `kind`, `kubectl`, and `helm` to be installed.
+
+As the tests are slow to set up, they are ignored by default; run them with:
+
+```bash
+cargo test -p planetary-tests -- --ignored
+```
+
+The first test to run will build the Planetary container images, create a
+`kind` cluster named `planetary-tests`, and install the Planetary chart into
+the cluster; the remaining tests share the deployment.
+
+The following environment variables alter the behavior of the tests:
+
+| Variable                     | Behavior when set to `1`                                                        |
+|------------------------------|---------------------------------------------------------------------------------|
+| `PLANETARY_TESTS_SKIP_BUILD` | Skips building the container images; the images from a previous run are used.   |
+| `PLANETARY_TESTS_FRESH`      | Deletes any existing `planetary-tests` cluster and recreates it before testing. |
+
+The cluster is intentionally left running after the tests complete so that
+subsequent runs are fast; to delete it, run:
+
+```bash
+kind delete cluster --name planetary-tests
+```
 
 ## ✅ Submitting Pull Requests
 
