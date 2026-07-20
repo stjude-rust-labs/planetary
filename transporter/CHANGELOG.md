@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Fixed
+
+* Fixed handling of `FILE` type outputs with path prefixes ([#46](https://github.com/stjude-rust-labs/planetary/pull/46)).
+
 #### Added
 
 * Added support for local (file://) inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
