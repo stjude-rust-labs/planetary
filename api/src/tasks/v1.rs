@@ -126,12 +126,8 @@ fn validate_task(task: &RequestTask, allow_file_urls: bool) -> Result<()> {
             bail!("output path cannot be `/`");
         }
 
-        // If a path prefix was specified, then the output must be a directory
+        // Validate the path prefix, if present
         if let Some(prefix) = &output.path_prefix {
-            if output.ty != IoType::Directory {
-                bail!("output has a path prefix specified but the output type is not `DIRECTORY`");
-            }
-
             // Ensure the output path pattern is valid
             Pattern::new(&output.path).with_context(|| {
                 format!("invalid output path pattern `{path}`", path = output.path)
