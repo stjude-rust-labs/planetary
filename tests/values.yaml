@@ -1,0 +1,77 @@
+# This file is used by the functional tests (see the `tests` directory) to
+# install the Planetary chart into a single-node `kind` cluster.
+#
+# As the cluster has a single node, host-path volumes are used in place of the
+# shared network storage used by other deployments; the test harness creates
+# the backing directories on the cluster node before installing the chart.
+#
+# Resource requests are kept small so that the deployment fits on a single
+# node (e.g. a CI runner).
+api:
+  replicas: 1
+  allowAuthorizationFallback: true
+  log: info
+  image:
+    name: stjude-rust-labs/planetary-api
+    tag: test
+  resources:
+    requests:
+      cpu: 100m
+    limits:
+      memory: 1Gi
+
+orchestrator:
+  replicas: 1
+  log: info
+  image:
+    name: stjude-rust-labs/planetary-orchestrator
+    tag: test
+  resources:
+    requests:
+      cpu: 100m
+    limits:
+      memory: 1Gi
+  storage:
+    hostPath:
+      path: /mnt/planetary/orchestrator
+      type: Directory
+
+monitor:
+  log: info
+  image:
+    name: stjude-rust-labs/planetary-monitor
+    tag: test
+  resources:
+    requests:
+      cpu: 100m
+    limits:
+      memory: 1Gi
+
+transporter:
+  log: info
+  image:
+    name: stjude-rust-labs/planetary-transporter
+    tag: test
+  cpu: 100m
+  memory: 128Mi
+
+migration:
+  image:
+    name: stjude-rust-labs/planetary-migration
+    tag: test
+
+postgresql:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+    limits:
+      memory: 1Gi
+
+# Enable support for "local" (`file://`) inputs and outputs.
+# The storage is segmented by username so that task pods can only access the
+# files for the user related to the task.
+local:
+  storage:
+    hostPath:
+      path: /mnt/planetary/local/{{ `{{ username }}` }}

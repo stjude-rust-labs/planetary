@@ -1,0 +1,9 @@
+# The configuration for the `kind` cluster used by the functional tests.
+#
+# A single node is used so that host-path volumes can provide the shared
+# storage normally provided by a network file system (see `values.yaml`).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: planetary-tests
+nodes:
+- role: control-plane
