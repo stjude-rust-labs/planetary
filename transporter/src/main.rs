@@ -561,7 +561,7 @@ async fn prepare_inputs(
 
             // If the output is a file *without* a path prefix, create it as a file
             // If it has a path prefix, it's really a directory that we're filtering
-            if output.ty == IoType::File && output.path_prefix.is_some() {
+            if output.ty == IoType::File && output.path_prefix.is_none() {
                 // Create the file
                 File::create(&path).await.with_context(|| {
                     format!("failed to create output `{url}`", url = output.url)
@@ -579,7 +579,7 @@ async fn prepare_inputs(
         let path = outputs_dir.join(index.to_string());
         // If the output is a file *without* a path prefix, create it as a file
         // If it has a path prefix, it's really a directory that we're filtering
-        let permissions = if output.ty == IoType::File && output.path_prefix.is_some() {
+        let permissions = if output.ty == IoType::File && output.path_prefix.is_none() {
             // Create the file
             File::create(&path)
                 .await
@@ -696,7 +696,7 @@ async fn prepare_directory_output(
     url: &Url,
     directory: &Path,
 ) -> Result<Vec<OutputFile>> {
-    if output.ty != IoType::Directory || output.path_prefix.is_none() {
+    if output.ty != IoType::Directory && output.path_prefix.is_none() {
         bail!(
             "output `{path}` exists but the output is not a directory",
             path = output.path
@@ -713,7 +713,7 @@ async fn prepare_directory_output(
         };
 
     let mut files = Vec::new();
-    for entry in WalkDir::new(directory) {
+    for entry in WalkDir::new(directory).sort_by_file_name() {
         let entry = entry
             .with_context(|| format!("failed to read directory `{path}`", path = output.path))?;
 

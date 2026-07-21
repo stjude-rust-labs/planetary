@@ -260,7 +260,7 @@ impl Template {
             .iter()
             .map(|output| {
                 let mut value = Map::new();
-                value.insert("path".to_string(), output.path.clone().into());
+                value.insert("path".to_string(), output.path_prefix.as_deref().unwrap_or(&output.path).into());
 
                 if let Some(path) = url_to_file_path(&output.url) {
                     // SAFETY: URLs are validated when tasks are created
