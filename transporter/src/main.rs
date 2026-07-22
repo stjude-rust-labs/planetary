@@ -74,6 +74,7 @@ use cloud_copy::cli::handle_events;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::stream;
+use glob::MatchOptions;
 use glob::Pattern;
 use reqwest::Url;
 use secrecy::SecretString;
@@ -739,7 +740,13 @@ async fn prepare_directory_output(
 
         // If there's a pattern, ensure the container path matches it
         if let Some(pattern) = &pattern
-            && !pattern.matches(container_path)
+            && !pattern.matches_with(
+                container_path,
+                MatchOptions {
+                    require_literal_separator: true,
+                    ..Default::default()
+                },
+            )
         {
             info!("skipping output file `{container_path}` as it does not match the pattern");
             continue;

@@ -453,7 +453,9 @@ fn file_wildcard_outputs() {
                     "-c",
                     "echo first > /data/out/first.txt && \
                      echo second > /data/out/second.txt && \
-                     echo excluded > /data/out/excluded.log",
+                     echo excluded > /data/out/excluded.log && \
+                     mkdir /data/out/nested && \
+                     echo nested > /data/out/nested/excluded.txt",
                 ],
             }
         ]
