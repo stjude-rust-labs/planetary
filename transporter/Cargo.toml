@@ -13,6 +13,13 @@ rust-version.workspace = true
 name = "planetary-transporter"
 path = "src/main.rs"
 
+[features]
+default = []
+# This feature exists so that every crate in the workspace has the same feature set.
+# Currently `rust-analyzer` doesn't support per-crate feature flags for its check,
+# so this is needed to analyze the entire workspace with the `postgres` feature enabled.
+postgres = []
+
 [dependencies]
 anyhow.workspace = true
 byte-unit.workspace = true
@@ -40,10 +47,3 @@ walkdir.workspace = true
 
 [lints]
 workspace = true
-
-[features]
-default = []
-# This feature exists so that every crate in the workspace has the same feature set.
-# Currently `rust-analyzer` doesn't support per-crate feature flags for its check,
-# so this is needed to analyze the entire workspace with the `postgres` feature enabled.
-postgres = []
