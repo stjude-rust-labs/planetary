@@ -424,6 +424,265 @@ fn local_storage_roundtrip() {
     assert_eq!(env.read_local_file(&username, "outputs/copy.txt"), CONTENT);
 }
 
+/// Tests a task with a wildcard output: a `FILE` output whose `path` is a
+/// glob pattern and whose `path_prefix` is the directory to scan.
+///
+/// Only the files matching the pattern should be recorded as output files in
+/// the task log.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn file_wildcard_outputs() {
+    let env = TestEnvironment::get();
+    let username = unique_username("file-wildcard-outputs");
+    let client = env.client(Some(&username));
+
+    let id = client.create_task(&json!({
+        "outputs": [
+            {
+                "url": "file:///outputs/wildcard",
+                "path": "/data/out/*.txt",
+                "path_prefix": "/data/out",
+                "type": "FILE",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "command": [
+                    "sh",
+                    "-c",
+                    "echo first > /data/out/first.txt && \
+                     echo second > /data/out/second.txt && \
+                     echo excluded > /data/out/excluded.log && \
+                     mkdir /data/out/nested && \
+                     echo nested > /data/out/nested/excluded.txt",
+                ],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    // The files matching the pattern should be present in local storage
+    assert_eq!(
+        env.read_local_file(&username, "outputs/wildcard/first.txt"),
+        "first\n"
+    );
+    assert_eq!(
+        env.read_local_file(&username, "outputs/wildcard/second.txt"),
+        "second\n"
+    );
+
+    // Only the files matching the pattern should be recorded as output files
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let mut outputs = body["logs"][0]["outputs"]
+        .as_array()
+        .expect("outputs should be an array")
+        .clone();
+    outputs.sort_by_key(|o| {
+        o["path"]
+            .as_str()
+            .expect("output path should be a string")
+            .to_string()
+    });
+    assert_eq!(
+        outputs,
+        [
+            json!({
+                "url": "file:///outputs/wildcard/first.txt",
+                "path": "/data/out/first.txt",
+                "size_bytes": "6",
+            }),
+            json!({
+                "url": "file:///outputs/wildcard/second.txt",
+                "path": "/data/out/second.txt",
+                "size_bytes": "7",
+            }),
+        ],
+        "unexpected response: {body:#}"
+    );
+}
+
+/// Tests a task with a `DIRECTORY` output.
+///
+/// Every file in the directory, including files in nested directories, should
+/// be recorded as an output file in the task log.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn directory_outputs() {
+    let env = TestEnvironment::get();
+    let username = unique_username("directory-outputs");
+    let client = env.client(Some(&username));
+
+    let id = client.create_task(&json!({
+        "outputs": [
+            {
+                "url": "file:///outputs/dir",
+                "path": "/data/out",
+                "type": "DIRECTORY",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "command": [
+                    "sh",
+                    "-c",
+                    "echo first > /data/out/first.txt && \
+                     echo second > /data/out/second.txt && \
+                     mkdir /data/out/nested && \
+                     echo third > /data/out/nested/third.txt",
+                ],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    // The directory contents should be present in local storage
+    assert_eq!(
+        env.read_local_file(&username, "outputs/dir/first.txt"),
+        "first\n"
+    );
+    assert_eq!(
+        env.read_local_file(&username, "outputs/dir/second.txt"),
+        "second\n"
+    );
+    assert_eq!(
+        env.read_local_file(&username, "outputs/dir/nested/third.txt"),
+        "third\n"
+    );
+
+    // Every file in the directory should be recorded as an output file
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let mut outputs = body["logs"][0]["outputs"]
+        .as_array()
+        .expect("outputs should be an array")
+        .clone();
+    outputs.sort_by_key(|o| {
+        o["path"]
+            .as_str()
+            .expect("output path should be a string")
+            .to_string()
+    });
+    assert_eq!(
+        outputs,
+        [
+            json!({
+                "url": "file:///outputs/dir/first.txt",
+                "path": "/data/out/first.txt",
+                "size_bytes": "6",
+            }),
+            json!({
+                "url": "file:///outputs/dir/nested/third.txt",
+                "path": "/data/out/nested/third.txt",
+                "size_bytes": "6",
+            }),
+            json!({
+                "url": "file:///outputs/dir/second.txt",
+                "path": "/data/out/second.txt",
+                "size_bytes": "7",
+            }),
+        ],
+        "unexpected response: {body:#}"
+    );
+}
+
+/// Tests a task with a wildcard `DIRECTORY` output: a `DIRECTORY` output
+/// whose `path` is a glob pattern and whose `path_prefix` is the directory to
+/// scan.
+///
+/// Only the files matching the pattern, including files in nested
+/// directories, should be recorded as output files in the task log.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn directory_wildcard_outputs() {
+    let env = TestEnvironment::get();
+    let username = unique_username("directory-wildcard-outputs");
+    let client = env.client(Some(&username));
+
+    let id = client.create_task(&json!({
+        "outputs": [
+            {
+                "url": "file:///outputs/dir-wildcard",
+                "path": "/data/out/**/*.txt",
+                "path_prefix": "/data/out",
+                "type": "DIRECTORY",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "command": [
+                    "sh",
+                    "-c",
+                    "echo first > /data/out/first.txt && \
+                     echo second > /data/out/second.txt && \
+                     mkdir /data/out/nested && \
+                     echo third > /data/out/nested/third.txt && \
+                     echo excluded > /data/out/excluded.log",
+                ],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    // The files matching the pattern should be present in local storage
+    assert_eq!(
+        env.read_local_file(&username, "outputs/dir-wildcard/first.txt"),
+        "first\n"
+    );
+    assert_eq!(
+        env.read_local_file(&username, "outputs/dir-wildcard/second.txt"),
+        "second\n"
+    );
+    assert_eq!(
+        env.read_local_file(&username, "outputs/dir-wildcard/nested/third.txt"),
+        "third\n"
+    );
+
+    // Only the files matching the pattern should be recorded as output files
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let mut outputs = body["logs"][0]["outputs"]
+        .as_array()
+        .expect("outputs should be an array")
+        .clone();
+    outputs.sort_by_key(|o| {
+        o["path"]
+            .as_str()
+            .expect("output path should be a string")
+            .to_string()
+    });
+    assert_eq!(
+        outputs,
+        [
+            json!({
+                "url": "file:///outputs/dir-wildcard/first.txt",
+                "path": "/data/out/first.txt",
+                "size_bytes": "6",
+            }),
+            json!({
+                "url": "file:///outputs/dir-wildcard/nested/third.txt",
+                "path": "/data/out/nested/third.txt",
+                "size_bytes": "6",
+            }),
+            json!({
+                "url": "file:///outputs/dir-wildcard/second.txt",
+                "path": "/data/out/second.txt",
+                "size_bytes": "7",
+            }),
+        ],
+        "unexpected response: {body:#}"
+    );
+}
+
 /// Tests a task with an input specified by embedded content rather than a
 /// URL.
 #[test]
