@@ -82,7 +82,7 @@ impl Template {
 
         let mut templates = Tera::new();
         templates.register_filter("json_encode", json_encode);
-        
+
         templates.load_from_glob(templates_dir.join("**/*").to_str().with_context(|| {
             format!(
                 "templates directory `{path}` is not valid UTF-8",
