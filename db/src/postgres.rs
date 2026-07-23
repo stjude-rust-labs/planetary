@@ -12,7 +12,6 @@ use diesel_async::AsyncConnection;
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
 use diesel_async::pooled_connection::deadpool::Pool;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_migrations::EmbeddedMigrations;
 use diesel_migrations::HarnessWithOutput;
 use diesel_migrations::MigrationHarness;
@@ -555,60 +554,57 @@ impl Database for PostgresDatabase {
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
         let updated = conn
-            .transaction(|conn| {
-                async move {
-                    // TODO: currently diesel hasn't released support for the PostgreSQL
-                    // `array_cat` function; remove the raw query when diesel supports it
-                    let updated: Option<UpdatedTask> = sql_query(
-                        "UPDATE tasks SET state = $1, system_logs = array_cat(system_logs, $2) \
-                         WHERE tes_id = $3 AND state = ANY ($4) RETURNING id",
-                    )
-                    .bind::<schema::sql_types::TaskState, _>(TaskState::from(state))
-                    .bind::<Array<Text>, _>(messages)
-                    .bind::<Text, _>(tes_id)
-                    .bind::<Array<schema::sql_types::TaskState>, _>(previous)
-                    .get_result(conn)
-                    .await
-                    .optional()
-                    .map_err(Error::Diesel)?;
+            .transaction(async |conn| {
+                // TODO: currently diesel hasn't released support for the PostgreSQL
+                // `array_cat` function; remove the raw query when diesel supports it
+                let updated: Option<UpdatedTask> = sql_query(
+                    "UPDATE tasks SET state = $1, system_logs = array_cat(system_logs, $2) WHERE \
+                     tes_id = $3 AND state = ANY ($4) RETURNING id",
+                )
+                .bind::<schema::sql_types::TaskState, _>(TaskState::from(state))
+                .bind::<Array<Text>, _>(messages)
+                .bind::<Text, _>(tes_id)
+                .bind::<Array<schema::sql_types::TaskState>, _>(previous)
+                .get_result(conn)
+                .await
+                .optional()
+                .map_err(Error::Diesel)?;
 
-                    match updated {
-                        Some(UpdatedTask { id }) => {
-                            if let Some(outputs) = outputs {
-                                diesel::update(schema::tasks::table)
-                                    .filter(
-                                        schema::tasks::tes_id
-                                            .eq(tes_id)
-                                            .and(schema::tasks::output_files.is_null()),
-                                    )
-                                    .set(schema::tasks::output_files.eq(models::Json(outputs)))
-                                    .execute(conn)
-                                    .await
-                                    .map_err(Error::Diesel)?;
-                            }
-
-                            if let Some(containers) = containers {
-                                // Insert the containers
-                                let containers = containers.await?;
-                                diesel::insert_into(schema::containers::table)
-                                    .values(
-                                        containers
-                                            .into_iter()
-                                            .map(|c| models::NewContainer::new(id, c))
-                                            .collect::<Vec<_>>(),
-                                    )
-                                    .on_conflict_do_nothing()
-                                    .execute(conn)
-                                    .await
-                                    .map_err(Error::Diesel)?;
-                            }
-
-                            anyhow::Ok(true)
+                match updated {
+                    Some(UpdatedTask { id }) => {
+                        if let Some(outputs) = outputs {
+                            diesel::update(schema::tasks::table)
+                                .filter(
+                                    schema::tasks::tes_id
+                                        .eq(tes_id)
+                                        .and(schema::tasks::output_files.is_null()),
+                                )
+                                .set(schema::tasks::output_files.eq(models::Json(outputs)))
+                                .execute(conn)
+                                .await
+                                .map_err(Error::Diesel)?;
                         }
-                        None => Ok(false),
+
+                        if let Some(containers) = containers {
+                            // Insert the containers
+                            let containers = containers.await?;
+                            diesel::insert_into(schema::containers::table)
+                                .values(
+                                    containers
+                                        .into_iter()
+                                        .map(|c| models::NewContainer::new(id, c))
+                                        .collect::<Vec<_>>(),
+                                )
+                                .on_conflict_do_nothing()
+                                .execute(conn)
+                                .await
+                                .map_err(Error::Diesel)?;
+                        }
+
+                        anyhow::Ok(true)
                     }
+                    None => Ok(false),
                 }
-                .scope_boxed()
             })
             .await?;
 
@@ -647,40 +643,37 @@ impl Database for PostgresDatabase {
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        let transaction = conn.transaction(|conn| {
-            async move {
-                // Lookup the associated task id, if there is one
-                let task_id = if let Some(tes_id) = tes_id {
-                    Some(
-                        schema::tasks::table
-                            .select(schema::tasks::id)
-                            .filter(schema::tasks::tes_id.eq(tes_id))
-                            .for_update()
-                            .first(conn)
-                            .await
-                            .optional()
-                            .map_err(Error::Diesel)?
-                            .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?,
-                    )
-                } else {
-                    None
-                };
+        conn.transaction(async |conn| {
+            // Lookup the associated task id, if there is one
+            let task_id = if let Some(tes_id) = tes_id {
+                Some(
+                    schema::tasks::table
+                        .select(schema::tasks::id)
+                        .filter(schema::tasks::tes_id.eq(tes_id))
+                        .for_update()
+                        .first(conn)
+                        .await
+                        .optional()
+                        .map_err(Error::Diesel)?
+                        .ok_or_else(|| Error::TaskNotFound(tes_id.to_string()))?,
+                )
+            } else {
+                None
+            };
 
-                // Insert the new error
-                diesel::insert_into(schema::errors::table)
-                    .values(models::NewError {
-                        source,
-                        task_id,
-                        message,
-                    })
-                    .execute(conn)
-                    .await
-                    .map_err(Error::Diesel)
-            }
-            .scope_boxed()
-        });
+            // Insert the new error
+            diesel::insert_into(schema::errors::table)
+                .values(models::NewError {
+                    source,
+                    task_id,
+                    message,
+                })
+                .execute(conn)
+                .await
+                .map_err(Error::Diesel)
+        })
+        .await?;
 
-        transaction.await?;
         Ok(())
     }
 }

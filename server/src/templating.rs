@@ -3,6 +3,8 @@
 //! This is used by both the orchestrator when creating task resources and by
 //! the monitor when tasks are garbage collected.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -24,6 +26,7 @@ use tera::Context;
 use tera::Map;
 use tera::Tera;
 use tera::Value;
+use tera_contrib::json::json_encode;
 use tes::v1::types::task::Executor;
 
 /// The orchestrator id label.
@@ -77,7 +80,10 @@ impl Template {
     pub fn new(templates_dir: impl AsRef<Path>) -> Result<Self> {
         let templates_dir = templates_dir.as_ref();
 
-        let templates = Tera::new(templates_dir.join("**/*").to_str().with_context(|| {
+        let mut templates = Tera::new();
+        templates.register_filter("json_encode", json_encode);
+
+        templates.load_from_glob(templates_dir.join("**/*").to_str().with_context(|| {
             format!(
                 "templates directory `{path}` is not valid UTF-8",
                 path = templates_dir.display()
@@ -194,46 +200,35 @@ impl Template {
         data: &TaskTemplateData,
         script: impl Fn(&Executor) -> Result<String>,
     ) -> Result<Context> {
-        /// Helper for inserting items into the context.
-        fn insert(
-            context: &mut Map<String, Value>,
-            name: impl Into<String>,
-            value: impl Into<Value>,
-        ) {
-            context.insert(name.into(), value.into());
-        }
-
-        let mut context = Map::new();
-        insert(&mut context, "id", data.id.as_str());
-        insert(&mut context, "username", data.username.as_str());
-        insert(&mut context, "preemptible", data.preemptible);
+        let mut context = Context::new();
+        context.insert("id", data.id.as_str());
+        context.insert("username", data.username.as_str());
+        context.insert("preemptible", &data.preemptible);
 
         // Set the requested resources
-        insert(&mut context, "cpu", data.cpu.unwrap_or(DEFAULT_CPU));
-        insert(
-            &mut context,
+        context.insert("cpu", &data.cpu.unwrap_or(DEFAULT_CPU));
+        context.insert(
             "memory",
-            format!(
+            &format!(
                 "{memory}G",
                 memory = data.memory.unwrap_or(DEFAULT_MEMORY).ceil()
             ),
         );
-        insert(
-            &mut context,
+        context.insert(
             "disk",
-            format!(
+            &format!(
                 "{disk}G",
                 disk = data.disk.unwrap_or(0.0).max(DEFAULT_STORAGE_SIZE)
             ),
         );
 
         // Set the inputs
-        let inputs: Vec<Value> = data
+        let inputs: Vec<_> = data
             .inputs
             .iter()
             .map(|input| {
-                let mut value = Map::new();
-                value.insert("path".to_string(), input.path.clone().into());
+                let mut value: HashMap<_, Cow<'_, str>> = HashMap::new();
+                value.insert("path", input.path.as_str().into());
 
                 if let Some(local_path) = input.url.as_ref().and_then(|url| {
                     Some(
@@ -246,22 +241,22 @@ impl Template {
                             .to_string(),
                     )
                 }) {
-                    value.insert("local_path".to_string(), local_path.into());
+                    value.insert("local_path", local_path.into());
                 }
 
-                value.into()
+                value
             })
             .collect();
-        insert(&mut context, "inputs", inputs);
+        context.insert("inputs", &inputs);
 
         // Set the outputs
-        let outputs: Vec<Value> = data
+        let outputs: Vec<_> = data
             .outputs
             .iter()
             .map(|output| {
-                let mut value = Map::new();
+                let mut value: HashMap<_, Cow<'_, str>> = HashMap::new();
                 value.insert(
-                    "path".to_string(),
+                    "path",
                     output.path_prefix.as_deref().unwrap_or(&output.path).into(),
                 );
 
@@ -272,46 +267,39 @@ impl Template {
                         .expect("path should be absolute")
                         .to_str()
                         .expect("path should be UTF-8");
-                    value.insert("local_path".to_string(), local_path.into());
+                    value.insert("local_path", local_path.to_string().into());
                 }
 
-                value.into()
+                value
             })
             .collect();
-        insert(&mut context, "outputs", outputs);
+        context.insert("outputs", &outputs);
 
         // Set the volumes
-        insert(&mut context, "volumes", data.volumes.as_slice());
+        context.insert("volumes", &data.volumes);
 
         // Set the executors
-        let executors: Vec<Value> = data
+        let executors: Vec<_> = data
             .executors
             .iter()
             .map(|e| {
-                let mut executor = Map::new();
-                insert(&mut executor, "image", e.image.clone());
-                insert(&mut executor, "script", script(e)?);
-                insert(
-                    &mut executor,
-                    "workdir",
-                    e.workdir.as_deref().unwrap_or_default(),
-                );
+                let mut value: HashMap<_, Value> = HashMap::new();
+                value.insert("image", e.image.as_str().into());
+                value.insert("script", script(e)?.into());
+                value.insert("workdir", e.workdir.as_deref().unwrap_or_default().into());
 
-                let mut env = Map::new();
-                if let Some(vars) = e.env.as_ref() {
-                    for (k, v) in vars {
-                        insert(&mut env, k, v.clone());
-                    }
+                if let Some(env) = e.env.as_ref() {
+                    value.insert("env", Value::from_serializable(env));
+                } else {
+                    value.insert("env", Map::new().into());
                 }
 
-                insert(&mut executor, "env", env);
-                Ok(executor.into())
+                Ok(value)
             })
             .collect::<Result<_>>()?;
-        insert(&mut context, "executors", executors);
+        context.insert("executors", &executors);
 
-        // Construct the context directly from the map as a JSON object
-        Context::from_value(context.into()).context("invalid template context")
+        Ok(context)
     }
 
     /// Deserializes a Kubernetes object and returns its resolved API resources

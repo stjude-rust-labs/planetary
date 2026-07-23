@@ -12,7 +12,7 @@ rust-version.workspace = true
 [features]
 default = ["postgres"]
 postgres = ["planetary-db/postgres"]
-templating = ["serde_yaml_ng", "tes", "tera", "kube"]
+templating = ["serde_yaml_ng", "tes", "tera", "tera-contrib", "kube"]
 
 [dependencies]
 anyhow.workspace = true
@@ -25,6 +25,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_yaml_ng = { workspace = true, optional = true }
 tera = { workspace = true, optional = true }
+tera-contrib = { workspace = true, optional = true }
 tes = { workspace = true, optional = true }
 tokio.workspace = true
 tower.workspace = true
