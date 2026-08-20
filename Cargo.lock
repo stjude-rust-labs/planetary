@@ -2829,6 +2829,7 @@ dependencies = [
  "planetary-server",
  "reqwest",
  "secrecy",
+ "serde_json",
  "tes",
  "tokio",
  "tokio-util",

@@ -253,6 +253,40 @@ impl From<MinimalTask> for TesMinimalTask {
     }
 }
 
+/// Builds the task log metadata object from aggregated resource usage.
+///
+/// The returned object uses the metadata keys documented for reporting task
+/// resource usage (`peak_rss_bytes`, `avg_rss_bytes`, and `cpu_time_ms`);
+/// returns `None` if no usage was recorded.
+fn resource_usage_metadata(
+    peak_rss_bytes: Option<i64>,
+    rss_total_bytes: Option<i64>,
+    rss_sample_count: Option<i64>,
+    cpu_time_ms: Option<i64>,
+) -> Option<serde_json::Value> {
+    let mut metadata = serde_json::Map::new();
+
+    if let Some(peak) = peak_rss_bytes {
+        metadata.insert("peak_rss_bytes".to_string(), peak.into());
+    }
+
+    if let (Some(total), Some(count)) = (rss_total_bytes, rss_sample_count)
+        && count > 0
+    {
+        metadata.insert("avg_rss_bytes".to_string(), (total / count).into());
+    }
+
+    if let Some(cpu) = cpu_time_ms {
+        metadata.insert("cpu_time_ms".to_string(), cpu.into());
+    }
+
+    if metadata.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(metadata))
+    }
+}
+
 /// Represents a basic view of a task.
 #[derive(Debug, Queryable, Selectable, Identifiable)]
 #[diesel(table_name = super::schema::tasks)]
@@ -296,6 +330,14 @@ pub struct BasicTask {
     pub output_files: Option<Json<Vec<OutputFile>>>,
     /// The creation time for the task.
     pub creation_time: DateTime<Utc>,
+    /// The peak observed resident memory of the task's pod, in bytes.
+    pub peak_rss_bytes: Option<i64>,
+    /// The running total of sampled resident memory, in bytes.
+    pub rss_total_bytes: Option<i64>,
+    /// The number of resident memory samples taken.
+    pub rss_sample_count: Option<i64>,
+    /// The accumulated CPU time of the task's pod, in milliseconds.
+    pub cpu_time_ms: Option<i64>,
 }
 
 impl BasicTask {
@@ -312,9 +354,22 @@ impl BasicTask {
 }
 
 // Helper for converting a basic task into a response task, a list of output
-// files, and system log entries
-impl From<BasicTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
+// files, system log entries, and task log metadata
+impl From<BasicTask>
+    for (
+        ResponseTask,
+        Vec<OutputFile>,
+        Vec<String>,
+        Option<serde_json::Value>,
+    )
+{
     fn from(task: BasicTask) -> Self {
+        let metadata = resource_usage_metadata(
+            task.peak_rss_bytes,
+            task.rss_total_bytes,
+            task.rss_sample_count,
+            task.cpu_time_ms,
+        );
         let resources = if task.has_resources() {
             Some(Resources {
                 cpu_cores: task.cpu_cores,
@@ -357,6 +412,7 @@ impl From<BasicTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
             },
             task.output_files.map(Json::into_inner).unwrap_or_default(),
             Default::default(),
+            metadata,
         )
     }
 }
@@ -406,6 +462,14 @@ pub struct FullTask {
     pub system_logs: Option<Vec<Option<String>>>,
     /// The creation time for the task.
     pub creation_time: DateTime<Utc>,
+    /// The peak observed resident memory of the task's pod, in bytes.
+    pub peak_rss_bytes: Option<i64>,
+    /// The running total of sampled resident memory, in bytes.
+    pub rss_total_bytes: Option<i64>,
+    /// The number of resident memory samples taken.
+    pub rss_sample_count: Option<i64>,
+    /// The accumulated CPU time of the task's pod, in milliseconds.
+    pub cpu_time_ms: Option<i64>,
 }
 
 impl FullTask {
@@ -422,9 +486,22 @@ impl FullTask {
 }
 
 // Helper for converting a full task into a response task, a list of output
-// files, and system log entries
-impl From<FullTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
+// files, system log entries, and task log metadata
+impl From<FullTask>
+    for (
+        ResponseTask,
+        Vec<OutputFile>,
+        Vec<String>,
+        Option<serde_json::Value>,
+    )
+{
     fn from(task: FullTask) -> Self {
+        let metadata = resource_usage_metadata(
+            task.peak_rss_bytes,
+            task.rss_total_bytes,
+            task.rss_sample_count,
+            task.cpu_time_ms,
+        );
         let resources = if task.has_resources() {
             Some(Resources {
                 cpu_cores: task.cpu_cores,
@@ -462,6 +539,7 @@ impl From<FullTask> for (ResponseTask, Vec<OutputFile>, Vec<String>) {
             task.system_logs
                 .map(|l| l.into_iter().map(Option::unwrap_or_default).collect())
                 .unwrap_or_default(),
+            metadata,
         )
     }
 }

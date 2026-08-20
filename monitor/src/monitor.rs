@@ -97,6 +97,10 @@ pub struct Intervals {
     /// The interval for the keeping Kubernetes resources after a task enters a
     /// terminal state.
     pub keep: Duration,
+    /// The interval for sampling task pod resource usage.
+    ///
+    /// `None` disables resource usage sampling.
+    pub usage: Option<Duration>,
 }
 
 /// Represents state shared between different monitor tokio tasks.
@@ -179,6 +183,8 @@ pub struct Monitor {
     garbage: JoinHandle<()>,
     /// The handle to the cancellation monitoring tokio task.
     cancellations: JoinHandle<()>,
+    /// The handle to the resource usage sampling tokio task, if enabled.
+    usage: Option<JoinHandle<()>>,
 }
 
 impl Monitor {
@@ -203,11 +209,18 @@ impl Monitor {
         // Spawn the cancellations monitoring tokio task
         let cancellations = tokio::spawn(Self::monitor_cancellations(state.clone()));
 
+        // Spawn the resource usage sampling tokio task, if enabled
+        let usage = state
+            .intervals
+            .usage
+            .map(|interval| tokio::spawn(Self::monitor_usage(state.clone(), interval)));
+
         Ok(Self {
             shutdown: state.shutdown.clone(),
             orphans,
             garbage,
             cancellations,
+            usage,
         })
     }
 
@@ -223,6 +236,56 @@ impl Monitor {
         self.cancellations
             .await
             .expect("failed to join cancellations monitoring task");
+        if let Some(usage) = self.usage {
+            usage
+                .await
+                .expect("failed to join resource usage sampling task");
+        }
+    }
+
+    /// Implements the resource usage sampling tokio task.
+    ///
+    /// Samples task pod resource usage from the Kubernetes metrics API at the
+    /// given interval and folds each sample into the task's aggregate usage
+    /// in the database.
+    async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
+        info!("task resource usage sampler has started");
+
+        let api = crate::usage::pod_metrics_api(state.client.clone(), &state.namespaces.tasks);
+        let mut sampler = crate::usage::UsageSampler::new();
+
+        let mut interval = tokio::time::interval(sample_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            select! {
+                biased;
+                _ = state.shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    match crate::usage::list_task_pod_metrics(&api).await {
+                        Ok(metrics) => {
+                            for (tes_id, sample) in sampler.fold(metrics, sample_interval) {
+                                if let Err(e) = state
+                                    .database
+                                    .add_task_resource_usage_sample(&tes_id, sample)
+                                    .await
+                                {
+                                    error!(
+                                        "failed to record resource usage sample for task \
+                                         `{tes_id}`: {e:#}"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!("failed to sample task pod metrics: {e:#}");
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("task resource usage sampler has shut down");
     }
 
     /// Implements the orphan monitoring tokio task.

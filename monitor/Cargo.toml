@@ -39,6 +39,7 @@ planetary-db = { version = "0.1.0", path = "../db" }
 planetary-server = { version = "0.1.0", path = "../server", features = ["templating"] }
 reqwest.workspace = true
 secrecy.workspace = true
+serde_json.workspace = true
 tes.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

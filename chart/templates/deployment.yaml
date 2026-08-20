@@ -255,6 +255,8 @@ spec:
             value: "{{ .Release.Namespace }}"
           - name: TASKS_NAMESPACE
             value: {{ .Values.tasks.namespace }}
+          - name: USAGE_SAMPLE_INTERVAL
+            value: "{{ .Values.monitor.usageSampleInterval | default 0 }}"
           - name: TEMPLATES_DIR
             value: /etc/templates
           - name: ORCHESTRATOR_URL

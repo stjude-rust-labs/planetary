@@ -100,6 +100,16 @@ pub struct TaskTemplateData {
     pub executors: Vec<Executor>,
 }
 
+/// A single resource usage sample for a task's pod.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResourceUsageSample {
+    /// The sampled resident memory of the pod, in bytes.
+    pub rss_bytes: i64,
+    /// The CPU time consumed by the pod since the previous sample, in
+    /// milliseconds.
+    pub cpu_time_delta_ms: i64,
+}
+
 /// An abstraction for the planetary database.
 #[async_trait::async_trait]
 pub trait Database: Send + Sync + 'static {
@@ -174,6 +184,20 @@ pub trait Database: Send + Sync + 'static {
 
     /// Appends the given messages to the task's system log.
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()>;
+
+    /// Records a resource usage sample for a task.
+    ///
+    /// Samples are folded into a running aggregate: the peak resident memory
+    /// is kept, the sample is added to the running total used for computing
+    /// the average, and the CPU time delta is accumulated.
+    ///
+    /// The aggregate is reported in the task's log metadata using the
+    /// `peak_rss_bytes`, `avg_rss_bytes`, and `cpu_time_ms` keys.
+    async fn add_task_resource_usage_sample(
+        &self,
+        tes_id: &str,
+        sample: ResourceUsageSample,
+    ) -> DatabaseResult<()>;
 
     /// Inserts an internal system error with the database.
     async fn insert_error(

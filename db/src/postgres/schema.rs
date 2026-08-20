@@ -57,6 +57,10 @@ diesel::table! {
         output_files -> Nullable<Jsonb>,
         system_logs -> Nullable<Array<Nullable<Text>>>,
         creation_time -> Timestamptz,
+        peak_rss_bytes -> Nullable<Int8>,
+        rss_total_bytes -> Nullable<Int8>,
+        rss_sample_count -> Nullable<Int8>,
+        cpu_time_ms -> Nullable<Int8>,
     }
 }
 

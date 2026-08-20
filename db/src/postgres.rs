@@ -109,19 +109,28 @@ pub enum Error {
 /// Converts a task model into a TES task.
 fn into_task<T, C>(task: T, containers: Vec<C>) -> Task
 where
-    T: Into<(Task, Vec<OutputFile>, Vec<String>)>,
+    T: Into<(
+        Task,
+        Vec<OutputFile>,
+        Vec<String>,
+        Option<serde_json::Value>,
+    )>,
     C: Into<ExecutorLog>,
 {
-    let (mut task, outputs, system_logs) = task.into();
+    let (mut task, outputs, system_logs, metadata) = task.into();
     let executor_logs: Vec<_> = containers.into_iter().map(Into::into).collect();
 
-    if !outputs.is_empty() || !executor_logs.is_empty() || !system_logs.is_empty() {
+    if !outputs.is_empty()
+        || !executor_logs.is_empty()
+        || !system_logs.is_empty()
+        || metadata.is_some()
+    {
         let start_time = executor_logs.first().and_then(|e| e.start_time);
         let end_time = executor_logs.last().and_then(|e| e.end_time);
 
         task.logs = Some(vec![TaskLog {
             logs: executor_logs,
-            metadata: None,
+            metadata,
             start_time,
             end_time,
             outputs,
@@ -628,6 +637,36 @@ impl Database for PostgresDatabase {
             .execute(&mut conn)
             .await
             .map_err(Error::Diesel)?;
+
+        Ok(())
+    }
+
+    async fn add_task_resource_usage_sample(
+        &self,
+        tes_id: &str,
+        sample: crate::ResourceUsageSample,
+    ) -> DatabaseResult<()> {
+        use diesel::sql_types::BigInt;
+        use diesel::sql_types::Text;
+        use diesel::*;
+        use diesel_async::RunQueryDsl;
+
+        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
+
+        // Fold the sample into the running aggregate; folding in the database
+        // ensures that aggregation survives monitor restarts
+        sql_query(
+            "UPDATE tasks SET peak_rss_bytes = GREATEST(COALESCE(peak_rss_bytes, 0), $1), \
+             rss_total_bytes = COALESCE(rss_total_bytes, 0) + $1, rss_sample_count = \
+             COALESCE(rss_sample_count, 0) + 1, cpu_time_ms = COALESCE(cpu_time_ms, 0) + $2 WHERE \
+             tes_id = $3",
+        )
+        .bind::<BigInt, _>(sample.rss_bytes)
+        .bind::<BigInt, _>(sample.cpu_time_delta_ms)
+        .bind::<Text, _>(tes_id)
+        .execute(&mut conn)
+        .await
+        .map_err(Error::Diesel)?;
 
         Ok(())
     }

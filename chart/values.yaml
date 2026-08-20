@@ -134,6 +134,10 @@ monitor:
     limits:
       memory: 4Gi
   log: info
+  # The interval (in seconds) for sampling task pod resource usage from the
+  # Kubernetes metrics API; requires the metrics server to be installed in
+  # the cluster. A value of zero disables resource usage sampling.
+  usageSampleInterval: 0
 
 # Configuration relating to the transporter used by Planetary for
 # transferring files to and from cloud storage.
