@@ -364,7 +364,7 @@ following keys, with all values encoded as strings:
 | Key                 | Meaning                                          |
 | ------------------- | ------------------------------------------------ |
 | `peak_memory_bytes` | peak sampled memory of the task pod, in bytes    |
-| `avg_memory_bytes`  | average sampled memory of the task pod, in bytes |
+| `avg_memory_bytes`  | average sampled memory of the task pod, in bytes; arithmetic mean of samples taken at the sampling interval, not time-weighted |
 | `cpu_time_ms`       | estimated CPU time of the task pod, in milliseconds |
 
 Notes on semantics:
