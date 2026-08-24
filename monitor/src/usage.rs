@@ -37,12 +37,42 @@ pub fn pod_metrics_api(client: Client, namespace: &str) -> Api<DynamicObject> {
     Api::namespaced_with(client, namespace, &pod_metrics_resource())
 }
 
+/// The sampling baseline for a task's pod.
+#[derive(Debug, Clone)]
+struct PodBaseline {
+    /// The pod's identity, used to detect pod replacement.
+    identity: String,
+    /// The last time the pod was sampled.
+    last: Instant,
+}
+
 /// Tracks per-pod sampling state used to convert instantaneous CPU rates into
 /// accumulated CPU time.
 #[derive(Debug, Default)]
 pub struct UsageSampler {
-    /// The last time each pod was sampled.
-    last_sampled: HashMap<String, Instant>,
+    /// The sampling baseline of each task's pod.
+    baselines: HashMap<String, PodBaseline>,
+}
+
+/// Extracts an identity for a pod from its metrics object's metadata.
+///
+/// The UID is used when the metrics API populates it, falling back to the
+/// creation timestamp; a pod that is replaced (e.g. recreated after an
+/// eviction) yields a different identity, which resets its CPU baseline so
+/// that a new pod's usage rate is never integrated over a stale interval.
+fn pod_identity(metrics: &DynamicObject) -> String {
+    metrics
+        .metadata
+        .uid
+        .clone()
+        .or_else(|| {
+            metrics
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|t| t.0.to_string())
+        })
+        .unwrap_or_default()
 }
 
 impl UsageSampler {
@@ -58,7 +88,8 @@ impl UsageSampler {
     /// recorded for a pod's first sample (there is no observed period to
     /// integrate over), and the elapsed time is capped at `sample_interval`
     /// so that outages of the metrics API are not extrapolated from a single
-    /// instantaneous rate.
+    /// instantaneous rate. A change in pod identity (e.g. a pod recreated
+    /// for the same task) also resets the CPU baseline.
     ///
     /// Returns pairs of TES task id and the sample to record; samples
     /// carrying no measurements are omitted.
@@ -86,11 +117,19 @@ impl UsageSampler {
                 continue;
             };
 
+            let identity = pod_identity(&metrics);
             let elapsed = self
-                .last_sampled
+                .baselines
                 .get(&tes_id)
-                .map(|last| now.duration_since(*last).min(sample_interval));
-            seen.insert(tes_id.clone(), now);
+                .filter(|baseline| baseline.identity == identity)
+                .map(|baseline| now.duration_since(baseline.last).min(sample_interval));
+            seen.insert(
+                tes_id.clone(),
+                PodBaseline {
+                    identity,
+                    last: now,
+                },
+            );
 
             let sample = ResourceUsageSample {
                 memory_bytes: usage.memory_bytes.map(|bytes| bytes as i64),
@@ -109,7 +148,7 @@ impl UsageSampler {
 
         // Retain only the pods seen in this sampling round so that state for
         // completed tasks is dropped
-        self.last_sampled = seen;
+        self.baselines = seen;
 
         samples
     }
@@ -306,6 +345,36 @@ mod tests {
         let (_, sample) = &samples[0];
         assert_eq!(sample.memory_bytes, None);
         assert!(sample.cpu_time_delta_ms.is_some());
+    }
+
+    #[test]
+    fn pod_replacement_resets_the_cpu_baseline() {
+        let mut sampler = UsageSampler::new();
+        let interval = Duration::from_secs(10);
+
+        /// Builds pod metrics with the given pod UID.
+        fn with_uid(uid: &str) -> DynamicObject {
+            let mut metrics = pod_metrics("task-1234", containers());
+            metrics.metadata.uid = Some(uid.to_string());
+            metrics
+        }
+
+        // First sighting of the pod: no CPU time
+        let samples = sampler.fold([with_uid("pod-a")], interval);
+        assert_eq!(samples[0].1.cpu_time_delta_ms, None);
+
+        // Same pod: CPU time is now integrated
+        let samples = sampler.fold([with_uid("pod-a")], interval);
+        assert!(samples[0].1.cpu_time_delta_ms.is_some());
+
+        // The pod was replaced (same task, new UID): the CPU baseline resets
+        // so the new pod's rate is not integrated over a stale interval
+        let samples = sampler.fold([with_uid("pod-b")], interval);
+        assert_eq!(samples[0].1.cpu_time_delta_ms, None);
+
+        // And resumes on the replacement pod's second sample
+        let samples = sampler.fold([with_uid("pod-b")], interval);
+        assert!(samples[0].1.cpu_time_delta_ms.is_some());
     }
 
     #[test]

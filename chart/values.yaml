@@ -137,6 +137,9 @@ monitor:
   # The interval (in seconds) for sampling task pod resource usage from the
   # Kubernetes metrics API; requires the metrics server to be installed in
   # the cluster. A value of zero disables resource usage sampling.
+  #
+  # The monitor's RBAC permission for metrics.k8s.io is granted only when
+  # sampling is enabled; changing this value requires re-applying the chart.
   usageSampleInterval: 0
 
 # Configuration relating to the transporter used by Planetary for

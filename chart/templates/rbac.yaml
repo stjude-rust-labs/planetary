@@ -65,9 +65,11 @@ rules:
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
   verbs: ["delete"]
+{{- if gt (int .Values.monitor.usageSampleInterval) 0 }}
 - apiGroups: ["metrics.k8s.io"]
   resources: ["pods"]
   verbs: ["list"]
+{{- end }}
 ---
 # Service account for the monitor
 apiVersion: v1
