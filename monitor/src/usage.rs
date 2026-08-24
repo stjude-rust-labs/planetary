@@ -5,7 +5,7 @@
 //! the task's aggregate resource usage in the database.
 //!
 //! The aggregate is reported through the TES API as task log metadata using
-//! the `peak_rss_bytes`, `avg_rss_bytes`, and `cpu_time_ms` keys.
+//! the `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -53,15 +53,19 @@ impl UsageSampler {
 
     /// Folds a list of pod metrics into per-task resource usage samples.
     ///
-    /// The `default_elapsed` duration is used to convert the CPU usage rate
-    /// of a pod seen for the first time into CPU time; subsequently, the
-    /// actual elapsed time between samples is used.
+    /// CPU time is accumulated by integrating the sampled CPU usage rate
+    /// over the time elapsed since the pod's previous sample. No CPU time is
+    /// recorded for a pod's first sample (there is no observed period to
+    /// integrate over), and the elapsed time is capped at `sample_interval`
+    /// so that outages of the metrics API are not extrapolated from a single
+    /// instantaneous rate.
     ///
-    /// Returns pairs of TES task id and the sample to record.
+    /// Returns pairs of TES task id and the sample to record; samples
+    /// carrying no measurements are omitted.
     pub fn fold(
         &mut self,
         metrics: impl IntoIterator<Item = DynamicObject>,
-        default_elapsed: std::time::Duration,
+        sample_interval: std::time::Duration,
     ) -> Vec<(String, ResourceUsageSample)> {
         let now = Instant::now();
         let mut samples = Vec::new();
@@ -78,24 +82,29 @@ impl UsageSampler {
                 continue;
             };
 
-            let Some((cpu_cores, memory_bytes)) = sum_container_usage(&metrics.data) else {
+            let Some(usage) = sum_container_usage(&metrics.data) else {
                 continue;
             };
 
             let elapsed = self
                 .last_sampled
                 .get(&tes_id)
-                .map(|last| now.duration_since(*last))
-                .unwrap_or(default_elapsed);
+                .map(|last| now.duration_since(*last).min(sample_interval));
             seen.insert(tes_id.clone(), now);
 
-            samples.push((
-                tes_id,
-                ResourceUsageSample {
-                    rss_bytes: memory_bytes as i64,
-                    cpu_time_delta_ms: (cpu_cores * elapsed.as_millis() as f64) as i64,
+            let sample = ResourceUsageSample {
+                memory_bytes: usage.memory_bytes.map(|bytes| bytes as i64),
+                cpu_time_delta_ms: match (usage.cpu_cores, elapsed) {
+                    (Some(cores), Some(elapsed)) => {
+                        Some((cores * elapsed.as_millis() as f64) as i64)
+                    }
+                    _ => None,
                 },
-            ));
+            };
+
+            if !sample.is_empty() {
+                samples.push((tes_id, sample));
+            }
         }
 
         // Retain only the pods seen in this sampling round so that state for
@@ -106,16 +115,27 @@ impl UsageSampler {
     }
 }
 
+/// The summed resource usage of a `PodMetrics` object's containers.
+#[derive(Debug, Default, Clone, Copy)]
+struct ContainerUsage {
+    /// The summed CPU usage rate, in cores, if any container reported CPU.
+    cpu_cores: Option<f64>,
+    /// The summed working set memory, in bytes, if any container reported
+    /// memory.
+    memory_bytes: Option<u64>,
+}
+
 /// Sums the CPU (in cores) and memory (in bytes) usage across the containers
 /// of a `PodMetrics` object.
 ///
-/// Returns `None` if the object carries no container usage.
-fn sum_container_usage(data: &serde_json::Value) -> Option<(f64, u64)> {
+/// Each dimension is present only if at least one container reported a
+/// parseable quantity for it, so that a partially reported sample cannot
+/// contribute fabricated zeroes to an aggregate. Returns `None` if the
+/// object carries no container usage at all.
+fn sum_container_usage(data: &serde_json::Value) -> Option<ContainerUsage> {
     let containers = data.get("containers")?.as_array()?;
 
-    let mut cpu_cores = 0.0;
-    let mut memory_bytes = 0u64;
-    let mut any = false;
+    let mut summed = ContainerUsage::default();
 
     for container in containers {
         let Some(usage) = container.get("usage") else {
@@ -125,20 +145,18 @@ fn sum_container_usage(data: &serde_json::Value) -> Option<(f64, u64)> {
         if let Some(cpu) = usage.get("cpu").and_then(|v| v.as_str())
             && let Some(cores) = parse_quantity(cpu)
         {
-            cpu_cores += cores;
-            any = true;
+            summed.cpu_cores = Some(summed.cpu_cores.unwrap_or(0.0) + cores);
         }
 
         if let Some(memory) = usage.get("memory").and_then(|v| v.as_str())
             && let Some(bytes) = parse_quantity(memory)
         {
-            memory_bytes += bytes as u64;
-            any = true;
+            summed.memory_bytes = Some(summed.memory_bytes.unwrap_or(0) + bytes as u64);
         }
     }
 
-    if any {
-        Some((cpu_cores, memory_bytes))
+    if summed.cpu_cores.is_some() || summed.memory_bytes.is_some() {
+        Some(summed)
     } else {
         None
     }
@@ -227,27 +245,67 @@ mod tests {
         object
     }
 
+    /// The containers used by the folding tests.
+    fn containers() -> serde_json::Value {
+        serde_json::json!([
+            { "name": "executor-0", "usage": { "cpu": "500m", "memory": "1Gi" } },
+            { "name": "sidecar", "usage": { "cpu": "100m", "memory": "512Mi" } },
+        ])
+    }
+
     #[test]
     fn samples_fold_across_containers() {
         let mut sampler = UsageSampler::new();
+        let interval = Duration::from_secs(10);
 
-        let metrics = pod_metrics(
-            "task-1234",
-            serde_json::json!([
-                { "name": "executor-0", "usage": { "cpu": "500m", "memory": "1Gi" } },
-                { "name": "sidecar", "usage": { "cpu": "100m", "memory": "512Mi" } },
-            ]),
-        );
-
-        let samples = sampler.fold([metrics], Duration::from_secs(10));
+        // The first sample carries memory only: there is no observed period
+        // to integrate the CPU rate over yet
+        let samples = sampler.fold([pod_metrics("task-1234", containers())], interval);
         assert_eq!(samples.len(), 1);
 
         let (tes_id, sample) = &samples[0];
         assert_eq!(tes_id, "task-1234");
         // 1 GiB + 512 MiB
-        assert_eq!(sample.rss_bytes, 1024 * 1024 * 1024 + 512 * 1024 * 1024);
-        // 0.6 cores over 10 seconds = 6000 ms of CPU time
-        assert_eq!(sample.cpu_time_delta_ms, 6000);
+        assert_eq!(
+            sample.memory_bytes,
+            Some(1024 * 1024 * 1024 + 512 * 1024 * 1024)
+        );
+        assert_eq!(sample.cpu_time_delta_ms, None);
+
+        // The second sample also carries CPU time; the elapsed time between
+        // the samples is negligible in this test, so the delta is ~0, and —
+        // importantly — bounded by the sampling interval
+        let samples = sampler.fold([pod_metrics("task-1234", containers())], interval);
+        assert_eq!(samples.len(), 1);
+
+        let (_, sample) = &samples[0];
+        let delta = sample.cpu_time_delta_ms.expect("should have CPU time");
+        // 0.6 cores over at most 10 seconds
+        assert!((0..=6000).contains(&delta));
+    }
+
+    #[test]
+    fn partial_samples_omit_missing_dimensions() {
+        let mut sampler = UsageSampler::new();
+
+        // CPU reported but no memory: the memory dimension must be absent
+        // rather than a fabricated zero
+        let metrics = pod_metrics(
+            "task-1234",
+            serde_json::json!([{ "name": "executor-0", "usage": { "cpu": "500m" } }]),
+        );
+
+        // First sample carries neither memory (not reported) nor CPU (first
+        // sighting), so it is omitted entirely
+        let samples = sampler.fold([metrics.clone()], Duration::from_secs(10));
+        assert!(samples.is_empty());
+
+        // Second sample carries CPU only
+        let samples = sampler.fold([metrics], Duration::from_secs(10));
+        assert_eq!(samples.len(), 1);
+        let (_, sample) = &samples[0];
+        assert_eq!(sample.memory_bytes, None);
+        assert!(sample.cpu_time_delta_ms.is_some());
     }
 
     #[test]

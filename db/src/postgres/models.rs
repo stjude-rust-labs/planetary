@@ -256,28 +256,34 @@ impl From<MinimalTask> for TesMinimalTask {
 /// Builds the task log metadata object from aggregated resource usage.
 ///
 /// The returned object uses the metadata keys documented for reporting task
-/// resource usage (`peak_rss_bytes`, `avg_rss_bytes`, and `cpu_time_ms`);
-/// returns `None` if no usage was recorded.
+/// resource usage (`peak_memory_bytes`, `avg_memory_bytes`, and
+/// `cpu_time_ms`); returns `None` if no usage was recorded.
+///
+/// Values are encoded as strings, as the TES specification types
+/// `TaskLog.metadata` as a map of strings.
 fn resource_usage_metadata(
-    peak_rss_bytes: Option<i64>,
-    rss_total_bytes: Option<i64>,
-    rss_sample_count: Option<i64>,
+    peak_memory_bytes: Option<i64>,
+    memory_total_bytes: Option<i64>,
+    memory_sample_count: Option<i64>,
     cpu_time_ms: Option<i64>,
 ) -> Option<serde_json::Value> {
     let mut metadata = serde_json::Map::new();
 
-    if let Some(peak) = peak_rss_bytes {
-        metadata.insert("peak_rss_bytes".to_string(), peak.into());
+    if let Some(peak) = peak_memory_bytes {
+        metadata.insert("peak_memory_bytes".to_string(), peak.to_string().into());
     }
 
-    if let (Some(total), Some(count)) = (rss_total_bytes, rss_sample_count)
+    if let (Some(total), Some(count)) = (memory_total_bytes, memory_sample_count)
         && count > 0
     {
-        metadata.insert("avg_rss_bytes".to_string(), (total / count).into());
+        metadata.insert(
+            "avg_memory_bytes".to_string(),
+            (total / count).to_string().into(),
+        );
     }
 
     if let Some(cpu) = cpu_time_ms {
-        metadata.insert("cpu_time_ms".to_string(), cpu.into());
+        metadata.insert("cpu_time_ms".to_string(), cpu.to_string().into());
     }
 
     if metadata.is_empty() {
@@ -330,12 +336,12 @@ pub struct BasicTask {
     pub output_files: Option<Json<Vec<OutputFile>>>,
     /// The creation time for the task.
     pub creation_time: DateTime<Utc>,
-    /// The peak observed resident memory of the task's pod, in bytes.
-    pub peak_rss_bytes: Option<i64>,
-    /// The running total of sampled resident memory, in bytes.
-    pub rss_total_bytes: Option<i64>,
-    /// The number of resident memory samples taken.
-    pub rss_sample_count: Option<i64>,
+    /// The peak observed working set memory of the task's pod, in bytes.
+    pub peak_memory_bytes: Option<i64>,
+    /// The running total of sampled working set memory, in bytes.
+    pub memory_total_bytes: Option<i64>,
+    /// The number of memory samples taken.
+    pub memory_sample_count: Option<i64>,
     /// The accumulated CPU time of the task's pod, in milliseconds.
     pub cpu_time_ms: Option<i64>,
 }
@@ -365,9 +371,9 @@ impl From<BasicTask>
 {
     fn from(task: BasicTask) -> Self {
         let metadata = resource_usage_metadata(
-            task.peak_rss_bytes,
-            task.rss_total_bytes,
-            task.rss_sample_count,
+            task.peak_memory_bytes,
+            task.memory_total_bytes,
+            task.memory_sample_count,
             task.cpu_time_ms,
         );
         let resources = if task.has_resources() {
@@ -462,12 +468,12 @@ pub struct FullTask {
     pub system_logs: Option<Vec<Option<String>>>,
     /// The creation time for the task.
     pub creation_time: DateTime<Utc>,
-    /// The peak observed resident memory of the task's pod, in bytes.
-    pub peak_rss_bytes: Option<i64>,
-    /// The running total of sampled resident memory, in bytes.
-    pub rss_total_bytes: Option<i64>,
-    /// The number of resident memory samples taken.
-    pub rss_sample_count: Option<i64>,
+    /// The peak observed working set memory of the task's pod, in bytes.
+    pub peak_memory_bytes: Option<i64>,
+    /// The running total of sampled working set memory, in bytes.
+    pub memory_total_bytes: Option<i64>,
+    /// The number of memory samples taken.
+    pub memory_sample_count: Option<i64>,
     /// The accumulated CPU time of the task's pod, in milliseconds.
     pub cpu_time_ms: Option<i64>,
 }
@@ -497,9 +503,9 @@ impl From<FullTask>
 {
     fn from(task: FullTask) -> Self {
         let metadata = resource_usage_metadata(
-            task.peak_rss_bytes,
-            task.rss_total_bytes,
-            task.rss_sample_count,
+            task.peak_memory_bytes,
+            task.memory_total_bytes,
+            task.memory_sample_count,
             task.cpu_time_ms,
         );
         let resources = if task.has_resources() {

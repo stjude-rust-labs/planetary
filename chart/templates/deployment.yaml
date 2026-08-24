@@ -195,6 +195,11 @@ metadata:
     {{- include "chart.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  # Recreate ensures a single monitor instance during upgrades; resource
+  # usage sampling accumulates in the database and must not be performed by
+  # two monitors at once
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "chart.selectorLabels" . | nindent 6 }}

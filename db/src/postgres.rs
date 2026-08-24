@@ -641,29 +641,50 @@ impl Database for PostgresDatabase {
         Ok(())
     }
 
-    async fn add_task_resource_usage_sample(
+    async fn add_task_resource_usage_samples(
         &self,
-        tes_id: &str,
-        sample: crate::ResourceUsageSample,
+        samples: &[(String, crate::ResourceUsageSample)],
     ) -> DatabaseResult<()> {
+        use diesel::pg::sql_types::Array;
         use diesel::sql_types::BigInt;
+        use diesel::sql_types::Nullable;
         use diesel::sql_types::Text;
         use diesel::*;
         use diesel_async::RunQueryDsl;
 
+        if samples.is_empty() {
+            return Ok(());
+        }
+
+        let mut ids = Vec::with_capacity(samples.len());
+        let mut memory = Vec::with_capacity(samples.len());
+        let mut cpu = Vec::with_capacity(samples.len());
+        for (tes_id, sample) in samples {
+            ids.push(tes_id.as_str());
+            memory.push(sample.memory_bytes);
+            cpu.push(sample.cpu_time_delta_ms);
+        }
+
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        // Fold the sample into the running aggregate; folding in the database
-        // ensures that aggregation survives monitor restarts
+        // Fold the samples into each task's running aggregate in a single
+        // statement; folding in the database ensures that aggregation
+        // survives monitor restarts. A NULL dimension leaves the
+        // corresponding aggregate untouched.
         sql_query(
-            "UPDATE tasks SET peak_rss_bytes = GREATEST(COALESCE(peak_rss_bytes, 0), $1), \
-             rss_total_bytes = COALESCE(rss_total_bytes, 0) + $1, rss_sample_count = \
-             COALESCE(rss_sample_count, 0) + 1, cpu_time_ms = COALESCE(cpu_time_ms, 0) + $2 WHERE \
-             tes_id = $3",
+            "UPDATE tasks SET peak_memory_bytes = CASE WHEN s.memory_bytes IS NULL THEN \
+             peak_memory_bytes ELSE GREATEST(COALESCE(peak_memory_bytes, 0), s.memory_bytes) END, \
+             memory_total_bytes = CASE WHEN s.memory_bytes IS NULL THEN memory_total_bytes ELSE \
+             COALESCE(memory_total_bytes, 0) + s.memory_bytes END, memory_sample_count = CASE \
+             WHEN s.memory_bytes IS NULL THEN memory_sample_count ELSE \
+             COALESCE(memory_sample_count, 0) + 1 END, cpu_time_ms = CASE WHEN \
+             s.cpu_time_delta_ms IS NULL THEN cpu_time_ms ELSE COALESCE(cpu_time_ms, 0) + \
+             s.cpu_time_delta_ms END FROM UNNEST($1::text[], $2::bigint[], $3::bigint[]) AS \
+             s(tes_id, memory_bytes, cpu_time_delta_ms) WHERE tasks.tes_id = s.tes_id",
         )
-        .bind::<BigInt, _>(sample.rss_bytes)
-        .bind::<BigInt, _>(sample.cpu_time_delta_ms)
-        .bind::<Text, _>(tes_id)
+        .bind::<Array<Text>, _>(&ids)
+        .bind::<Array<Nullable<BigInt>>, _>(&memory)
+        .bind::<Array<Nullable<BigInt>>, _>(&cpu)
         .execute(&mut conn)
         .await
         .map_err(Error::Diesel)?;

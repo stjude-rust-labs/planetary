@@ -346,6 +346,37 @@ monitor is granted the `delete` verb for the resource.
 
 See [`rbac.yaml`](./chart/templates/rbac.yaml) for more information.
 
+### Task Resource Usage Reporting
+
+Planetary can optionally sample the resource usage of task pods and report it
+through the TES API.
+
+Sampling is disabled by default and is enabled by setting the chart value
+`monitor.usageSampleInterval` to a sampling interval in seconds. It requires
+the [Kubernetes metrics server](https://github.com/kubernetes-sigs/metrics-server)
+(or another `metrics.k8s.io` API provider) to be installed in the cluster.
+
+When enabled, the monitor periodically samples each task pod's usage and folds
+the samples into a per-task aggregate. The aggregate is reported in the task's
+log `metadata` (visible in the `BASIC` and `FULL` task views) using the
+following keys, with all values encoded as strings:
+
+| Key                 | Meaning                                          |
+| ------------------- | ------------------------------------------------ |
+| `peak_memory_bytes` | peak sampled memory of the task pod, in bytes    |
+| `avg_memory_bytes`  | average sampled memory of the task pod, in bytes |
+| `cpu_time_ms`       | estimated CPU time of the task pod, in milliseconds |
+
+Notes on semantics:
+
+* Memory values are the Kubernetes _working set_ (which may include file-backed
+  cache pages) summed across the pod's containers, not process RSS.
+* CPU time is estimated by integrating sampled CPU usage rates over the
+  sampling interval; it is an approximation, and periods where the metrics API
+  is unavailable are not extrapolated.
+* Usage is aggregated in the database, so reported values survive monitor
+  restarts.
+
 ## 🚀 Getting Started
 
 ### Cloning the Repository

@@ -52,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 use url::Url;
 
 /// The task id label.
@@ -209,10 +210,13 @@ impl Monitor {
         // Spawn the cancellations monitoring tokio task
         let cancellations = tokio::spawn(Self::monitor_cancellations(state.clone()));
 
-        // Spawn the resource usage sampling tokio task, if enabled
+        // Spawn the resource usage sampling tokio task, if enabled; a zero
+        // interval is normalized to disabled so that no caller can spawn a
+        // sampler with an interval Tokio would panic on
         let usage = state
             .intervals
             .usage
+            .filter(|interval| !interval.is_zero())
             .map(|interval| tokio::spawn(Self::monitor_usage(state.clone(), interval)));
 
         Ok(Self {
@@ -246,8 +250,8 @@ impl Monitor {
     /// Implements the resource usage sampling tokio task.
     ///
     /// Samples task pod resource usage from the Kubernetes metrics API at the
-    /// given interval and folds each sample into the task's aggregate usage
-    /// in the database.
+    /// given interval and folds each round of samples into the tasks'
+    /// aggregate usage in the database.
     async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
         info!("task resource usage sampler has started");
 
@@ -257,6 +261,10 @@ impl Monitor {
         let mut interval = tokio::time::interval(sample_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+        // Whether the previous sampling attempt failed; used to log the
+        // first failure and the recovery visibly without per-tick noise
+        let mut failing = false;
+
         loop {
             select! {
                 biased;
@@ -264,21 +272,31 @@ impl Monitor {
                 _ = interval.tick() => {
                     match crate::usage::list_task_pod_metrics(&api).await {
                         Ok(metrics) => {
-                            for (tes_id, sample) in sampler.fold(metrics, sample_interval) {
-                                if let Err(e) = state
-                                    .database
-                                    .add_task_resource_usage_sample(&tes_id, sample)
-                                    .await
-                                {
-                                    error!(
-                                        "failed to record resource usage sample for task \
-                                         `{tes_id}`: {e:#}"
-                                    );
-                                }
+                            if failing {
+                                failing = false;
+                                info!("sampling task pod metrics has recovered");
+                            }
+
+                            let samples = sampler.fold(metrics, sample_interval);
+                            if let Err(e) = state
+                                .database
+                                .add_task_resource_usage_samples(&samples)
+                                .await
+                            {
+                                error!("failed to record resource usage samples: {e:#}");
                             }
                         }
                         Err(e) => {
-                            debug!("failed to sample task pod metrics: {e:#}");
+                            if failing {
+                                debug!("failed to sample task pod metrics: {e:#}");
+                            } else {
+                                failing = true;
+                                warn!(
+                                    "failed to sample task pod metrics (is the Kubernetes \
+                                     metrics server installed and accessible to the monitor's \
+                                     service account?): {e:#}"
+                                );
+                            }
                         }
                     }
                 }

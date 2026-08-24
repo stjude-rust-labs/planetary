@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+* Added `monitor.usageSampleInterval` to enable sampling task pod resource
+  usage from the Kubernetes metrics API, along with monitor RBAC for
+  `metrics.k8s.io` and a `Recreate` rollout strategy for the monitor
+  ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 * Added `local.storage` to support local inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
 * Added `transporter.storage.azure` values for Azure Storage authentication ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).
 * Added a 15 minute TTL on the migration job ([#25](https://github.com/stjude-rust-labs/planetary/pull/25)).

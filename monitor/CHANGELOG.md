@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
+* Added an opt-in task resource usage sampler (`--usage-sample-interval` /
+  `USAGE_SAMPLE_INTERVAL`) that polls the Kubernetes metrics API for task pod
+  metrics and records per-task aggregates in the database
+  ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 * Added creating Kubernetes resources via a template ([#38](https://github.com/stjude-rust-labs/planetary/pull/38)).
 
 #### Fixed

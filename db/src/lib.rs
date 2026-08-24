@@ -101,13 +101,23 @@ pub struct TaskTemplateData {
 }
 
 /// A single resource usage sample for a task's pod.
+///
+/// Each dimension is optional; a dimension that could not be measured for a
+/// sampling round is `None` and does not affect the task's aggregate.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResourceUsageSample {
-    /// The sampled resident memory of the pod, in bytes.
-    pub rss_bytes: i64,
+    /// The sampled working set memory of the pod, in bytes.
+    pub memory_bytes: Option<i64>,
     /// The CPU time consumed by the pod since the previous sample, in
     /// milliseconds.
-    pub cpu_time_delta_ms: i64,
+    pub cpu_time_delta_ms: Option<i64>,
+}
+
+impl ResourceUsageSample {
+    /// Whether the sample carries no measurements.
+    pub fn is_empty(&self) -> bool {
+        self.memory_bytes.is_none() && self.cpu_time_delta_ms.is_none()
+    }
 }
 
 /// An abstraction for the planetary database.
@@ -185,18 +195,19 @@ pub trait Database: Send + Sync + 'static {
     /// Appends the given messages to the task's system log.
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()>;
 
-    /// Records a resource usage sample for a task.
+    /// Records a round of resource usage samples for tasks.
     ///
-    /// Samples are folded into a running aggregate: the peak resident memory
-    /// is kept, the sample is added to the running total used for computing
-    /// the average, and the CPU time delta is accumulated.
+    /// Samples are folded into each task's running aggregate: the peak
+    /// working set memory is kept, the sampled memory is added to the running
+    /// total used for computing the average, and the CPU time delta is
+    /// accumulated. A `None` dimension in a sample leaves the corresponding
+    /// aggregate untouched.
     ///
     /// The aggregate is reported in the task's log metadata using the
-    /// `peak_rss_bytes`, `avg_rss_bytes`, and `cpu_time_ms` keys.
-    async fn add_task_resource_usage_sample(
+    /// `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys.
+    async fn add_task_resource_usage_samples(
         &self,
-        tes_id: &str,
-        sample: ResourceUsageSample,
+        samples: &[(String, ResourceUsageSample)],
     ) -> DatabaseResult<()>;
 
     /// Inserts an internal system error with the database.
