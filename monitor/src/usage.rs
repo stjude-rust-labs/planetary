@@ -56,23 +56,18 @@ pub struct UsageSampler {
 
 /// Extracts an identity for a pod from its metrics object's metadata.
 ///
-/// The UID is used when the metrics API populates it, falling back to the
-/// creation timestamp; a pod that is replaced (e.g. recreated after an
-/// eviction) yields a different identity, which resets its CPU baseline so
-/// that a new pod's usage rate is never integrated over a stale interval.
+/// The UID is used when the metrics API populates it; a pod that is replaced
+/// (e.g. recreated after an eviction) then yields a different identity, which
+/// resets its CPU baseline so that a new pod's usage rate is never integrated
+/// over a stale interval.
+///
+/// The reference Kubernetes metrics-server leaves the UID empty (and stamps
+/// `creationTimestamp` with the response time, so it cannot serve as a
+/// fallback identity); in that case the identity is a constant and the
+/// baseline is effectively keyed by task alone, with any pod-replacement
+/// error bounded to at most one sampling interval by the elapsed-time cap.
 fn pod_identity(metrics: &DynamicObject) -> String {
-    metrics
-        .metadata
-        .uid
-        .clone()
-        .or_else(|| {
-            metrics
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .map(|t| t.0.to_string())
-        })
-        .unwrap_or_default()
+    metrics.metadata.uid.clone().unwrap_or_default()
 }
 
 impl UsageSampler {
@@ -345,6 +340,30 @@ mod tests {
         let (_, sample) = &samples[0];
         assert_eq!(sample.memory_bytes, None);
         assert!(sample.cpu_time_delta_ms.is_some());
+    }
+
+    #[test]
+    fn uid_less_metrics_keep_the_task_baseline() {
+        let mut sampler = UsageSampler::new();
+        let interval = Duration::from_secs(10);
+
+        // The reference metrics-server leaves the UID empty and stamps
+        // `creationTimestamp` with the response time; a changing timestamp
+        // must not reset the baseline, or CPU time would never be recorded
+        fn without_uid(timestamp: &str) -> DynamicObject {
+            let mut metrics = pod_metrics("task-1234", containers());
+            metrics.metadata.uid = None;
+            metrics.metadata.creation_timestamp =
+                serde_json::from_str(&format!("\"{timestamp}\"")).ok();
+            metrics
+        }
+
+        let samples = sampler.fold([without_uid("2026-08-26T00:00:00Z")], interval);
+        assert_eq!(samples[0].1.cpu_time_delta_ms, None);
+
+        // Second round with a different response timestamp: CPU is recorded
+        let samples = sampler.fold([without_uid("2026-08-26T00:00:10Z")], interval);
+        assert!(samples[0].1.cpu_time_delta_ms.is_some());
     }
 
     #[test]
