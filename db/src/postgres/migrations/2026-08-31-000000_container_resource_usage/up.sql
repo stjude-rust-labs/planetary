@@ -1,5 +1,4 @@
--- Replaces the per-task resource usage aggregate columns with a
--- per-container aggregation table.
+-- Per-container aggregation of sampled task resource usage.
 --
 -- Usage is sampled per container (the input transporter, each executor, and
 -- the output transporter) and folded in the database so that aggregation
@@ -20,9 +19,3 @@ CREATE TABLE task_container_usage (
     cpu_time_ms         BIGINT NULL,
     PRIMARY KEY (task_id, container_name)
 );
-
-ALTER TABLE tasks
-    DROP COLUMN peak_memory_bytes,
-    DROP COLUMN memory_total_bytes,
-    DROP COLUMN memory_sample_count,
-    DROP COLUMN cpu_time_ms;
