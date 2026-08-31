@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` task log
   metadata keys cover the task's executor containers, and the
   `resource_usage` key carries the per-container breakdown (`inputs`,
-  `executor-N`, `outputs`)
+  `executor-N`, `outputs`). **Security note**: `get` on `nodes/proxy` is the
+  chart's only cluster-scoped permission and permits read access to any
+  kubelet endpoint on any node (pod specs, container logs, node stats; not
+  exec/attach); the role is not created while sampling is disabled (the
+  default)
   ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 * Added `local.storage` to support local inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
 * Added `transporter.storage.azure` values for Azure Storage authentication ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).

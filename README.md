@@ -89,6 +89,12 @@ research to create a complete list of concerns to consider in your situation:
   We've scoped roles and bindings according to what we believe to be
   least-privilege access.
 
+  Note that enabling [task resource usage reporting](#task-resource-usage-reporting)
+  (`monitor.usageSampleInterval > 0`; disabled by default) grants the monitor
+  a **cluster-scoped** `get` permission on `nodes/proxy`, which permits
+  read access to any kubelet endpoint on any node. See that section for the
+  trade-off discussion.
+
   Review these to ensure they align with your internal access control policies
   and compliance standards.
 
@@ -344,6 +350,19 @@ If additional resource kinds are required in the task template, ensure that the
 Planetary orchestrator is granted the `create` verb and that the Planetary
 monitor is granted the `delete` verb for the resource.
 
+When [task resource usage reporting](#task-resource-usage-reporting) is
+enabled (`monitor.usageSampleInterval > 0`; disabled by default), the chart
+additionally grants the monitor a **cluster-scoped** role with the `get` verb
+on `nodes/proxy`, used to read the kubelet `/metrics/resource` endpoint of
+the nodes hosting task pods through the API server's node proxy. This is the
+only cluster-scoped permission in the chart, and its reach is broader than
+its use: `get` on `nodes/proxy` permits read access to *any* kubelet endpoint
+on *any* node — including pod specifications (which may contain secrets
+passed as environment variables), container logs, and node stats — though it
+does not permit `exec`, `attach`, or `port-forward` (which require the
+`create` verb). If this is not acceptable in your cluster, leave usage
+sampling disabled.
+
 See [`rbac.yaml`](./chart/templates/rbac.yaml) for more information.
 
 ### Task Resource Usage Reporting
@@ -365,9 +384,14 @@ the kubelet `/metrics/resource` endpoint directly.
 
 When sampling is enabled, the chart grants the monitor a cluster role with
 the `get` verb on `nodes/proxy`, which the monitor uses to read the resource
-metrics of the nodes hosting task pods. Note that `nodes/proxy` permits
-proxying to any kubelet endpoint; grant it only if this trade-off is
-acceptable in your cluster.
+metrics of the nodes hosting task pods. Note that `nodes/proxy` reaches
+further than the monitor's use of it: it permits read access to any kubelet
+endpoint on any node, including the pod specifications of all pods on the
+node (which may contain secrets passed as environment variables), container
+logs, and node stats — though not `exec`, `attach`, or `port-forward`, which
+require the `create` verb. Enable sampling only if this trade-off is
+acceptable in your cluster; otherwise leave it disabled (the default), in
+which case the cluster role is not created.
 
 The monitor periodically samples the usage of each of a task pod's
 containers and folds the samples into per-container aggregates. The
