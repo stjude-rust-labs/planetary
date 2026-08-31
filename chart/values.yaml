@@ -135,11 +135,12 @@ monitor:
       memory: 4Gi
   log: info
   # The interval (in seconds) for sampling task pod resource usage from the
-  # Kubernetes metrics API; requires the metrics server to be installed in
-  # the cluster. A value of zero disables resource usage sampling.
+  # kubelets hosting task pods (via the Kubernetes API server's node proxy).
+  # A value of zero disables resource usage sampling.
   #
-  # The monitor's RBAC permission for metrics.k8s.io is granted only when
-  # sampling is enabled; changing this value requires re-applying the chart.
+  # The monitor's cluster role for reading kubelet resource metrics
+  # (`nodes/proxy`) is granted only when sampling is enabled; changing this
+  # value requires re-applying the chart.
   usageSampleInterval: 0
 
 # Configuration relating to the transporter used by Planetary for

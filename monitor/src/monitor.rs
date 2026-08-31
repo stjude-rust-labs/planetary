@@ -249,13 +249,14 @@ impl Monitor {
 
     /// Implements the resource usage sampling tokio task.
     ///
-    /// Samples task pod resource usage from the Kubernetes metrics API at the
-    /// given interval and folds each round of samples into the tasks'
-    /// aggregate usage in the database.
+    /// Samples task pod resource usage from the kubelets hosting task pods
+    /// (through the API server's node proxy) at the given interval and folds
+    /// each round of per-container samples into the tasks' aggregate usage
+    /// in the database.
     async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
         info!("task resource usage sampler has started");
 
-        let api = crate::usage::pod_metrics_api(state.client.clone(), &state.namespaces.tasks);
+        let pods: Api<Pod> = Api::namespaced(state.client.clone(), &state.namespaces.tasks);
         let mut sampler = crate::usage::UsageSampler::new();
 
         let mut interval = tokio::time::interval(sample_interval);
@@ -270,14 +271,20 @@ impl Monitor {
                 biased;
                 _ = state.shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    match crate::usage::list_task_pod_metrics(&api).await {
-                        Ok(metrics) => {
+                    match crate::usage::sample_task_pods(
+                        &state.client,
+                        &pods,
+                        &state.namespaces.tasks,
+                        &mut sampler,
+                    )
+                    .await
+                    {
+                        Ok(samples) => {
                             if failing {
                                 failing = false;
-                                info!("sampling task pod metrics has recovered");
+                                info!("sampling task pod resource usage has recovered");
                             }
 
-                            let samples = sampler.fold(metrics, sample_interval);
                             if let Err(e) = state
                                 .database
                                 .add_task_resource_usage_samples(&samples)
@@ -288,13 +295,13 @@ impl Monitor {
                         }
                         Err(e) => {
                             if failing {
-                                debug!("failed to sample task pod metrics: {e:#}");
+                                debug!("failed to sample task pod resource usage: {e:#}");
                             } else {
                                 failing = true;
                                 warn!(
-                                    "failed to sample task pod metrics (is the Kubernetes \
-                                     metrics server installed and accessible to the monitor's \
-                                     service account?): {e:#}"
+                                    "failed to sample task pod resource usage (does the \
+                                     monitor's service account have permission to list task \
+                                     pods and proxy to nodes?): {e:#}"
                                 );
                             }
                         }

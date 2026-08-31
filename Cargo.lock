@@ -2823,6 +2823,7 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "futures",
+ "http",
  "k8s-openapi",
  "kube",
  "planetary-db",

@@ -33,6 +33,7 @@ chrono.workspace = true
 clap = { workspace = true, optional = true }
 clap-verbosity-flag = { workspace = true, optional = true }
 futures.workspace = true
+http.workspace = true
 k8s-openapi.workspace = true
 kube.workspace = true
 planetary-db = { version = "0.1.0", path = "../db" }

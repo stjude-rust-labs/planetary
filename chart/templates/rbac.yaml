@@ -65,12 +65,38 @@ rules:
 - apiGroups: [""]
   resources: ["persistentvolumeclaims"]
   verbs: ["delete"]
-{{- if gt (int .Values.monitor.usageSampleInterval) 0 }}
-- apiGroups: ["metrics.k8s.io"]
-  resources: ["pods"]
-  verbs: ["list"]
-{{- end }}
 ---
+{{- if gt (int .Values.monitor.usageSampleInterval) 0 }}
+# Cluster role for the monitor to read kubelet resource metrics through the
+# API server's node proxy; granted only when task resource usage sampling is
+# enabled.
+#
+# Note: `nodes/proxy` permits proxying to any kubelet endpoint; it is
+# required to read `/metrics/resource` from the nodes hosting task pods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-monitor-node-metrics
+rules:
+- apiGroups: [""]
+  resources: ["nodes/proxy"]
+  verbs: ["get"]
+---
+# Cluster role binding for the monitor to read kubelet resource metrics
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-monitor-node-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-monitor-node-metrics
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.monitor.account.name }}
+  namespace: {{ .Release.Namespace }}
+---
+{{- end }}
 # Service account for the monitor
 apiVersion: v1
 kind: ServiceAccount

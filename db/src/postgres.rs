@@ -107,17 +107,16 @@ pub enum Error {
 }
 
 /// Converts a task model into a TES task.
-fn into_task<T, C>(task: T, containers: Vec<C>) -> Task
+///
+/// The task log metadata is built from the task's per-container resource
+/// usage aggregates, if any were recorded.
+fn into_task<T, C>(task: T, containers: Vec<C>, usage: Vec<models::ContainerUsage>) -> Task
 where
-    T: Into<(
-        Task,
-        Vec<OutputFile>,
-        Vec<String>,
-        Option<serde_json::Value>,
-    )>,
+    T: Into<(Task, Vec<OutputFile>, Vec<String>)>,
     C: Into<ExecutorLog>,
 {
-    let (mut task, outputs, system_logs, metadata) = task.into();
+    let (mut task, outputs, system_logs) = task.into();
+    let metadata = models::resource_usage_metadata(&usage);
     let executor_logs: Vec<_> = containers.into_iter().map(Into::into).collect();
 
     if !outputs.is_empty()
@@ -279,7 +278,14 @@ impl Database for PostgresDatabase {
                     .await
                     .map_err(Error::Diesel)?;
 
-                Ok(TaskResponse::Basic(into_task(task, containers)))
+                let usage = models::ContainerUsage::belonging_to(&task)
+                    .select(models::ContainerUsage::as_select())
+                    .order_by(schema::task_container_usage::container_name)
+                    .load(&mut conn)
+                    .await
+                    .map_err(Error::Diesel)?;
+
+                Ok(TaskResponse::Basic(into_task(task, containers, usage)))
             }
             View::Full => {
                 let task = schema::tasks::table
@@ -303,7 +309,14 @@ impl Database for PostgresDatabase {
                     .await
                     .map_err(Error::Diesel)?;
 
-                Ok(TaskResponse::Full(into_task(task, containers)))
+                let usage = models::ContainerUsage::belonging_to(&task)
+                    .select(models::ContainerUsage::as_select())
+                    .order_by(schema::task_container_usage::container_name)
+                    .load(&mut conn)
+                    .await
+                    .map_err(Error::Diesel)?;
+
+                Ok(TaskResponse::Full(into_task(task, containers, usage)))
             }
         }
     }
@@ -419,6 +432,14 @@ impl Database for PostgresDatabase {
                     Some((offset as usize + tasks.len()).to_string())
                 };
 
+                let usage = models::ContainerUsage::belonging_to(&tasks)
+                    .select(models::ContainerUsage::as_select())
+                    .order_by(schema::task_container_usage::container_name)
+                    .load(&mut conn)
+                    .await
+                    .map_err(Error::Diesel)?
+                    .grouped_by(&tasks);
+
                 Ok((
                     models::BasicContainer::belonging_to(&tasks)
                         .select(models::BasicContainer::as_select())
@@ -429,8 +450,11 @@ impl Database for PostgresDatabase {
                         .map_err(Error::Diesel)?
                         .grouped_by(&tasks)
                         .into_iter()
+                        .zip(usage)
                         .zip(tasks)
-                        .map(|(containers, task)| TaskResponse::Basic(into_task(task, containers)))
+                        .map(|((containers, usage), task)| {
+                            TaskResponse::Basic(into_task(task, containers, usage))
+                        })
                         .collect(),
                     token,
                 ))
@@ -450,6 +474,14 @@ impl Database for PostgresDatabase {
                     Some((offset as usize + tasks.len()).to_string())
                 };
 
+                let usage = models::ContainerUsage::belonging_to(&tasks)
+                    .select(models::ContainerUsage::as_select())
+                    .order_by(schema::task_container_usage::container_name)
+                    .load(&mut conn)
+                    .await
+                    .map_err(Error::Diesel)?
+                    .grouped_by(&tasks);
+
                 Ok((
                     models::FullContainer::belonging_to(&tasks)
                         .select(models::FullContainer::as_select())
@@ -460,8 +492,11 @@ impl Database for PostgresDatabase {
                         .map_err(Error::Diesel)?
                         .grouped_by(&tasks)
                         .into_iter()
+                        .zip(usage)
                         .zip(tasks)
-                        .map(|(containers, task)| TaskResponse::Full(into_task(task, containers)))
+                        .map(|((containers, usage), task)| {
+                            TaskResponse::Full(into_task(task, containers, usage))
+                        })
                         .collect(),
                     token,
                 ))
@@ -643,7 +678,7 @@ impl Database for PostgresDatabase {
 
     async fn add_task_resource_usage_samples(
         &self,
-        samples: &[(String, crate::ResourceUsageSample)],
+        samples: &[crate::ContainerUsageSample],
     ) -> DatabaseResult<()> {
         use diesel::pg::sql_types::Array;
         use diesel::sql_types::BigInt;
@@ -657,32 +692,44 @@ impl Database for PostgresDatabase {
         }
 
         let mut ids = Vec::with_capacity(samples.len());
+        let mut names = Vec::with_capacity(samples.len());
         let mut memory = Vec::with_capacity(samples.len());
         let mut cpu = Vec::with_capacity(samples.len());
-        for (tes_id, sample) in samples {
-            ids.push(tes_id.as_str());
+        for sample in samples {
+            ids.push(sample.tes_id.as_str());
+            names.push(sample.container_name.as_str());
             memory.push(sample.memory_bytes);
             cpu.push(sample.cpu_time_delta_ms);
         }
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        // Fold the samples into each task's running aggregate in a single
-        // statement; folding in the database ensures that aggregation
+        // Fold the samples into each container's running aggregate in a
+        // single statement; folding in the database ensures that aggregation
         // survives monitor restarts. A NULL dimension leaves the
-        // corresponding aggregate untouched.
+        // corresponding aggregate untouched. Samples for unknown tasks are
+        // dropped by the join.
         sql_query(
-            "UPDATE tasks SET peak_memory_bytes = CASE WHEN s.memory_bytes IS NULL THEN \
-             peak_memory_bytes ELSE GREATEST(COALESCE(peak_memory_bytes, 0), s.memory_bytes) END, \
-             memory_total_bytes = CASE WHEN s.memory_bytes IS NULL THEN memory_total_bytes ELSE \
-             COALESCE(memory_total_bytes, 0) + s.memory_bytes END, memory_sample_count = CASE \
-             WHEN s.memory_bytes IS NULL THEN memory_sample_count ELSE \
-             COALESCE(memory_sample_count, 0) + 1 END, cpu_time_ms = CASE WHEN \
-             s.cpu_time_delta_ms IS NULL THEN cpu_time_ms ELSE COALESCE(cpu_time_ms, 0) + \
-             s.cpu_time_delta_ms END FROM UNNEST($1::text[], $2::bigint[], $3::bigint[]) AS \
-             s(tes_id, memory_bytes, cpu_time_delta_ms) WHERE tasks.tes_id = s.tes_id",
+            "INSERT INTO task_container_usage (task_id, container_name, peak_memory_bytes, \
+             memory_total_bytes, memory_sample_count, cpu_time_ms) SELECT t.id, s.container_name, \
+             s.memory_bytes, s.memory_bytes, CASE WHEN s.memory_bytes IS NULL THEN 0 ELSE 1 END, \
+             s.cpu_time_delta_ms FROM UNNEST($1::text[], $2::text[], $3::bigint[], $4::bigint[]) \
+             AS s(tes_id, container_name, memory_bytes, cpu_time_delta_ms) JOIN tasks t ON \
+             t.tes_id = s.tes_id ON CONFLICT (task_id, container_name) DO UPDATE SET \
+             peak_memory_bytes = CASE WHEN EXCLUDED.peak_memory_bytes IS NULL THEN \
+             task_container_usage.peak_memory_bytes ELSE \
+             GREATEST(COALESCE(task_container_usage.peak_memory_bytes, 0), \
+             EXCLUDED.peak_memory_bytes) END, memory_total_bytes = CASE WHEN \
+             EXCLUDED.memory_total_bytes IS NULL THEN task_container_usage.memory_total_bytes \
+             ELSE COALESCE(task_container_usage.memory_total_bytes, 0) + \
+             EXCLUDED.memory_total_bytes END, memory_sample_count = \
+             COALESCE(task_container_usage.memory_sample_count, 0) + \
+             EXCLUDED.memory_sample_count, cpu_time_ms = CASE WHEN EXCLUDED.cpu_time_ms IS NULL \
+             THEN task_container_usage.cpu_time_ms ELSE \
+             COALESCE(task_container_usage.cpu_time_ms, 0) + EXCLUDED.cpu_time_ms END",
         )
         .bind::<Array<Text>, _>(&ids)
+        .bind::<Array<Text>, _>(&names)
         .bind::<Array<Nullable<BigInt>>, _>(&memory)
         .bind::<Array<Nullable<BigInt>>, _>(&cpu)
         .execute(&mut conn)

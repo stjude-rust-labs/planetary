@@ -60,8 +60,8 @@ pub struct Args {
     keep_interval: u64,
 
     /// The interval (in seconds) for sampling task pod resource usage from
-    /// the Kubernetes metrics API; requires the metrics server to be
-    /// installed in the cluster.
+    /// the kubelets hosting task pods (through the Kubernetes API server's
+    /// node proxy).
     ///
     /// A value of zero (the default) disables resource usage sampling.
     #[clap(long, env, default_value_t = USAGE_SAMPLE_INTERVAL_SECONDS)]

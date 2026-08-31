@@ -100,20 +100,27 @@ pub struct TaskTemplateData {
     pub executors: Vec<Executor>,
 }
 
-/// A single resource usage sample for a task's pod.
+/// A single resource usage sample for one container of a task's pod.
+///
+/// Containers are identified by their Kubernetes container name (`inputs`,
+/// `executor-N`, or `outputs`).
 ///
 /// Each dimension is optional; a dimension that could not be measured for a
-/// sampling round is `None` and does not affect the task's aggregate.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ResourceUsageSample {
-    /// The sampled working set memory of the pod, in bytes.
+/// sampling round is `None` and does not affect the container's aggregate.
+#[derive(Debug, Clone, Default)]
+pub struct ContainerUsageSample {
+    /// The TES identifier of the task.
+    pub tes_id: String,
+    /// The name of the container within the task's pod.
+    pub container_name: String,
+    /// The sampled working set memory of the container, in bytes.
     pub memory_bytes: Option<i64>,
-    /// The CPU time consumed by the pod since the previous sample, in
+    /// The CPU time consumed by the container since the previous sample, in
     /// milliseconds.
     pub cpu_time_delta_ms: Option<i64>,
 }
 
-impl ResourceUsageSample {
+impl ContainerUsageSample {
     /// Whether the sample carries no measurements.
     pub fn is_empty(&self) -> bool {
         self.memory_bytes.is_none() && self.cpu_time_delta_ms.is_none()
@@ -195,19 +202,21 @@ pub trait Database: Send + Sync + 'static {
     /// Appends the given messages to the task's system log.
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()>;
 
-    /// Records a round of resource usage samples for tasks.
+    /// Records a round of per-container resource usage samples for tasks.
     ///
-    /// Samples are folded into each task's running aggregate: the peak
-    /// working set memory is kept, the sampled memory is added to the running
-    /// total used for computing the average, and the CPU time delta is
-    /// accumulated. A `None` dimension in a sample leaves the corresponding
-    /// aggregate untouched.
+    /// Samples are folded into each task container's running aggregate: the
+    /// peak working set memory is kept, the sampled memory is added to the
+    /// running total used for computing the average, and the CPU time delta
+    /// is accumulated. A `None` dimension in a sample leaves the
+    /// corresponding aggregate untouched.
     ///
-    /// The aggregate is reported in the task's log metadata using the
-    /// `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys.
+    /// The aggregates are reported in the task's log metadata: the
+    /// `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys carry
+    /// the usage of the task's executor containers, and the `resource_usage`
+    /// key carries the per-container breakdown.
     async fn add_task_resource_usage_samples(
         &self,
-        samples: &[(String, ResourceUsageSample)],
+        samples: &[ContainerUsageSample],
     ) -> DatabaseResult<()>;
 
     /// Inserts an internal system error with the database.

@@ -58,8 +58,8 @@ pub struct Server {
     #[builder(into)]
     keep_interval: Duration,
 
-    /// The interval for sampling task pod resource usage from the Kubernetes
-    /// metrics API.
+    /// The interval for sampling task pod resource usage from the kubelets
+    /// hosting task pods (through the Kubernetes API server's node proxy).
     ///
     /// `None` disables resource usage sampling.
     usage_sample_interval: Option<Duration>,

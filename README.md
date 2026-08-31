@@ -352,30 +352,72 @@ Planetary can optionally sample the resource usage of task pods and report it
 through the TES API.
 
 Sampling is disabled by default and is enabled by setting the chart value
-`monitor.usageSampleInterval` to a sampling interval in seconds. It requires
-the [Kubernetes metrics server](https://github.com/kubernetes-sigs/metrics-server)
-(or another `metrics.k8s.io` API provider) to be installed in the cluster.
+`monitor.usageSampleInterval` to a sampling interval in seconds.
 
-When enabled, the monitor periodically samples each task pod's usage and folds
-the samples into a per-task aggregate. The aggregate is reported in the task's
-log `metadata` (visible in the `BASIC` and `FULL` task views) using the
-following keys, with all values encoded as strings:
+Usage is read from the `/metrics/resource` endpoint of the kubelets hosting
+task pods, through the Kubernetes API server's node proxy. The
+[Kubernetes metrics server](https://github.com/kubernetes-sigs/metrics-server)
+is deliberately **not** used: it only serves metrics for pods in the
+`Running` phase — task pods execute their work in init containers and remain
+`Pending` while executing — and its documentation states that it is meant
+only for autoscaling purposes, directing monitoring consumers to collect from
+the kubelet `/metrics/resource` endpoint directly.
+
+When sampling is enabled, the chart grants the monitor a cluster role with
+the `get` verb on `nodes/proxy`, which the monitor uses to read the resource
+metrics of the nodes hosting task pods. Note that `nodes/proxy` permits
+proxying to any kubelet endpoint; grant it only if this trade-off is
+acceptable in your cluster.
+
+The monitor periodically samples the usage of each of a task pod's
+containers and folds the samples into per-container aggregates. The
+aggregates are reported in the task's log `metadata` (visible in the `BASIC`
+and `FULL` task views), with all values encoded as strings.
+
+The task-level keys cover the task's **executor containers only** (excluding
+Planetary's input and output transporter containers):
 
 | Key                 | Meaning                                          |
 | ------------------- | ------------------------------------------------ |
-| `peak_memory_bytes` | peak sampled memory of the task pod, in bytes    |
-| `avg_memory_bytes`  | average sampled memory of the task pod, in bytes; arithmetic mean of samples taken at the sampling interval, not time-weighted |
-| `cpu_time_ms`       | estimated CPU time of the task pod, in milliseconds |
+| `peak_memory_bytes` | peak sampled memory across the task's executors, in bytes |
+| `avg_memory_bytes`  | average sampled memory of the task's executors, in bytes; arithmetic mean of samples taken at the sampling interval, not time-weighted |
+| `cpu_time_ms`       | CPU time consumed by the task's executors, in milliseconds |
+
+The `resource_usage` key carries a per-container breakdown as an object keyed
+by container name, where `inputs` and `outputs` are Planetary's transporter
+containers and `executor-N` corresponds to `executors[N]` of the TES task:
+
+```json
+{
+  "peak_memory_bytes": "134217728",
+  "avg_memory_bytes": "100663296",
+  "cpu_time_ms": "4520",
+  "resource_usage": {
+    "inputs":     { "peak_memory_bytes": "8388608",   "avg_memory_bytes": "8388608",   "cpu_time_ms": "150" },
+    "executor-0": { "peak_memory_bytes": "134217728", "avg_memory_bytes": "100663296", "cpu_time_ms": "4520" },
+    "outputs":    { "peak_memory_bytes": "16777216",  "avg_memory_bytes": "16777216",  "cpu_time_ms": "230" }
+  }
+}
+```
 
 Notes on semantics:
 
 * Memory values are the Kubernetes _working set_ (which may include file-backed
-  cache pages) summed across the pod's containers, not process RSS.
-* CPU time is estimated by integrating sampled CPU usage rates over the
-  sampling interval; it is an approximation, and periods where the metrics API
-  is unavailable are not extrapolated.
+  cache pages), not process RSS.
+* CPU time is derived from the kubelet's cumulative per-container CPU
+  counters, and attribution is at-most-once so that CPU time is never
+  recorded twice: a transient sampling failure loses nothing (the next
+  counter delta spans the gap), while CPU consumed during a monitor restart
+  is not attributed; a restarted container restarts its attribution from the
+  new counter.
+* A container that starts and completes between two sampling rounds is never
+  observed and is absent from `resource_usage`; absence means "not sampled,"
+  not zero usage.
 * Usage is aggregated in the database, so reported values survive monitor
   restarts.
+* Task pods must run on nodes with a real kubelet; virtual nodes (e.g.
+  AKS virtual nodes backed by Azure Container Instances) are not supported
+  for task execution.
 
 ## 🚀 Getting Started
 
