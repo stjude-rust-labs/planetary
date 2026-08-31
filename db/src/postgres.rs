@@ -165,8 +165,8 @@ impl PostgresDatabase {
 
         let p = pool.clone();
 
-        // Span a task that is responsible for removing connections from the pool that
-        // exceed
+        // Span a task that is responsible for removing connections from the
+        // pool that exceed
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(POOL_RETAIN_INTERVAL).await;
@@ -200,8 +200,8 @@ impl PostgresDatabase {
             }
         }
 
-        // Required to use a direct connection here as `diesel-migration` doesn't
-        // support async
+        // Required to use a direct connection here as `diesel-migration`
+        // doesn't support async
         let mut conn = diesel::pg::PgConnection::establish(self.url.expose_secret())?;
         HarnessWithOutput::new(&mut conn, std::io::LineWriter::new(Writer))
             .run_pending_migrations(MIGRATIONS)
@@ -599,8 +599,9 @@ impl Database for PostgresDatabase {
 
         let updated = conn
             .transaction(async |conn| {
-                // TODO: currently diesel hasn't released support for the PostgreSQL
-                // `array_cat` function; remove the raw query when diesel supports it
+                // TODO: currently diesel hasn't released support for the
+                // PostgreSQL `array_cat` function; remove the
+                // raw query when diesel supports it
                 let updated: Option<UpdatedTask> = sql_query(
                     "UPDATE tasks SET state = $1, system_logs = array_cat(system_logs, $2) WHERE \
                      tes_id = $3 AND state = ANY ($4) RETURNING id",

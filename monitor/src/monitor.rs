@@ -141,9 +141,9 @@ impl State {
 
         let template = Template::new(templates_dir.into())?;
 
-        // Do an up-front rendering with a dummy identifier to catch errors in the
-        // template. Note: this will not catch an error in the template that would
-        // result from a branch or loop not taken.
+        // Do an up-front rendering with a dummy identifier to catch errors in
+        // the template. Note: this will not catch an error in the
+        // template that would result from a branch or loop not taken.
         template
             .render_id_only("validation", &discovery, &namespaces.tasks)
             .context("template failed initial validation")?;
@@ -400,7 +400,8 @@ impl Monitor {
                 let entry = match orchestrators.entry(id) {
                     Entry::Occupied(e) => e,
                     Entry::Vacant(e) => {
-                        // Get the orchestrator's metadata; if we fail to get the metadata, assume
+                        // Get the orchestrator's metadata; if we fail to get
+                        // the metadata, assume
                         // the orchestrator exists for now
                         let exists = planetary_pods
                             .get_metadata_opt(e.key())
@@ -414,7 +415,8 @@ impl Monitor {
 
                 // If the orchestrator doesn't exist, attempt to adopt it
                 if !*entry.get() {
-                    // SAFETY: we don't include pods in the map that do not have names
+                    // SAFETY: we don't include pods in the map that do not have
+                    // names
                     let name = pod.name().expect("missing pod name");
 
                     info!(
@@ -458,8 +460,8 @@ impl Monitor {
     ) -> Result<()> {
         debug!("checking for missing Kubernetes resources");
 
-        // Query for ids for in-progress tasks that have existed since before the
-        // creation delta
+        // Query for ids for in-progress tasks that have existed since before
+        // the creation delta
         let ids = database
             .get_in_progress_tasks(Utc::now() - TASK_CREATION_DELTA)
             .await?;
