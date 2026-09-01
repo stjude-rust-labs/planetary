@@ -210,6 +210,10 @@ pub trait Database: Send + Sync + 'static {
     /// is accumulated. A `None` dimension in a sample leaves the
     /// corresponding aggregate untouched.
     ///
+    /// The samples may contain multiple entries for the same task and
+    /// container name (e.g. when more than one pod carries the same task
+    /// label); each entry is folded as an independent observation.
+    ///
     /// The aggregates are reported in the task's log metadata: the
     /// `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys carry
     /// the usage of the task's executor containers, and the `resource_usage`

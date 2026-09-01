@@ -91,8 +91,9 @@ research to create a complete list of concerns to consider in your situation:
 
   Note that enabling [task resource usage reporting](#task-resource-usage-reporting)
   (`monitor.usageSampleInterval > 0`; disabled by default) grants the monitor
-  a **cluster-scoped** `get` permission on `nodes/proxy`, which permits
-  read access to any kubelet endpoint on any node. See that section for the
+  a **cluster-scoped** `get` permission on `nodes/proxy`, which permits read
+  access to the entire kubelet API of every node — Kubernetes cannot scope
+  `nodes/proxy` to specific kubelet paths. See that section for the
   trade-off discussion.
 
   Review these to ensure they align with your internal access control policies
@@ -218,6 +219,13 @@ There are currently four images created for use with Planetary:
   for downloading task inputs and uploading task outputs.
 
 ### API Server Request Authentication
+
+> [!NOTE]
+> The Planetary API server serves the TES API under the `/v1` path prefix.
+> When configuring a TES client, use a base URL that includes the prefix
+> (e.g. `http://localhost:8080/v1`), as clients append endpoint paths like
+> `/tasks` and `/service-info` to it; omitting the prefix results in `404
+> Not Found` responses.
 
 The Planetary API server ***performs no authentication of requests***.
 
@@ -356,12 +364,14 @@ additionally grants the monitor a **cluster-scoped** role with the `get` verb
 on `nodes/proxy`, used to read the kubelet `/metrics/resource` endpoint of
 the nodes hosting task pods through the API server's node proxy. This is the
 only cluster-scoped permission in the chart, and its reach is broader than
-its use: `get` on `nodes/proxy` permits read access to *any* kubelet endpoint
-on *any* node — including pod specifications (which may contain secrets
-passed as environment variables), container logs, and node stats — though it
-does not permit `exec`, `attach`, or `port-forward` (which require the
-`create` verb). If this is not acceptable in your cluster, leave usage
-sampling disabled.
+its use: Kubernetes RBAC cannot scope `nodes/proxy` to specific kubelet
+paths, so the grant permits read access to the *entire* kubelet API of
+*every* node — including pod specifications (which may contain secrets
+passed as environment variables), container logs, and node stats. The `get`
+verb restricts the HTTP method (ruling out `exec`, `attach`, and
+`port-forward`, which require `create`) but not which endpoints are
+readable. If this is not acceptable in your cluster, leave usage sampling
+disabled.
 
 See [`rbac.yaml`](./chart/templates/rbac.yaml) for more information.
 
@@ -384,14 +394,13 @@ the kubelet `/metrics/resource` endpoint directly.
 
 When sampling is enabled, the chart grants the monitor a cluster role with
 the `get` verb on `nodes/proxy`, which the monitor uses to read the resource
-metrics of the nodes hosting task pods. Note that `nodes/proxy` reaches
-further than the monitor's use of it: it permits read access to any kubelet
-endpoint on any node, including the pod specifications of all pods on the
-node (which may contain secrets passed as environment variables), container
-logs, and node stats — though not `exec`, `attach`, or `port-forward`, which
-require the `create` verb. Enable sampling only if this trade-off is
-acceptable in your cluster; otherwise leave it disabled (the default), in
-which case the cluster role is not created.
+metrics of the nodes hosting task pods. Note that this grant necessarily
+reaches further than the monitor's use of it — Kubernetes cannot restrict
+`nodes/proxy` to specific kubelet paths, so it permits read access to the
+entire kubelet API of every node (see
+[RBAC Authorization](#rbac-authorization) for the details). Enable sampling
+only if this trade-off is acceptable in your cluster; otherwise leave it
+disabled (the default), in which case the cluster role is not created.
 
 The monitor periodically samples the usage of each of a task pod's
 containers and folds the samples into per-container aggregates. The
@@ -430,10 +439,10 @@ Notes on semantics:
   cache pages), not process RSS.
 * CPU time is derived from the kubelet's cumulative per-container CPU
   counters, and attribution is at-most-once so that CPU time is never
-  recorded twice: a transient sampling failure loses nothing (the next
-  counter delta spans the gap), while CPU consumed during a monitor restart
-  is not attributed; a restarted container restarts its attribution from the
-  new counter.
+  recorded twice: a transient sampling or database write failure loses
+  nothing (the next successfully recorded counter delta spans the gap),
+  while CPU consumed during a monitor restart is not attributed; a restarted
+  container restarts its attribution from the new counter.
 * A container that starts and completes between two sampling rounds is never
   observed and is absent from `resource_usage`; absence means "not sampled,"
   not zero usage.
@@ -626,6 +635,11 @@ curl -v http://localhost:8080/v1/service-info
 ```
 
 Congratulations, Planetary is now ready to receive requests 🎉!
+
+**Note:** when pointing a TES client at this deployment, configure the
+client's base URL as `http://localhost:8080/v1` — the `/v1` prefix is
+required, as TES clients append endpoint paths (e.g. `/tasks`) to the base
+URL.
 
 ### Deploying Development Changes
 

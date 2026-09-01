@@ -710,15 +710,26 @@ impl Database for PostgresDatabase {
         // survives monitor restarts. A NULL dimension leaves the
         // corresponding aggregate untouched. Samples for unknown tasks are
         // dropped by the join.
+        //
+        // The batch is aggregated by (task, container) before the upsert:
+        // a batch may carry multiple observations for the same container
+        // (e.g. when more than one pod carries the same task label, as with
+        // a customized task template or a replacement pod overlapping the
+        // pod it replaces), and `ON CONFLICT DO UPDATE` cannot affect the
+        // same row twice within one statement. Each observation folds
+        // exactly as if recorded individually: the batch peak is `MAX`, the
+        // batch total is `SUM`, the sample count is the number of non-NULL
+        // memory observations, and the batch CPU time is `SUM` (NULL if no
+        // observation carried CPU time).
         sql_query(
             "INSERT INTO task_container_usage (task_id, container_name, peak_memory_bytes, \
              memory_total_bytes, memory_sample_count, cpu_time_ms) SELECT t.id, s.container_name, \
-             s.memory_bytes, s.memory_bytes, CASE WHEN s.memory_bytes IS NULL THEN 0 ELSE 1 END, \
-             s.cpu_time_delta_ms FROM UNNEST($1::text[], $2::text[], $3::bigint[], $4::bigint[]) \
-             AS s(tes_id, container_name, memory_bytes, cpu_time_delta_ms) JOIN tasks t ON \
-             t.tes_id = s.tes_id ON CONFLICT (task_id, container_name) DO UPDATE SET \
-             peak_memory_bytes = CASE WHEN EXCLUDED.peak_memory_bytes IS NULL THEN \
-             task_container_usage.peak_memory_bytes ELSE \
+             MAX(s.memory_bytes), SUM(s.memory_bytes), COUNT(s.memory_bytes), \
+             SUM(s.cpu_time_delta_ms) FROM UNNEST($1::text[], $2::text[], $3::bigint[], \
+             $4::bigint[]) AS s(tes_id, container_name, memory_bytes, cpu_time_delta_ms) JOIN \
+             tasks t ON t.tes_id = s.tes_id GROUP BY t.id, s.container_name ON CONFLICT (task_id, \
+             container_name) DO UPDATE SET peak_memory_bytes = CASE WHEN \
+             EXCLUDED.peak_memory_bytes IS NULL THEN task_container_usage.peak_memory_bytes ELSE \
              GREATEST(COALESCE(task_container_usage.peak_memory_bytes, 0), \
              EXCLUDED.peak_memory_bytes) END, memory_total_bytes = CASE WHEN \
              EXCLUDED.memory_total_bytes IS NULL THEN task_container_usage.memory_total_bytes \
