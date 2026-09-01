@@ -683,6 +683,7 @@ impl Database for PostgresDatabase {
     ) -> DatabaseResult<()> {
         use diesel::pg::sql_types::Array;
         use diesel::sql_types::BigInt;
+        use diesel::sql_types::Double;
         use diesel::sql_types::Nullable;
         use diesel::sql_types::Text;
         use diesel::*;
@@ -693,43 +694,75 @@ impl Database for PostgresDatabase {
         }
 
         let mut ids = Vec::with_capacity(samples.len());
+        let mut pods = Vec::with_capacity(samples.len());
         let mut names = Vec::with_capacity(samples.len());
         let mut memory = Vec::with_capacity(samples.len());
         let mut cpu = Vec::with_capacity(samples.len());
+        let mut start = Vec::with_capacity(samples.len());
         for sample in samples {
             ids.push(sample.tes_id.as_str());
+            pods.push(sample.pod_name.as_str());
             names.push(sample.container_name.as_str());
             memory.push(sample.memory_bytes);
-            cpu.push(sample.cpu_time_delta_ms);
+            cpu.push(sample.cpu_seconds);
+            start.push(sample.start_time_seconds);
         }
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
-        // Fold the samples into each container's running aggregate in a
-        // single statement; folding in the database ensures that aggregation
-        // survives monitor restarts. A NULL dimension leaves the
-        // corresponding aggregate untouched. Samples for unknown tasks are
-        // dropped by the join.
+        // Fold the observations into each container's running aggregate in
+        // a single atomic statement. Observations carry cumulative CPU
+        // counters; the delta of each counter is computed against the
+        // per-(task, pod, container) baseline stored in
+        // `task_container_baseline`, and the baseline is advanced in the
+        // same statement so that it is durable with the aggregate. This
+        // makes recording idempotent: re-recording an observation whose
+        // write already committed (e.g. after an ambiguous commit outcome
+        // where the database committed but the monitor never saw the
+        // response) yields a zero delta, and aggregation survives monitor
+        // restarts without loss or double counting.
         //
-        // The batch is aggregated by (task, container) before the upsert:
-        // a batch may carry multiple observations for the same container
-        // (e.g. when more than one pod carries the same task label, as with
-        // a customized task template or a replacement pod overlapping the
-        // pod it replaces), and `ON CONFLICT DO UPDATE` cannot affect the
-        // same row twice within one statement. Each observation folds
-        // exactly as if recorded individually: the batch peak is `MAX`, the
-        // batch total is `SUM`, the sample count is the number of non-NULL
-        // memory observations, and the batch CPU time is `SUM` (NULL if no
-        // observation carried CPU time).
+        // Delta semantics per observation: no stored baseline (first
+        // observation of the instance) or a restart (changed start time or
+        // a decreasing counter) attributes the full counter value;
+        // otherwise the monotonic delta since the baseline is attributed. A
+        // NULL dimension leaves the corresponding aggregate untouched.
+        // Observations for unknown tasks are dropped by the join.
+        //
+        // The aggregate upsert groups by (task, container): a batch may
+        // carry observations for the same container name from multiple pods
+        // (e.g. a customized task template or a replacement pod overlapping
+        // the pod it replaces), each accounted independently via its own
+        // baseline, and `ON CONFLICT DO UPDATE` cannot affect the same row
+        // twice within one statement.
+        //
+        // The statement's delta, idempotency, restart, and multi-pod
+        // semantics are exercised by the scenario battery in
+        // `postgres/usage-fold-scenarios.sql`, runnable with psql against a
+        // deployed database.
         sql_query(
-            "INSERT INTO task_container_usage (task_id, container_name, peak_memory_bytes, \
-             memory_total_bytes, memory_sample_count, cpu_time_ms) SELECT t.id, s.container_name, \
-             MAX(s.memory_bytes), SUM(s.memory_bytes), COUNT(s.memory_bytes), \
-             SUM(s.cpu_time_delta_ms) FROM UNNEST($1::text[], $2::text[], $3::bigint[], \
-             $4::bigint[]) AS s(tes_id, container_name, memory_bytes, cpu_time_delta_ms) JOIN \
-             tasks t ON t.tes_id = s.tes_id GROUP BY t.id, s.container_name ON CONFLICT (task_id, \
-             container_name) DO UPDATE SET peak_memory_bytes = CASE WHEN \
-             EXCLUDED.peak_memory_bytes IS NULL THEN task_container_usage.peak_memory_bytes ELSE \
+            "WITH s AS (SELECT t.id AS task_id, u.pod_name, u.container_name, u.memory_bytes, \
+             u.cpu_seconds, u.start_time_seconds FROM UNNEST($1::text[], $2::text[], $3::text[], \
+             $4::bigint[], $5::float8[], $6::float8[]) AS u(tes_id, pod_name, container_name, \
+             memory_bytes, cpu_seconds, start_time_seconds) JOIN tasks t ON t.tes_id = u.tes_id), \
+             d AS (SELECT s.task_id, s.pod_name, s.container_name, s.memory_bytes, s.cpu_seconds, \
+             s.start_time_seconds, CASE WHEN s.cpu_seconds IS NULL THEN NULL WHEN b.cpu_seconds \
+             IS NULL THEN s.cpu_seconds WHEN b.start_time_seconds IS NOT DISTINCT FROM \
+             s.start_time_seconds AND s.cpu_seconds >= b.cpu_seconds THEN s.cpu_seconds - \
+             b.cpu_seconds ELSE s.cpu_seconds END AS cpu_delta_seconds FROM s LEFT JOIN \
+             task_container_baseline b USING (task_id, pod_name, container_name)), advanced AS \
+             (INSERT INTO task_container_baseline (task_id, pod_name, container_name, \
+             start_time_seconds, cpu_seconds) SELECT task_id, pod_name, container_name, \
+             start_time_seconds, cpu_seconds FROM d WHERE cpu_seconds IS NOT NULL ON CONFLICT \
+             (task_id, pod_name, container_name) DO UPDATE SET start_time_seconds = \
+             EXCLUDED.start_time_seconds, cpu_seconds = EXCLUDED.cpu_seconds) INSERT INTO \
+             task_container_usage (task_id, container_name, peak_memory_bytes, \
+             memory_total_bytes, memory_sample_count, cpu_time_ms) SELECT task_id, \
+             container_name, MAX(memory_bytes), SUM(memory_bytes), COUNT(memory_bytes), \
+             CAST(SUM(cpu_delta_seconds) * 1000.0 AS bigint) FROM d GROUP BY task_id, \
+             container_name ON CONFLICT (task_id, container_name) DO UPDATE SET peak_memory_bytes \
+             = CASE WHEN EXCLUDED.peak_memory_bytes IS NULL THEN \
+             task_container_usage.peak_memory_bytes ELSE \
              GREATEST(COALESCE(task_container_usage.peak_memory_bytes, 0), \
              EXCLUDED.peak_memory_bytes) END, memory_total_bytes = CASE WHEN \
              EXCLUDED.memory_total_bytes IS NULL THEN task_container_usage.memory_total_bytes \
@@ -741,9 +774,11 @@ impl Database for PostgresDatabase {
              COALESCE(task_container_usage.cpu_time_ms, 0) + EXCLUDED.cpu_time_ms END",
         )
         .bind::<Array<Text>, _>(&ids)
+        .bind::<Array<Text>, _>(&pods)
         .bind::<Array<Text>, _>(&names)
         .bind::<Array<Nullable<BigInt>>, _>(&memory)
-        .bind::<Array<Nullable<BigInt>>, _>(&cpu)
+        .bind::<Array<Nullable<Double>>, _>(&cpu)
+        .bind::<Array<Nullable<Double>>, _>(&start)
         .execute(&mut conn)
         .await
         .map_err(Error::Diesel)?;

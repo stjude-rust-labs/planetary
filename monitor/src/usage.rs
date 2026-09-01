@@ -2,8 +2,8 @@
 //!
 //! When enabled, the monitor periodically reads the `/metrics/resource`
 //! endpoint of the kubelets hosting task pods (through the Kubernetes API
-//! server's node proxy) and folds each per-container sample into the task's
-//! aggregate resource usage in the database.
+//! server's node proxy) and records each per-container observation in the
+//! database, which folds it into the task's aggregate resource usage.
 //!
 //! The kubelet is read directly — rather than through the `metrics.k8s.io`
 //! API — for two reasons:
@@ -21,6 +21,17 @@
 //! The kubelet reports cumulative CPU time and instantaneous working set
 //! memory per container, keyed by namespace, pod, and container name, for
 //! all running containers (including init containers).
+//!
+//! Observations carry the *cumulative* CPU counter values; the database
+//! computes each counter's delta against a stored per-container baseline
+//! and advances the baseline atomically with the aggregate (see
+//! [`planetary_db::Database::add_task_resource_usage_samples`]). Keeping the
+//! accounting state durable with the write makes recording idempotent and
+//! exactly-once for observed counter movement: skipped or failed rounds are
+//! spanned by the next successful observation's delta, ambiguous database
+//! commit outcomes resolve to a zero delta on the next observation, and
+//! monitor restarts continue accounting from the stored baseline. The
+//! sampling client itself is stateless.
 //!
 //! The aggregate usage is reported through the TES API as task log metadata:
 //! the `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys carry
@@ -90,9 +101,9 @@ pub async fn list_task_pods(api: &Api<Pod>) -> Result<Vec<TaskPod>> {
 ///
 /// Bounds the impact of an unresponsive kubelet: a fetch that exceeds the
 /// timeout is treated like any other failed fetch, so the node's pods miss
-/// the round (losslessly — the next successful round's counter deltas span
-/// the gap) instead of stalling the sampling of other nodes or delaying
-/// monitor shutdown.
+/// the round (losslessly — the next successful observation's counter delta
+/// spans the gap) instead of stalling the sampling of other nodes or
+/// delaying monitor shutdown.
 const NODE_METRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Fetches the resource metrics of a node's kubelet through the API server's
@@ -213,212 +224,61 @@ pub fn parse_node_metrics(
     containers
 }
 
-/// The CPU sampling baseline of a container.
-#[derive(Debug, Clone, Copy)]
-struct ContainerBaseline {
-    /// The container's start time when last sampled, if reported.
-    start_time_seconds: Option<f64>,
-    /// The container's cumulative CPU time when last sampled, in seconds.
-    cpu_seconds: f64,
-}
-
-/// The staged baseline advancement produced by a round of
-/// [`UsageSampler::fold`].
+/// Builds resource usage observations from a round of per-container metrics
+/// points.
 ///
-/// The update must be applied with [`UsageSampler::commit`] only after the
-/// round's samples have been durably recorded; dropping the update instead
-/// (e.g. on a failed database write) leaves the sampler's baselines
-/// untouched, so the next successful round's counter deltas span the
-/// unrecorded round and no CPU time is lost.
-#[derive(Debug)]
-pub struct BaselineUpdate {
-    /// The baselines to replace the sampler's baselines with.
-    baselines: HashMap<(String, String), ContainerBaseline>,
-}
+/// Points for pods that are not task pods, and points carrying no
+/// measurements, are omitted. Observations are per pod container: if
+/// multiple pods carry the same task label, a round yields multiple
+/// observations for the same task and container name, which the database
+/// accounts independently via per-pod baselines.
+pub fn build_samples(
+    pods: &[TaskPod],
+    metrics: &HashMap<(String, String), ContainerMetrics>,
+) -> Vec<ContainerUsageSample> {
+    let tasks: HashMap<&str, &str> = pods
+        .iter()
+        .map(|pod| (pod.name.as_str(), pod.tes_id.as_str()))
+        .collect();
 
-/// Tracks per-container sampling state used to convert cumulative CPU
-/// counters into per-round CPU time deltas.
-#[derive(Debug)]
-pub struct UsageSampler {
-    /// The time the sampler was created, in seconds since the Unix epoch.
-    ///
-    /// Used to decide whether a newly observed container instance started
-    /// under observation (see [`UsageSampler::fold`]).
-    start_time_seconds: f64,
-    /// The sampling baseline of each container, keyed by pod name and
-    /// container name.
-    baselines: HashMap<(String, String), ContainerBaseline>,
-}
+    let mut samples = Vec::new();
 
-impl Default for UsageSampler {
-    fn default() -> Self {
-        Self::with_start(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs_f64())
-                .unwrap_or_default(),
-        )
-    }
-}
+    for ((pod, container), point) in metrics {
+        let Some(tes_id) = tasks.get(pod.as_str()) else {
+            continue;
+        };
 
-impl UsageSampler {
-    /// Creates a new usage sampler.
-    pub fn new() -> Self {
-        Self::default()
-    }
+        let sample = ContainerUsageSample {
+            tes_id: tes_id.to_string(),
+            pod_name: pod.clone(),
+            container_name: container.clone(),
+            memory_bytes: point.memory_bytes.map(|bytes| bytes as i64),
+            cpu_seconds: point.cpu_seconds,
+            start_time_seconds: point.start_time_seconds,
+        };
 
-    /// Creates a new usage sampler with the given start time, in seconds
-    /// since the Unix epoch.
-    fn with_start(start_time_seconds: f64) -> Self {
-        Self {
-            start_time_seconds,
-            baselines: HashMap::new(),
+        if !sample.is_empty() {
+            samples.push(sample);
         }
     }
 
-    /// Whether a container instance started while this sampler was
-    /// observing, according to the instance's reported start time.
-    ///
-    /// A container without a reported start time is conservatively treated
-    /// as predating the sampler.
-    fn born_under_observation(&self, point: &ContainerMetrics) -> bool {
-        point
-            .start_time_seconds
-            .is_some_and(|start| start >= self.start_time_seconds)
-    }
-
-    /// Folds a round of per-container metrics points into per-container
-    /// resource usage samples and a staged baseline update.
-    ///
-    /// The kubelet reports CPU time as a cumulative counter since container
-    /// start. To guarantee that CPU time is never recorded twice — the
-    /// aggregate in the database survives monitor restarts, while this
-    /// sampler's baselines do not — attribution is at-most-once:
-    ///
-    /// * A previously observed container instance attributes the counter delta
-    ///   since its previous observation. A skipped observation (e.g. a failed
-    ///   node metrics fetch) loses nothing, as the next delta spans the gap.
-    ///
-    /// * A newly observed instance (first sight, or a counter reset detected by
-    ///   a decreasing counter or a changed start time) attributes its full
-    ///   counter value only if it started under this sampler's observation;
-    ///   otherwise — a monitor restart, where the instance's prior usage may
-    ///   already be recorded — it only establishes a baseline, forgoing the CPU
-    ///   time consumed while unobserved. (For such a pre-existing instance, a
-    ///   round whose samples fail to be recorded also forgoes the CPU time
-    ///   consumed until the baseline is committed, consistent with the
-    ///   at-most-once posture.)
-    ///
-    /// Folding does not advance the sampler's baselines: the returned
-    /// [`BaselineUpdate`] must be committed with [`UsageSampler::commit`]
-    /// only after the samples have been durably recorded, so that a failed
-    /// database write cannot silently lose a round's CPU time.
-    ///
-    /// The staged update retains the baselines of containers whose pods
-    /// remain in the given task pod list; samples carrying no measurements
-    /// are omitted.
-    ///
-    /// Samples are per pod container: if multiple pods carry the same task
-    /// label, a round yields multiple samples for the same task and
-    /// container name, which the database folds as independent observations.
-    pub fn fold(
-        &self,
-        pods: &[TaskPod],
-        metrics: &HashMap<(String, String), ContainerMetrics>,
-    ) -> (Vec<ContainerUsageSample>, BaselineUpdate) {
-        let tasks: HashMap<&str, &str> = pods
-            .iter()
-            .map(|pod| (pod.name.as_str(), pod.tes_id.as_str()))
-            .collect();
-
-        let mut samples = Vec::new();
-        let mut baselines = self.baselines.clone();
-
-        for ((pod, container), point) in metrics {
-            let Some(tes_id) = tasks.get(pod.as_str()) else {
-                continue;
-            };
-
-            let key = (pod.clone(), container.clone());
-            let cpu_time_delta_ms = point.cpu_seconds.map(|cpu| {
-                let delta = match self.baselines.get(&key) {
-                    // Same container instance with a monotonic counter:
-                    // attribute the delta since the previous observation
-                    Some(baseline)
-                        if baseline.start_time_seconds == point.start_time_seconds
-                            && cpu >= baseline.cpu_seconds =>
-                    {
-                        cpu - baseline.cpu_seconds
-                    }
-                    // A newly observed container instance: attribute the
-                    // full counter value only if the instance started under
-                    // observation, so that a monitor restart cannot record
-                    // already-recorded CPU time twice
-                    _ if self.born_under_observation(point) => cpu,
-                    _ => 0.0,
-                };
-
-                baselines.insert(
-                    key.clone(),
-                    ContainerBaseline {
-                        start_time_seconds: point.start_time_seconds,
-                        cpu_seconds: cpu,
-                    },
-                );
-
-                (delta * 1000.0) as i64
-            });
-
-            let sample = ContainerUsageSample {
-                tes_id: tes_id.to_string(),
-                container_name: container.clone(),
-                memory_bytes: point.memory_bytes.map(|bytes| bytes as i64),
-                cpu_time_delta_ms,
-            };
-
-            if !sample.is_empty() {
-                samples.push(sample);
-            }
-        }
-
-        // Retain the baselines of containers whose pods still exist, so that
-        // a round missing a container's metrics (e.g. a failed node metrics
-        // fetch) does not restart the container's CPU attribution; state is
-        // dropped once the pod itself is gone
-        let pod_names: HashSet<&str> = pods.iter().map(|pod| pod.name.as_str()).collect();
-        baselines.retain(|(pod, _), _| pod_names.contains(pod.as_str()));
-
-        (samples, BaselineUpdate { baselines })
-    }
-
-    /// Commits a staged baseline update produced by [`UsageSampler::fold`].
-    ///
-    /// This must be called only after the corresponding round's samples have
-    /// been durably recorded; the samples are folded into the database in a
-    /// single atomic statement, so a round is either fully recorded and
-    /// committed or fully retried by the next round's counter deltas.
-    pub fn commit(&mut self, update: BaselineUpdate) {
-        self.baselines = update.baselines;
-    }
+    samples
 }
 
 /// Samples the resource usage of all task pods.
 ///
 /// Lists the task pods, fetches the kubelet resource metrics of each hosting
-/// node through the API server's node proxy, and folds the per-container
-/// metrics into resource usage samples and a staged baseline update. The
-/// update must be committed with [`UsageSampler::commit`] only after the
-/// samples have been durably recorded.
+/// node through the API server's node proxy, and builds the per-container
+/// resource usage observations for the database to record.
 ///
 /// A node whose metrics cannot be fetched is skipped (its pods simply miss a
-/// sampling round); an error is returned only if the task pods cannot be
-/// listed.
+/// sampling round, losslessly); an error is returned only if the task pods
+/// cannot be listed.
 pub async fn sample_task_pods(
     client: &Client,
     pods_api: &Api<Pod>,
     namespace: &str,
-    sampler: &UsageSampler,
-) -> Result<(Vec<ContainerUsageSample>, BaselineUpdate)> {
+) -> Result<Vec<ContainerUsageSample>> {
     let pods = list_task_pods(pods_api).await?;
 
     let nodes: HashSet<&str> = pods.iter().map(|pod| pod.node.as_str()).collect();
@@ -433,7 +293,7 @@ pub async fn sample_task_pods(
         }
     }
 
-    Ok(sampler.fold(&pods, &metrics))
+    Ok(build_samples(&pods, &metrics))
 }
 
 #[cfg(test)]
@@ -452,18 +312,6 @@ mod tests {
     /// Builds a metrics key for tests.
     fn key(pod: &str, container: &str) -> (String, String) {
         (pod.to_string(), container.to_string())
-    }
-
-    /// Folds a round and immediately commits the baseline update, as the
-    /// monitor does after a successful database write.
-    fn fold_committed(
-        sampler: &mut UsageSampler,
-        pods: &[TaskPod],
-        metrics: &HashMap<(String, String), ContainerMetrics>,
-    ) -> Vec<ContainerUsageSample> {
-        let (samples, update) = sampler.fold(pods, metrics);
-        sampler.commit(update);
-        samples
     }
 
     #[test]
@@ -490,8 +338,8 @@ node_cpu_usage_seconds_total 100.0
     }
 
     #[test]
-    fn first_observation_attributes_cpu_since_start() {
-        let mut sampler = UsageSampler::with_start(0.0);
+    fn samples_carry_cumulative_observations() {
+        let pods = [task_pod("task-pod", "task-1234")];
 
         let metrics = [(
             key("task-pod", "executor-0"),
@@ -503,87 +351,20 @@ node_cpu_usage_seconds_total 100.0
         )]
         .into();
 
-        let samples = fold_committed(&mut sampler, &[task_pod("task-pod", "task-1234")], &metrics);
+        let samples = build_samples(&pods, &metrics);
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].tes_id, "task-1234");
+        assert_eq!(samples[0].pod_name, "task-pod");
         assert_eq!(samples[0].container_name, "executor-0");
         assert_eq!(samples[0].memory_bytes, Some(1024));
-        // The container started under the sampler's observation, so its full
-        // counter value is attributed on first observation and CPU time
-        // consumed before the first sample is not lost
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(1500));
+        // The cumulative counter and start time are passed through for the
+        // database to compute the delta against its stored baseline
+        assert_eq!(samples[0].cpu_seconds, Some(1.5));
+        assert_eq!(samples[0].start_time_seconds, Some(1000.0));
     }
 
     #[test]
-    fn subsequent_observations_attribute_the_delta() {
-        let mut sampler = UsageSampler::with_start(0.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = |cpu: f64| ContainerMetrics {
-            cpu_seconds: Some(cpu),
-            memory_bytes: Some(2048),
-            start_time_seconds: Some(1000.0),
-        };
-
-        fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(1.5))].into(),
-        );
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(2.25))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(750));
-
-        // An unchanged counter yields a zero delta
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(2.25))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(0));
-    }
-
-    #[test]
-    fn counter_resets_restart_attribution() {
-        let mut sampler = UsageSampler::with_start(0.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = |cpu: f64, start: f64| ContainerMetrics {
-            cpu_seconds: Some(cpu),
-            memory_bytes: None,
-            start_time_seconds: Some(start),
-        };
-
-        fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(10.0, 1000.0))].into(),
-        );
-
-        // The container restarted: new start time and a lower counter; the
-        // new counter value is attributed rather than a negative delta
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(0.5, 2000.0))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(500));
-
-        // A decreasing counter without a start time change is also a reset
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(0.25, 2000.0))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(250));
-    }
-
-    #[test]
-    fn containers_are_tracked_independently() {
-        let mut sampler = UsageSampler::with_start(0.0);
+    fn containers_yield_independent_samples() {
         let pods = [task_pod("task-pod", "task-1234")];
 
         let metrics = [
@@ -606,21 +387,51 @@ node_cpu_usage_seconds_total 100.0
         ]
         .into();
 
-        let mut samples = fold_committed(&mut sampler, &pods, &metrics);
+        let mut samples = build_samples(&pods, &metrics);
         samples.sort_by(|a, b| a.container_name.cmp(&b.container_name));
 
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0].container_name, "executor-0");
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(2000));
+        assert_eq!(samples[0].cpu_seconds, Some(2.0));
         assert_eq!(samples[0].memory_bytes, Some(200));
         assert_eq!(samples[1].container_name, "inputs");
-        assert_eq!(samples[1].cpu_time_delta_ms, Some(500));
+        assert_eq!(samples[1].cpu_seconds, Some(0.5));
         assert_eq!(samples[1].memory_bytes, Some(100));
     }
 
     #[test]
+    fn multiple_pods_for_a_task_yield_per_pod_samples() {
+        let pods = [
+            task_pod("task-pod-a", "task-1234"),
+            task_pod("task-pod-b", "task-1234"),
+        ];
+
+        let point = ContainerMetrics {
+            cpu_seconds: Some(1.0),
+            memory_bytes: None,
+            start_time_seconds: Some(1000.0),
+        };
+        let metrics = [
+            (key("task-pod-a", "executor-0"), point),
+            (key("task-pod-b", "executor-0"), point),
+        ]
+        .into();
+
+        let mut samples = build_samples(&pods, &metrics);
+        samples.sort_by(|a, b| a.pod_name.cmp(&b.pod_name));
+
+        // The same task and container name from different pods yields
+        // distinct observations, accounted independently via per-pod
+        // baselines in the database
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].pod_name, "task-pod-a");
+        assert_eq!(samples[1].pod_name, "task-pod-b");
+        assert!(samples.iter().all(|s| s.tes_id == "task-1234"));
+        assert!(samples.iter().all(|s| s.container_name == "executor-0"));
+    }
+
+    #[test]
     fn unknown_pods_and_empty_points_are_skipped() {
-        let mut sampler = UsageSampler::with_start(0.0);
         let pods = [task_pod("task-pod", "task-1234")];
 
         let metrics = [
@@ -638,223 +449,7 @@ node_cpu_usage_seconds_total 100.0
         ]
         .into();
 
-        let samples = fold_committed(&mut sampler, &pods, &metrics);
+        let samples = build_samples(&pods, &metrics);
         assert!(samples.is_empty());
-    }
-
-    #[test]
-    fn baselines_are_dropped_with_their_pod() {
-        let mut sampler = UsageSampler::with_start(0.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = ContainerMetrics {
-            cpu_seconds: Some(1.0),
-            memory_bytes: None,
-            start_time_seconds: Some(1000.0),
-        };
-
-        fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "inputs"), point)].into(),
-        );
-        assert_eq!(sampler.baselines.len(), 1);
-
-        // The inputs container completed but its pod still exists: the
-        // baseline is retained alongside the executor's
-        fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point)].into(),
-        );
-        assert_eq!(sampler.baselines.len(), 2);
-
-        // The pod is gone: all of its baselines are dropped
-        fold_committed(&mut sampler, &[], &HashMap::new());
-        assert!(sampler.baselines.is_empty());
-    }
-
-    #[test]
-    fn a_skipped_round_does_not_double_count() {
-        let mut sampler = UsageSampler::with_start(0.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = |cpu: f64| ContainerMetrics {
-            cpu_seconds: Some(cpu),
-            memory_bytes: None,
-            start_time_seconds: Some(1000.0),
-        };
-
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(2.0))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(2000));
-
-        // The node metrics fetch failed for a round: no metrics for the
-        // container, but its pod still exists
-        let samples = fold_committed(&mut sampler, &pods, &HashMap::new());
-        assert!(samples.is_empty());
-
-        // The next observation attributes only the delta spanning the gap,
-        // not the full counter again
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(3.5))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(1500));
-    }
-
-    #[test]
-    fn preexisting_containers_only_establish_a_baseline() {
-        // The sampler starts after the container did (e.g. a monitor
-        // restart), so the container's counter may already be recorded
-        let mut sampler = UsageSampler::with_start(5000.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = |cpu: f64| ContainerMetrics {
-            cpu_seconds: Some(cpu),
-            memory_bytes: Some(1024),
-            start_time_seconds: Some(1000.0),
-        };
-
-        // The first observation must not re-attribute the counter
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(60.0))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(0));
-        // Memory is unaffected by the CPU attribution gate
-        assert_eq!(samples[0].memory_bytes, Some(1024));
-
-        // Subsequent observations attribute deltas as usual
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(61.5))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(1500));
-    }
-
-    #[test]
-    fn containers_without_start_times_are_treated_as_preexisting() {
-        let mut sampler = UsageSampler::with_start(0.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = |cpu: f64| ContainerMetrics {
-            cpu_seconds: Some(cpu),
-            memory_bytes: None,
-            start_time_seconds: None,
-        };
-
-        // Without a start time the instance cannot be proven to have started
-        // under observation, so only a baseline is established
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(2.0))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(0));
-
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(2.5))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(500));
-    }
-
-    #[test]
-    fn uncommitted_rounds_are_spanned_by_the_next_delta() {
-        let mut sampler = UsageSampler::with_start(0.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = |cpu: f64| ContainerMetrics {
-            cpu_seconds: Some(cpu),
-            memory_bytes: None,
-            start_time_seconds: Some(1000.0),
-        };
-
-        // A committed round establishes the baseline
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(1.0))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(1000));
-
-        // The database write for this round failed: the update is dropped
-        // rather than committed
-        let (samples, _dropped) =
-            sampler.fold(&pods, &[(key("task-pod", "executor-0"), point(2.5))].into());
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(1500));
-
-        // The next successful round's delta spans the unrecorded round, so
-        // the total recorded CPU time (1000 + 2000) matches the counter
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(3.0))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(2000));
-    }
-
-    #[test]
-    fn uncommitted_first_observations_are_reattributed() {
-        let mut sampler = UsageSampler::with_start(0.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = |cpu: f64| ContainerMetrics {
-            cpu_seconds: Some(cpu),
-            memory_bytes: None,
-            start_time_seconds: Some(1000.0),
-        };
-
-        // A new container's first round fails to record: the update is
-        // dropped
-        let (samples, _dropped) =
-            sampler.fold(&pods, &[(key("task-pod", "executor-0"), point(2.0))].into());
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(2000));
-
-        // The container is still unobserved as far as committed state is
-        // concerned, so its (larger) full counter is attributed once more;
-        // as the failed round recorded nothing, the total is exact
-        let samples = fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point(2.5))].into(),
-        );
-        assert_eq!(samples[0].cpu_time_delta_ms, Some(2500));
-    }
-
-    #[test]
-    fn retention_applies_only_on_commit() {
-        let mut sampler = UsageSampler::with_start(0.0);
-        let pods = [task_pod("task-pod", "task-1234")];
-
-        let point = ContainerMetrics {
-            cpu_seconds: Some(1.0),
-            memory_bytes: None,
-            start_time_seconds: Some(1000.0),
-        };
-
-        fold_committed(
-            &mut sampler,
-            &pods,
-            &[(key("task-pod", "executor-0"), point)].into(),
-        );
-        assert_eq!(sampler.baselines.len(), 1);
-
-        // The pod is gone, but the round's write failed: committed baselines
-        // are untouched
-        let (_, _dropped) = sampler.fold(&[], &HashMap::new());
-        assert_eq!(sampler.baselines.len(), 1);
-
-        // A committed round drops the departed pod's baselines
-        fold_committed(&mut sampler, &[], &HashMap::new());
-        assert!(sampler.baselines.is_empty());
     }
 }

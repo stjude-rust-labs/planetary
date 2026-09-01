@@ -438,11 +438,14 @@ Notes on semantics:
 * Memory values are the Kubernetes _working set_ (which may include file-backed
   cache pages), not process RSS.
 * CPU time is derived from the kubelet's cumulative per-container CPU
-  counters, and attribution is at-most-once so that CPU time is never
-  recorded twice: a transient sampling or database write failure loses
-  nothing (the next successfully recorded counter delta spans the gap),
-  while CPU consumed during a monitor restart is not attributed; a restarted
-  container restarts its attribution from the new counter.
+  counters. The monitor records the observed counter values and the database
+  computes each counter's delta against a stored per-container baseline,
+  advancing the baseline atomically with the aggregate — so accounting is
+  idempotent and exactly-once for observed counter movement: transient
+  sampling failures, database write failures (including ambiguous commit
+  outcomes), and monitor restarts neither lose nor double-count CPU time. A
+  restarted container restarts its attribution from the new counter, and
+  clock skew between the monitor and nodes has no effect on accounting.
 * A container that starts and completes between two sampling rounds is never
   observed and is absent from `resource_usage`; absence means "not sampled,"
   not zero usage.

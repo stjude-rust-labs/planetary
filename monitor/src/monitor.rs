@@ -250,14 +250,13 @@ impl Monitor {
     /// Implements the resource usage sampling tokio task.
     ///
     /// Samples task pod resource usage from the kubelets hosting task pods
-    /// (through the API server's node proxy) at the given interval and folds
-    /// each round of per-container samples into the tasks' aggregate usage
-    /// in the database.
+    /// (through the API server's node proxy) at the given interval and
+    /// records each round of per-container observations in the database,
+    /// which folds them into the tasks' aggregate usage.
     async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
         info!("task resource usage sampler has started");
 
         let pods: Api<Pod> = Api::namespaced(state.client.clone(), &state.namespaces.tasks);
-        let mut sampler = crate::usage::UsageSampler::new();
 
         let mut interval = tokio::time::interval(sample_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -273,45 +272,37 @@ impl Monitor {
                 _ = interval.tick() => {
                     // Racing the round against shutdown keeps shutdown from
                     // waiting on a slow node or database. Aborting the round
-                    // is safe: folding records nothing by itself, and
-                    // aborting between a completed database write and the
-                    // baseline commit is equivalent to a monitor restart
-                    // immediately after a successful round (the recorded
-                    // deltas are durable and a fresh sampler's baselines
-                    // never re-attribute a pre-existing container's counter)
+                    // is safe: observations carry cumulative counters and
+                    // the database advances its accounting baselines
+                    // atomically with each recorded round, so an aborted or
+                    // failed round is simply spanned by the next successful
+                    // observation's delta
                     let round = async {
                         match crate::usage::sample_task_pods(
                             &state.client,
                             &pods,
                             &state.namespaces.tasks,
-                            &sampler,
                         )
                         .await
                         {
-                            Ok((samples, update)) => {
+                            Ok(samples) => {
                                 if failing {
                                     failing = false;
                                     info!("sampling task pod resource usage has recovered");
                                 }
 
-                                // Advance the sampler's baselines only after
-                                // the samples have been durably recorded; on
-                                // failure the baselines are left untouched
-                                // so that the next successful round's
-                                // counter deltas span the unrecorded round
-                                match state
+                                if let Err(e) = state
                                     .database
                                     .add_task_resource_usage_samples(&samples)
                                     .await
                                 {
-                                    Ok(()) => sampler.commit(update),
-                                    Err(e) => {
-                                        error!(
-                                            "failed to record resource usage samples (the round \
-                                             will be covered by the next successful sample): \
-                                             {e:#}"
-                                        );
-                                    }
+                                    // Recording is idempotent, so this is
+                                    // self-healing regardless of whether the
+                                    // write actually committed
+                                    error!(
+                                        "failed to record resource usage samples (the round \
+                                         will be covered by the next successful sample): {e:#}"
+                                    );
                                 }
                             }
                             Err(e) => {
