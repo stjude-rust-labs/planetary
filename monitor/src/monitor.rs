@@ -52,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 use url::Url;
 
 /// The task id label.
@@ -97,6 +98,10 @@ pub struct Intervals {
     /// The interval for the keeping Kubernetes resources after a task enters a
     /// terminal state.
     pub keep: Duration,
+    /// The interval for sampling task pod resource usage.
+    ///
+    /// `None` disables resource usage sampling.
+    pub usage: Option<Duration>,
 }
 
 /// Represents state shared between different monitor tokio tasks.
@@ -136,9 +141,9 @@ impl State {
 
         let template = Template::new(templates_dir.into())?;
 
-        // Do an up-front rendering with a dummy identifier to catch errors in the
-        // template. Note: this will not catch an error in the template that would
-        // result from a branch or loop not taken.
+        // Do an up-front rendering with a dummy identifier to catch errors in
+        // the template. Note: this will not catch an error in the
+        // template that would result from a branch or loop not taken.
         template
             .render_id_only("validation", &discovery, &namespaces.tasks)
             .context("template failed initial validation")?;
@@ -179,6 +184,8 @@ pub struct Monitor {
     garbage: JoinHandle<()>,
     /// The handle to the cancellation monitoring tokio task.
     cancellations: JoinHandle<()>,
+    /// The handle to the resource usage sampling tokio task, if enabled.
+    usage: Option<JoinHandle<()>>,
 }
 
 impl Monitor {
@@ -203,11 +210,21 @@ impl Monitor {
         // Spawn the cancellations monitoring tokio task
         let cancellations = tokio::spawn(Self::monitor_cancellations(state.clone()));
 
+        // Spawn the resource usage sampling tokio task, if enabled; a zero
+        // interval is normalized to disabled so that no caller can spawn a
+        // sampler with an interval Tokio would panic on
+        let usage = state
+            .intervals
+            .usage
+            .filter(|interval| !interval.is_zero())
+            .map(|interval| tokio::spawn(Self::monitor_usage(state.clone(), interval)));
+
         Ok(Self {
             shutdown: state.shutdown.clone(),
             orphans,
             garbage,
             cancellations,
+            usage,
         })
     }
 
@@ -223,6 +240,94 @@ impl Monitor {
         self.cancellations
             .await
             .expect("failed to join cancellations monitoring task");
+        if let Some(usage) = self.usage {
+            usage
+                .await
+                .expect("failed to join resource usage sampling task");
+        }
+    }
+
+    /// Implements the resource usage sampling tokio task.
+    ///
+    /// Samples task pod resource usage from the kubelets hosting task pods
+    /// (through the API server's node proxy) at the given interval and
+    /// records each round of per-container observations in the database,
+    /// which folds them into the tasks' aggregate usage.
+    async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
+        info!("task resource usage sampler has started");
+
+        let pods: Api<Pod> = Api::namespaced(state.client.clone(), &state.namespaces.tasks);
+
+        let mut interval = tokio::time::interval(sample_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        // Whether the previous sampling attempt failed; used to log the
+        // first failure and the recovery visibly without per-tick noise
+        let mut failing = false;
+
+        loop {
+            select! {
+                biased;
+                _ = state.shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    // Racing the round against shutdown keeps shutdown from
+                    // waiting on a slow node or database. Aborting the round
+                    // is safe: observations carry cumulative counters and
+                    // the database advances its accounting baselines
+                    // atomically with each recorded round, so an aborted or
+                    // failed round is simply spanned by the next successful
+                    // observation's delta
+                    let round = async {
+                        match crate::usage::sample_task_pods(
+                            &state.client,
+                            &pods,
+                            &state.namespaces.tasks,
+                        )
+                        .await
+                        {
+                            Ok(samples) => {
+                                if failing {
+                                    failing = false;
+                                    info!("sampling task pod resource usage has recovered");
+                                }
+
+                                if let Err(e) = state
+                                    .database
+                                    .add_task_resource_usage_samples(&samples)
+                                    .await
+                                {
+                                    // Recording is idempotent, so this is
+                                    // self-healing regardless of whether the
+                                    // write actually committed
+                                    error!(
+                                        "failed to record resource usage samples (the round \
+                                         will be covered by the next successful sample): {e:#}"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                if failing {
+                                    debug!("failed to sample task pod resource usage: {e:#}");
+                                } else {
+                                    failing = true;
+                                    warn!(
+                                        "failed to sample task pod resource usage (does the \
+                                         monitor's service account have permission to list task \
+                                         pods and proxy to nodes?): {e:#}"
+                                    );
+                                }
+                            }
+                        }
+                    };
+
+                    if state.shutdown.run_until_cancelled(round).await.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!("task resource usage sampler has shut down");
     }
 
     /// Implements the orphan monitoring tokio task.
@@ -242,23 +347,36 @@ impl Monitor {
                 biased;
                 _ = state.shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    // Start by getting the current pod map
-                    match Self::get_task_pod_map(&task_pods).await {
-                        Ok(pod_map) => {
-                            // Check for orphaned tasks
-                            if let Err(e) = Self::check_orphaned_tasks(&http_client, &orchestrator, &planetary_pods, &pod_map).await {
-                                state.log_error(None,  &format!("failed to check for orphaned pods: {e:#}")).await;
-                            }
+                    // Racing the round against shutdown keeps shutdown from
+                    // waiting on slow cluster or database requests. Aborting
+                    // the round is safe: orphan detection is recomputed from
+                    // cluster and database state every round, and each
+                    // adoption request and task state transition is applied
+                    // individually, so any remaining work is picked up by
+                    // the next round
+                    let round = async {
+                        // Start by getting the current pod map
+                        match Self::get_task_pod_map(&task_pods).await {
+                            Ok(pod_map) => {
+                                // Check for orphaned tasks
+                                if let Err(e) = Self::check_orphaned_tasks(&http_client, &orchestrator, &planetary_pods, &pod_map).await {
+                                    state.log_error(None,  &format!("failed to check for orphaned pods: {e:#}")).await;
+                                }
 
-                            // Check for missing task resources
-                            if let Err(e) = Self::check_missing_resources(state.database.as_ref(), &pod_map).await {
-                                state.log_error(None,  &format!("failed to check for missing Kubernetes resources: {e:#}")).await;
+                                // Check for missing task resources
+                                if let Err(e) = Self::check_missing_resources(state.database.as_ref(), &pod_map).await {
+                                    state.log_error(None,  &format!("failed to check for missing Kubernetes resources: {e:#}")).await;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            state.log_error(None,  &format!("failed to get task pod map: {e:#}")).await;
+                            Err(e) => {
+                                state.log_error(None,  &format!("failed to get task pod map: {e:#}")).await;
+                            }
                         }
                     };
+
+                    if state.shutdown.run_until_cancelled(round).await.is_none() {
+                        break;
+                    }
                 }
             }
         }
@@ -312,7 +430,8 @@ impl Monitor {
                 let entry = match orchestrators.entry(id) {
                     Entry::Occupied(e) => e,
                     Entry::Vacant(e) => {
-                        // Get the orchestrator's metadata; if we fail to get the metadata, assume
+                        // Get the orchestrator's metadata; if we fail to get
+                        // the metadata, assume
                         // the orchestrator exists for now
                         let exists = planetary_pods
                             .get_metadata_opt(e.key())
@@ -326,7 +445,8 @@ impl Monitor {
 
                 // If the orchestrator doesn't exist, attempt to adopt it
                 if !*entry.get() {
-                    // SAFETY: we don't include pods in the map that do not have names
+                    // SAFETY: we don't include pods in the map that do not have
+                    // names
                     let name = pod.name().expect("missing pod name");
 
                     info!(
@@ -370,8 +490,8 @@ impl Monitor {
     ) -> Result<()> {
         debug!("checking for missing Kubernetes resources");
 
-        // Query for ids for in-progress tasks that have existed since before the
-        // creation delta
+        // Query for ids for in-progress tasks that have existed since before
+        // the creation delta
         let ids = database
             .get_in_progress_tasks(Utc::now() - TASK_CREATION_DELTA)
             .await?;
@@ -428,6 +548,15 @@ impl Monitor {
     }
 
     /// Performs a garbage collection for terminated tasks.
+    ///
+    /// Cancellation is cooperative rather than racing the whole collection
+    /// against shutdown: the shutdown token is checked between pages and
+    /// between tasks, so that an in-progress [`Self::delete_resources`] for
+    /// a task is never abandoned partway (which could delete the task's pod
+    /// — through which garbage is discovered — while leaking its other
+    /// resources). Shutdown latency is therefore bounded by a single task's
+    /// resource deletion; any remaining garbage is collected by the next
+    /// monitor instance.
     async fn gc(state: &State, task_pods: &Api<Pod>) -> Result<()> {
         /// The maximum number of tasks to collect per iteration
         const MAX_TASKS: u32 = 100;
@@ -469,6 +598,11 @@ impl Monitor {
         let now = Timestamp::now();
 
         loop {
+            // Stop between pages when shutting down
+            if state.shutdown.is_cancelled() {
+                return Ok(());
+            }
+
             // Query all finished (succeeded or failed) task pods
             let ObjectList {
                 metadata, items, ..
@@ -486,6 +620,11 @@ impl Monitor {
             token = metadata.continue_;
 
             for pod in &items {
+                // Stop between tasks when shutting down
+                if state.shutdown.is_cancelled() {
+                    return Ok(());
+                }
+
                 let Some(id) = filter_pod(pod, now, state.intervals.keep) else {
                     continue;
                 };
@@ -600,6 +739,14 @@ impl Monitor {
                     match event {
                         Some(Ok(Event::InitApply(pod) | Event::Apply(pod))) => {
                             let state = state.clone();
+                            // The deletion is deliberately detached: it is
+                            // not joined on shutdown, so an in-flight
+                            // deletion may be cut short by process exit
+                            // (just as by a crash). This is recoverable, as
+                            // the cancellation label persists on the pod and
+                            // the next monitor instance's watcher re-observes
+                            // it; joining with a timeout would instead delay
+                            // shutdown behind slow deletions
                             tokio::spawn(async move {
                                 if let Some(id) = pod.labels().get(TASK_LABEL) &&
                                     let Err(e) = Self::delete_resources(&state, id).await {

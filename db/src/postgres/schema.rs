@@ -32,6 +32,27 @@ diesel::table! {
 }
 
 diesel::table! {
+    task_container_baseline (task_id, pod_name, container_name) {
+        task_id -> Int4,
+        pod_name -> Text,
+        container_name -> Text,
+        start_time_seconds -> Nullable<Float8>,
+        cpu_seconds -> Float8,
+    }
+}
+
+diesel::table! {
+    task_container_usage (task_id, container_name) {
+        task_id -> Int4,
+        container_name -> Text,
+        peak_memory_bytes -> Nullable<Int8>,
+        memory_total_bytes -> Nullable<Int8>,
+        memory_sample_count -> Nullable<Int8>,
+        cpu_time_ms -> Nullable<Int8>,
+    }
+}
+
+diesel::table! {
     use diesel::sql_types::*;
     use super::sql_types::TaskState;
 
@@ -62,5 +83,13 @@ diesel::table! {
 
 diesel::joinable!(containers -> tasks (task_id));
 diesel::joinable!(errors -> tasks (task_id));
+diesel::joinable!(task_container_baseline -> tasks (task_id));
+diesel::joinable!(task_container_usage -> tasks (task_id));
 
-diesel::allow_tables_to_appear_in_same_query!(containers, errors, tasks,);
+diesel::allow_tables_to_appear_in_same_query!(
+    containers,
+    errors,
+    task_container_baseline,
+    task_container_usage,
+    tasks,
+);

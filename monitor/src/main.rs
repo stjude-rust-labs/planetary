@@ -25,6 +25,11 @@ const MONITORING_INTERVAL_SECONDS: u64 = 60;
 /// The default interval for keeping task resources, in seconds.
 const KEEP_INTERVAL_SECONDS: u64 = 300;
 
+/// The default interval for sampling task pod resource usage, in seconds.
+///
+/// A value of zero disables sampling.
+const USAGE_SAMPLE_INTERVAL_SECONDS: u64 = 0;
+
 /// A tool for executing tasks in Kubernetes via the GA4GH TES specification.
 #[derive(Parser)]
 pub struct Args {
@@ -53,6 +58,14 @@ pub struct Args {
     /// Defaults to 300 seconds.
     #[clap(long, default_value_t = KEEP_INTERVAL_SECONDS)]
     keep_interval: u64,
+
+    /// The interval (in seconds) for sampling task pod resource usage from
+    /// the kubelets hosting task pods (through the Kubernetes API server's
+    /// node proxy).
+    ///
+    /// A value of zero (the default) disables resource usage sampling.
+    #[clap(long, env, default_value_t = USAGE_SAMPLE_INTERVAL_SECONDS)]
+    usage_sample_interval: u64,
 
     /// The name of the pod running the service.
     #[clap(long, env)]
@@ -180,6 +193,10 @@ pub async fn main() -> anyhow::Result<()> {
         .templates_dir(args.templates_dir)
         .check_interval(Duration::from_secs(args.check_interval))
         .keep_interval(Duration::from_secs(args.keep_interval))
+        .maybe_usage_sample_interval(match args.usage_sample_interval {
+            0 => None,
+            secs => Some(Duration::from_secs(secs)),
+        })
         .orchestrator_url(args.orchestrator_url)
         .orchestrator_api_key(args.orchestrator_api_key)
         .build()

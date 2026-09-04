@@ -100,6 +100,43 @@ pub struct TaskTemplateData {
     pub executors: Vec<Executor>,
 }
 
+/// A single resource usage observation for one container of a task's pod.
+///
+/// Containers are identified by their pod name and Kubernetes container name
+/// (`inputs`, `executor-N`, or `outputs`).
+///
+/// CPU is reported as the observed *cumulative* counter value (seconds since
+/// the container instance started); the database computes the delta against
+/// its stored baseline for the container and advances the baseline
+/// atomically with the aggregate, making recording idempotent.
+///
+/// Each dimension is optional; a dimension that could not be measured for a
+/// sampling round is `None` and does not affect the container's aggregate.
+#[derive(Debug, Clone, Default)]
+pub struct ContainerUsageSample {
+    /// The TES identifier of the task.
+    pub tes_id: String,
+    /// The name of the pod hosting the container.
+    pub pod_name: String,
+    /// The name of the container within the pod.
+    pub container_name: String,
+    /// The sampled working set memory of the container, in bytes.
+    pub memory_bytes: Option<i64>,
+    /// The observed cumulative CPU time of the container instance, in
+    /// seconds.
+    pub cpu_seconds: Option<f64>,
+    /// The container instance's start time, in seconds since the Unix epoch
+    /// of the node's clock, used to detect container restarts.
+    pub start_time_seconds: Option<f64>,
+}
+
+impl ContainerUsageSample {
+    /// Whether the sample carries no measurements.
+    pub fn is_empty(&self) -> bool {
+        self.memory_bytes.is_none() && self.cpu_seconds.is_none()
+    }
+}
+
 /// An abstraction for the planetary database.
 #[async_trait::async_trait]
 pub trait Database: Send + Sync + 'static {
@@ -174,6 +211,39 @@ pub trait Database: Send + Sync + 'static {
 
     /// Appends the given messages to the task's system log.
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()>;
+
+    /// Records a round of per-container resource usage observations for
+    /// tasks.
+    ///
+    /// Observations are folded into each task container's running aggregate
+    /// in a single atomic statement: the peak working set memory is kept,
+    /// the sampled memory is added to the running total used for computing
+    /// the average, and the CPU counter's delta against the stored
+    /// per-container baseline is accumulated, with the baseline advanced in
+    /// the same statement. A `None` dimension in an observation leaves the
+    /// corresponding aggregate untouched.
+    ///
+    /// Recording is **idempotent** with respect to CPU time: re-recording an
+    /// observation whose previous write already committed (e.g. after an
+    /// ambiguous commit outcome) yields a zero delta, and an observation
+    /// following unrecorded rounds attributes the full counter movement
+    /// since the stored baseline. A container instance with no stored
+    /// baseline (first observation, or a restart detected by a changed
+    /// start time or a decreasing counter) attributes its full counter.
+    ///
+    /// The observations may contain multiple entries for the same task and
+    /// container name from different pods (e.g. when more than one pod
+    /// carries the same task label); each is accounted independently via
+    /// its own baseline.
+    ///
+    /// The aggregates are reported in the task's log metadata: the
+    /// `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys carry
+    /// the usage of the task's executor containers, and the `resource_usage`
+    /// key carries the per-container breakdown.
+    async fn add_task_resource_usage_samples(
+        &self,
+        samples: &[ContainerUsageSample],
+    ) -> DatabaseResult<()>;
 
     /// Inserts an internal system error with the database.
     async fn insert_error(

@@ -70,7 +70,8 @@ async fn auth(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // First respect the `X-Forwarded-User` header, then the `Authorization` header
+    // First respect the `X-Forwarded-User` header, then the `Authorization`
+    // header
     let username = match (
         request
             .headers()

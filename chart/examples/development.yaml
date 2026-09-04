@@ -24,6 +24,8 @@ monitor:
   image:
     name: stjude-rust-labs/planetary-monitor
     tag: dev
+  # Sample task pod resource usage every 30 seconds (see README.md).
+  usageSampleInterval: 30
 
 transporter:
   log: info

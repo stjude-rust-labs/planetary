@@ -107,21 +107,29 @@ pub enum Error {
 }
 
 /// Converts a task model into a TES task.
-fn into_task<T, C>(task: T, containers: Vec<C>) -> Task
+///
+/// The task log metadata is built from the task's per-container resource
+/// usage aggregates, if any were recorded.
+fn into_task<T, C>(task: T, containers: Vec<C>, usage: Vec<models::ContainerUsage>) -> Task
 where
     T: Into<(Task, Vec<OutputFile>, Vec<String>)>,
     C: Into<ExecutorLog>,
 {
     let (mut task, outputs, system_logs) = task.into();
+    let metadata = models::resource_usage_metadata(&usage);
     let executor_logs: Vec<_> = containers.into_iter().map(Into::into).collect();
 
-    if !outputs.is_empty() || !executor_logs.is_empty() || !system_logs.is_empty() {
+    if !outputs.is_empty()
+        || !executor_logs.is_empty()
+        || !system_logs.is_empty()
+        || metadata.is_some()
+    {
         let start_time = executor_logs.first().and_then(|e| e.start_time);
         let end_time = executor_logs.last().and_then(|e| e.end_time);
 
         task.logs = Some(vec![TaskLog {
             logs: executor_logs,
-            metadata: None,
+            metadata,
             start_time,
             end_time,
             outputs,
@@ -157,8 +165,8 @@ impl PostgresDatabase {
 
         let p = pool.clone();
 
-        // Span a task that is responsible for removing connections from the pool that
-        // exceed
+        // Span a task that is responsible for removing connections from the
+        // pool that exceed
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(POOL_RETAIN_INTERVAL).await;
@@ -192,8 +200,8 @@ impl PostgresDatabase {
             }
         }
 
-        // Required to use a direct connection here as `diesel-migration` doesn't
-        // support async
+        // Required to use a direct connection here as `diesel-migration`
+        // doesn't support async
         let mut conn = diesel::pg::PgConnection::establish(self.url.expose_secret())?;
         HarnessWithOutput::new(&mut conn, std::io::LineWriter::new(Writer))
             .run_pending_migrations(MIGRATIONS)
@@ -270,7 +278,14 @@ impl Database for PostgresDatabase {
                     .await
                     .map_err(Error::Diesel)?;
 
-                Ok(TaskResponse::Basic(into_task(task, containers)))
+                let usage = models::ContainerUsage::belonging_to(&task)
+                    .select(models::ContainerUsage::as_select())
+                    .order_by(schema::task_container_usage::container_name)
+                    .load(&mut conn)
+                    .await
+                    .map_err(Error::Diesel)?;
+
+                Ok(TaskResponse::Basic(into_task(task, containers, usage)))
             }
             View::Full => {
                 let task = schema::tasks::table
@@ -294,7 +309,14 @@ impl Database for PostgresDatabase {
                     .await
                     .map_err(Error::Diesel)?;
 
-                Ok(TaskResponse::Full(into_task(task, containers)))
+                let usage = models::ContainerUsage::belonging_to(&task)
+                    .select(models::ContainerUsage::as_select())
+                    .order_by(schema::task_container_usage::container_name)
+                    .load(&mut conn)
+                    .await
+                    .map_err(Error::Diesel)?;
+
+                Ok(TaskResponse::Full(into_task(task, containers, usage)))
             }
         }
     }
@@ -410,6 +432,14 @@ impl Database for PostgresDatabase {
                     Some((offset as usize + tasks.len()).to_string())
                 };
 
+                let usage = models::ContainerUsage::belonging_to(&tasks)
+                    .select(models::ContainerUsage::as_select())
+                    .order_by(schema::task_container_usage::container_name)
+                    .load(&mut conn)
+                    .await
+                    .map_err(Error::Diesel)?
+                    .grouped_by(&tasks);
+
                 Ok((
                     models::BasicContainer::belonging_to(&tasks)
                         .select(models::BasicContainer::as_select())
@@ -420,8 +450,11 @@ impl Database for PostgresDatabase {
                         .map_err(Error::Diesel)?
                         .grouped_by(&tasks)
                         .into_iter()
+                        .zip(usage)
                         .zip(tasks)
-                        .map(|(containers, task)| TaskResponse::Basic(into_task(task, containers)))
+                        .map(|((containers, usage), task)| {
+                            TaskResponse::Basic(into_task(task, containers, usage))
+                        })
                         .collect(),
                     token,
                 ))
@@ -441,6 +474,14 @@ impl Database for PostgresDatabase {
                     Some((offset as usize + tasks.len()).to_string())
                 };
 
+                let usage = models::ContainerUsage::belonging_to(&tasks)
+                    .select(models::ContainerUsage::as_select())
+                    .order_by(schema::task_container_usage::container_name)
+                    .load(&mut conn)
+                    .await
+                    .map_err(Error::Diesel)?
+                    .grouped_by(&tasks);
+
                 Ok((
                     models::FullContainer::belonging_to(&tasks)
                         .select(models::FullContainer::as_select())
@@ -451,8 +492,11 @@ impl Database for PostgresDatabase {
                         .map_err(Error::Diesel)?
                         .grouped_by(&tasks)
                         .into_iter()
+                        .zip(usage)
                         .zip(tasks)
-                        .map(|(containers, task)| TaskResponse::Full(into_task(task, containers)))
+                        .map(|((containers, usage), task)| {
+                            TaskResponse::Full(into_task(task, containers, usage))
+                        })
                         .collect(),
                     token,
                 ))
@@ -555,8 +599,9 @@ impl Database for PostgresDatabase {
 
         let updated = conn
             .transaction(async |conn| {
-                // TODO: currently diesel hasn't released support for the PostgreSQL
-                // `array_cat` function; remove the raw query when diesel supports it
+                // TODO: currently diesel hasn't released support for the
+                // PostgreSQL `array_cat` function; remove the
+                // raw query when diesel supports it
                 let updated: Option<UpdatedTask> = sql_query(
                     "UPDATE tasks SET state = $1, system_logs = array_cat(system_logs, $2) WHERE \
                      tes_id = $3 AND state = ANY ($4) RETURNING id",
@@ -628,6 +673,115 @@ impl Database for PostgresDatabase {
             .execute(&mut conn)
             .await
             .map_err(Error::Diesel)?;
+
+        Ok(())
+    }
+
+    async fn add_task_resource_usage_samples(
+        &self,
+        samples: &[crate::ContainerUsageSample],
+    ) -> DatabaseResult<()> {
+        use diesel::pg::sql_types::Array;
+        use diesel::sql_types::BigInt;
+        use diesel::sql_types::Double;
+        use diesel::sql_types::Nullable;
+        use diesel::sql_types::Text;
+        use diesel::*;
+        use diesel_async::RunQueryDsl;
+
+        if samples.is_empty() {
+            return Ok(());
+        }
+
+        let mut ids = Vec::with_capacity(samples.len());
+        let mut pods = Vec::with_capacity(samples.len());
+        let mut names = Vec::with_capacity(samples.len());
+        let mut memory = Vec::with_capacity(samples.len());
+        let mut cpu = Vec::with_capacity(samples.len());
+        let mut start = Vec::with_capacity(samples.len());
+        for sample in samples {
+            ids.push(sample.tes_id.as_str());
+            pods.push(sample.pod_name.as_str());
+            names.push(sample.container_name.as_str());
+            memory.push(sample.memory_bytes);
+            cpu.push(sample.cpu_seconds);
+            start.push(sample.start_time_seconds);
+        }
+
+        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
+
+        // Fold the observations into each container's running aggregate in
+        // a single atomic statement. Observations carry cumulative CPU
+        // counters; the delta of each counter is computed against the
+        // per-(task, pod, container) baseline stored in
+        // `task_container_baseline`, and the baseline is advanced in the
+        // same statement so that it is durable with the aggregate. This
+        // makes recording idempotent: re-recording an observation whose
+        // write already committed (e.g. after an ambiguous commit outcome
+        // where the database committed but the monitor never saw the
+        // response) yields a zero delta, and aggregation survives monitor
+        // restarts without loss or double counting.
+        //
+        // Delta semantics per observation: no stored baseline (first
+        // observation of the instance) or a restart (changed start time or
+        // a decreasing counter) attributes the full counter value;
+        // otherwise the monotonic delta since the baseline is attributed. A
+        // NULL dimension leaves the corresponding aggregate untouched.
+        // Observations for unknown tasks are dropped by the join.
+        //
+        // The aggregate upsert groups by (task, container): a batch may
+        // carry observations for the same container name from multiple pods
+        // (e.g. a customized task template or a replacement pod overlapping
+        // the pod it replaces), each accounted independently via its own
+        // baseline, and `ON CONFLICT DO UPDATE` cannot affect the same row
+        // twice within one statement.
+        //
+        // The statement's delta, idempotency, restart, and multi-pod
+        // semantics are exercised by the scenario battery in
+        // `postgres/usage-fold-scenarios.sql`, runnable with psql against a
+        // deployed database.
+        sql_query(
+            "WITH s AS (SELECT t.id AS task_id, u.pod_name, u.container_name, u.memory_bytes, \
+             u.cpu_seconds, u.start_time_seconds FROM UNNEST($1::text[], $2::text[], $3::text[], \
+             $4::bigint[], $5::float8[], $6::float8[]) AS u(tes_id, pod_name, container_name, \
+             memory_bytes, cpu_seconds, start_time_seconds) JOIN tasks t ON t.tes_id = u.tes_id), \
+             d AS (SELECT s.task_id, s.pod_name, s.container_name, s.memory_bytes, s.cpu_seconds, \
+             s.start_time_seconds, CASE WHEN s.cpu_seconds IS NULL THEN NULL WHEN b.cpu_seconds \
+             IS NULL THEN s.cpu_seconds WHEN b.start_time_seconds IS NOT DISTINCT FROM \
+             s.start_time_seconds AND s.cpu_seconds >= b.cpu_seconds THEN s.cpu_seconds - \
+             b.cpu_seconds ELSE s.cpu_seconds END AS cpu_delta_seconds FROM s LEFT JOIN \
+             task_container_baseline b USING (task_id, pod_name, container_name)), advanced AS \
+             (INSERT INTO task_container_baseline (task_id, pod_name, container_name, \
+             start_time_seconds, cpu_seconds) SELECT task_id, pod_name, container_name, \
+             start_time_seconds, cpu_seconds FROM d WHERE cpu_seconds IS NOT NULL ON CONFLICT \
+             (task_id, pod_name, container_name) DO UPDATE SET start_time_seconds = \
+             EXCLUDED.start_time_seconds, cpu_seconds = EXCLUDED.cpu_seconds) INSERT INTO \
+             task_container_usage (task_id, container_name, peak_memory_bytes, \
+             memory_total_bytes, memory_sample_count, cpu_time_ms) SELECT task_id, \
+             container_name, MAX(memory_bytes), SUM(memory_bytes), COUNT(memory_bytes), \
+             CAST(SUM(cpu_delta_seconds) * 1000.0 AS bigint) FROM d GROUP BY task_id, \
+             container_name ON CONFLICT (task_id, container_name) DO UPDATE SET peak_memory_bytes \
+             = CASE WHEN EXCLUDED.peak_memory_bytes IS NULL THEN \
+             task_container_usage.peak_memory_bytes ELSE \
+             GREATEST(COALESCE(task_container_usage.peak_memory_bytes, 0), \
+             EXCLUDED.peak_memory_bytes) END, memory_total_bytes = CASE WHEN \
+             EXCLUDED.memory_total_bytes IS NULL THEN task_container_usage.memory_total_bytes \
+             ELSE COALESCE(task_container_usage.memory_total_bytes, 0) + \
+             EXCLUDED.memory_total_bytes END, memory_sample_count = \
+             COALESCE(task_container_usage.memory_sample_count, 0) + \
+             EXCLUDED.memory_sample_count, cpu_time_ms = CASE WHEN EXCLUDED.cpu_time_ms IS NULL \
+             THEN task_container_usage.cpu_time_ms ELSE \
+             COALESCE(task_container_usage.cpu_time_ms, 0) + EXCLUDED.cpu_time_ms END",
+        )
+        .bind::<Array<Text>, _>(&ids)
+        .bind::<Array<Text>, _>(&pods)
+        .bind::<Array<Text>, _>(&names)
+        .bind::<Array<Nullable<BigInt>>, _>(&memory)
+        .bind::<Array<Nullable<Double>>, _>(&cpu)
+        .bind::<Array<Nullable<Double>>, _>(&start)
+        .execute(&mut conn)
+        .await
+        .map_err(Error::Diesel)?;
 
         Ok(())
     }

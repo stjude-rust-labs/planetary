@@ -134,6 +134,14 @@ monitor:
     limits:
       memory: 4Gi
   log: info
+  # The interval (in seconds) for sampling task pod resource usage from the
+  # kubelets hosting task pods (via the Kubernetes API server's node proxy).
+  # A value of zero disables resource usage sampling.
+  #
+  # The monitor's cluster role for reading kubelet resource metrics
+  # (`nodes/proxy`) is granted only when sampling is enabled; changing this
+  # value requires re-applying the chart.
+  usageSampleInterval: 0
 
 # Configuration relating to the transporter used by Planetary for
 # transferring files to and from cloud storage.

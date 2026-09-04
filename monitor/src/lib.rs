@@ -18,6 +18,7 @@ use crate::monitor::Namespaces;
 use crate::monitor::OrchestratorServiceInfo;
 
 mod monitor;
+mod usage;
 
 /// The task monitor server.
 #[derive(Clone, Builder)]
@@ -56,6 +57,12 @@ pub struct Server {
     /// enters a terminal state.
     #[builder(into)]
     keep_interval: Duration,
+
+    /// The interval for sampling task pod resource usage from the kubelets
+    /// hosting task pods (through the Kubernetes API server's node proxy).
+    ///
+    /// `None` disables resource usage sampling.
+    usage_sample_interval: Option<Duration>,
 
     /// The Planetary orchestrator service URL.
     #[builder(into)]
@@ -108,6 +115,7 @@ impl Server {
             Intervals {
                 check: self.check_interval,
                 keep: self.keep_interval,
+                usage: self.usage_sample_interval,
             },
         )
         .await?;
