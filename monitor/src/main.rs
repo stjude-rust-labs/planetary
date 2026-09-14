@@ -59,13 +59,24 @@ pub struct Args {
     #[clap(long, default_value_t = KEEP_INTERVAL_SECONDS)]
     keep_interval: u64,
 
-    /// The interval (in seconds) for sampling task pod resource usage from
-    /// the kubelets hosting task pods (through the Kubernetes API server's
-    /// node proxy).
+    /// The interval (in seconds) for sampling task pod resource usage
+    /// directly from the kubelets hosting task pods.
     ///
     /// A value of zero (the default) disables resource usage sampling.
     #[clap(long, env, default_value_t = USAGE_SAMPLE_INTERVAL_SECONDS)]
     usage_sample_interval: u64,
+
+    /// The port kubelets listen on for resource usage sampling.
+    #[clap(long, env, default_value_t = 10250)]
+    kubelet_port: u16,
+
+    /// Skip verification of kubelet serving certificates when sampling
+    /// resource usage.
+    ///
+    /// An escape hatch for clusters whose kubelets serve self-signed
+    /// certificates (for example, `kind`).
+    #[clap(long, env, default_value_t = false)]
+    kubelet_insecure_tls: bool,
 
     /// The name of the pod running the service.
     #[clap(long, env)]
@@ -193,6 +204,8 @@ pub async fn main() -> anyhow::Result<()> {
         .templates_dir(args.templates_dir)
         .check_interval(Duration::from_secs(args.check_interval))
         .keep_interval(Duration::from_secs(args.keep_interval))
+        .kubelet_port(args.kubelet_port)
+        .kubelet_insecure_tls(args.kubelet_insecure_tls)
         .maybe_usage_sample_interval(match args.usage_sample_interval {
             0 => None,
             secs => Some(Duration::from_secs(secs)),

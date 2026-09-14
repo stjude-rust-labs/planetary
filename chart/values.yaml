@@ -134,14 +134,22 @@ monitor:
     limits:
       memory: 4Gi
   log: info
-  # The interval (in seconds) for sampling task pod resource usage from the
-  # kubelets hosting task pods (via the Kubernetes API server's node proxy).
-  # A value of zero disables resource usage sampling.
+  # The interval (in seconds) for sampling task pod resource usage directly
+  # from the kubelets hosting task pods. A value of zero disables resource
+  # usage sampling.
   #
   # The monitor's cluster role for reading kubelet resource metrics
-  # (`nodes/proxy`) is granted only when sampling is enabled; changing this
+  # (`nodes/metrics`) is granted only when sampling is enabled; changing this
   # value requires re-applying the chart.
   usageSampleInterval: 0
+  # The port kubelets listen on for resource usage sampling.
+  kubeletPort: 10250
+  # Skip verification of kubelet serving certificates when sampling resource
+  # usage. Kubelet serving certificates are verified against the cluster
+  # certificate authority by default; enable this escape hatch only on
+  # clusters whose kubelets serve self-signed certificates (for example,
+  # `kind`).
+  kubeletInsecureTls: false
 
 # Configuration relating to the transporter used by Planetary for
 # transferring files to and from cloud storage.

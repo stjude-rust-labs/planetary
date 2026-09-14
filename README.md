@@ -91,10 +91,9 @@ research to create a complete list of concerns to consider in your situation:
 
   Note that enabling [task resource usage reporting](#task-resource-usage-reporting)
   (`monitor.usageSampleInterval > 0`; disabled by default) grants the monitor
-  a **cluster-scoped** `get` permission on `nodes/proxy`, which permits read
-  access to the entire kubelet API of every node — Kubernetes cannot scope
-  `nodes/proxy` to specific kubelet paths. See that section for the
-  trade-off discussion.
+  a **cluster-scoped** `get` permission on `nodes/metrics`, which kubelet
+  authorization maps only to the read-only `/metrics/*` endpoints of each
+  node's kubelet.
 
   Review these to ensure they align with your internal access control policies
   and compliance standards.
@@ -361,17 +360,13 @@ monitor is granted the `delete` verb for the resource.
 When [task resource usage reporting](#task-resource-usage-reporting) is
 enabled (`monitor.usageSampleInterval > 0`; disabled by default), the chart
 additionally grants the monitor a **cluster-scoped** role with the `get` verb
-on `nodes/proxy`, used to read the kubelet `/metrics/resource` endpoint of
-the nodes hosting task pods through the API server's node proxy. This is the
-only cluster-scoped permission in the chart, and its reach is broader than
-its use: Kubernetes RBAC cannot scope `nodes/proxy` to specific kubelet
-paths, so the grant permits read access to the *entire* kubelet API of
-*every* node — including pod specifications (which may contain secrets
-passed as environment variables), container logs, and node stats. The `get`
-verb restricts the HTTP method (ruling out `exec`, `attach`, and
-`port-forward`, which require `create`) but not which endpoints are
-readable. If this is not acceptable in your cluster, leave usage sampling
-disabled.
+on `nodes/metrics`, used to read the `/metrics/resource` endpoint of the
+kubelets hosting task pods. This is the only cluster-scoped permission in the
+chart. Kubelet authorization maps `nodes/metrics` only to the read-only
+`/metrics/*` paths; the broader `nodes/proxy` resource is deliberately not
+used, because kubelet authorization also accepts it for the command
+execution endpoints (whose WebSocket upgrades ride on HTTP GET), making it
+impossible to scope to reads.
 
 See [`rbac.yaml`](./chart/templates/rbac.yaml) for more information.
 
@@ -384,23 +379,24 @@ Sampling is disabled by default and is enabled by setting the chart value
 `monitor.usageSampleInterval` to a sampling interval in seconds.
 
 Usage is read from the `/metrics/resource` endpoint of the kubelets hosting
-task pods, through the Kubernetes API server's node proxy. The
+task pods, contacted directly at each node's address. The
 [Kubernetes metrics server](https://github.com/kubernetes-sigs/metrics-server)
 is deliberately **not** used: it only serves metrics for pods in the
-`Running` phase — task pods execute their work in init containers and remain
-`Pending` while executing — and its documentation states that it is meant
-only for autoscaling purposes, directing monitoring consumers to collect from
-the kubelet `/metrics/resource` endpoint directly.
+`Running` phase (its pod informer watches with the field selector
+`status.phase=Running`) — task pods execute their work in init containers and
+remain `Pending` while executing — and its documentation states that it is
+meant only for autoscaling purposes, directing monitoring consumers to
+collect from the kubelet `/metrics/resource` endpoint directly.
 
 When sampling is enabled, the chart grants the monitor a cluster role with
-the `get` verb on `nodes/proxy`, which the monitor uses to read the resource
-metrics of the nodes hosting task pods. Note that this grant necessarily
-reaches further than the monitor's use of it — Kubernetes cannot restrict
-`nodes/proxy` to specific kubelet paths, so it permits read access to the
-entire kubelet API of every node (see
-[RBAC Authorization](#rbac-authorization) for the details). Enable sampling
-only if this trade-off is acceptable in your cluster; otherwise leave it
-disabled (the default), in which case the cluster role is not created.
+the `get` verb on `nodes/metrics`, which kubelet authorization maps only to
+the kubelet's read-only `/metrics/*` paths (see
+[RBAC Authorization](#rbac-authorization)). Requests carry the monitor's
+service account token, and each kubelet's serving certificate is verified
+against the cluster certificate authority. On clusters whose kubelets serve
+self-signed certificates (for example, `kind`), set
+`monitor.kubeletInsecureTls: true` to skip verification; the kubelet port
+defaults to `10250` and can be changed with `monitor.kubeletPort`.
 
 The monitor periodically samples the usage of each of a task pod's
 containers and folds the samples into per-container aggregates. The

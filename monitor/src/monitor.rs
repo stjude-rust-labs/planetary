@@ -104,6 +104,18 @@ pub struct Intervals {
     pub usage: Option<Duration>,
 }
 
+/// Configuration for reading resource metrics from kubelets.
+#[derive(Debug, Clone, Copy)]
+pub struct KubeletConfig {
+    /// The kubelet port.
+    pub port: u16,
+    /// Whether to skip verification of kubelet serving certificates.
+    ///
+    /// An escape hatch for clusters whose kubelets serve self-signed
+    /// certificates (for example, `kind`).
+    pub insecure_tls: bool,
+}
+
 /// Represents state shared between different monitor tokio tasks.
 struct State {
     /// The shutdown cancellation token.
@@ -118,6 +130,8 @@ struct State {
     namespaces: Namespaces,
     /// The monitor intervals.
     intervals: Intervals,
+    /// The kubelet configuration for resource usage sampling.
+    kubelet: KubeletConfig,
     /// The task template for deleting task resources.
     template: Template,
 }
@@ -129,6 +143,7 @@ impl State {
         templates_dir: impl Into<PathBuf>,
         namespaces: Namespaces,
         intervals: Intervals,
+        kubelet: KubeletConfig,
     ) -> Result<Self> {
         let client = Client::try_default()
             .await
@@ -155,6 +170,7 @@ impl State {
             discovery,
             namespaces,
             intervals,
+            kubelet,
             template,
         })
     }
@@ -198,8 +214,10 @@ impl Monitor {
         namespaces: Namespaces,
         templates_dir: impl Into<PathBuf>,
         intervals: Intervals,
+        kubelet: KubeletConfig,
     ) -> Result<Self> {
-        let state = Arc::new(State::new(database, templates_dir, namespaces, intervals).await?);
+        let state =
+            Arc::new(State::new(database, templates_dir, namespaces, intervals, kubelet).await?);
 
         // Spawn the orphan monitoring tokio task
         let orphans = tokio::spawn(Self::monitor_orphans(state.clone(), orchestrator));
@@ -249,11 +267,22 @@ impl Monitor {
 
     /// Implements the resource usage sampling tokio task.
     ///
-    /// Samples task pod resource usage from the kubelets hosting task pods
-    /// (through the API server's node proxy) at the given interval and
-    /// records each round of per-container observations in the database,
-    /// which folds them into the tasks' aggregate usage.
+    /// Samples task pod resource usage directly from the kubelets hosting
+    /// task pods at the given interval and records each round of
+    /// per-container observations in the database, which folds them into the
+    /// tasks' aggregate usage.
     async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
+        let kubelet = match crate::usage::KubeletClient::new(
+            state.kubelet.port,
+            state.kubelet.insecure_tls,
+        ) {
+            Ok(kubelet) => kubelet,
+            Err(e) => {
+                error!("failed to initialize the kubelet client: {e:#}");
+                return;
+            }
+        };
+
         info!("task resource usage sampler has started");
 
         let pods: Api<Pod> = Api::namespaced(state.client.clone(), &state.namespaces.tasks);
@@ -279,7 +308,7 @@ impl Monitor {
                     // observation's delta
                     let round = async {
                         match crate::usage::sample_task_pods(
-                            &state.client,
+                            &kubelet,
                             &pods,
                             &state.namespaces.tasks,
                         )

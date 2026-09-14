@@ -1,17 +1,29 @@
 //! Sampling of task pod resource usage from kubelet resource metrics.
 //!
 //! When enabled, the monitor periodically reads the `/metrics/resource`
-//! endpoint of the kubelets hosting task pods (through the Kubernetes API
-//! server's node proxy) and records each per-container observation in the
-//! database, which folds it into the task's aggregate resource usage.
+//! endpoint of the kubelets hosting task pods and records each per-container
+//! observation in the database, which folds it into the task's aggregate
+//! resource usage.
+//!
+//! The kubelet is contacted directly at its node's address rather than
+//! through the API server's node proxy: proxying requires `get` on the
+//! `nodes/proxy` resource, which kubelet authorization also accepts for its
+//! command execution endpoints (WebSocket upgrades ride on HTTP GET), so the
+//! permission cannot be scoped to reads. A direct request is authorized by
+//! the kubelet itself through a `SubjectAccessReview` for `get` on
+//! `nodes/metrics`, which maps only to the kubelet's `/metrics/*` paths.
 //!
 //! The kubelet is read directly — rather than through the `metrics.k8s.io`
 //! API — for two reasons:
 //!
 //! * The reference Kubernetes metrics-server only serves metrics for pods in
-//!   the `Running` phase; task pods execute their work in *init* containers and
-//!   therefore remain in the `Pending` phase while executing, so their usage is
-//!   never visible through `metrics.k8s.io`.
+//!   the `Running` phase: its pod informer watches with the field selector
+//!   `status.phase=Running` (`pkg/server/informer.go`, moved there from an
+//!   explicit check in `pkg/api/pod.go` by kubernetes-sigs/metrics-server
+//!   commit `fd1f74df`, first released in v0.5.0). Task pods execute their work
+//!   in *init* containers and therefore remain in the `Pending` phase while
+//!   executing, so their usage is never visible through `metrics.k8s.io` on any
+//!   metrics-server version.
 //!
 //! * The metrics-server documentation itself states that it is meant only
 //!   for autoscaling purposes and that monitoring consumers should "collect
@@ -40,12 +52,12 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
-use kube::Client;
 use kube::api::ListParams;
 use planetary_db::ContainerUsageSample;
 use tracing::warn;
@@ -72,11 +84,15 @@ pub struct TaskPod {
     pub tes_id: String,
     /// The name of the node hosting the pod.
     pub node: String,
+    /// The address of the node hosting the pod.
+    pub host_ip: String,
 }
 
 /// Lists the task pods to sample, together with the nodes hosting them.
 ///
-/// Pods that are not yet scheduled to a node are omitted.
+/// Pods that are not yet scheduled to a node (or whose host address is not
+/// yet reported) are omitted. The host address comes from the pod's own
+/// status, so sampling requires no permission on `Node` resources.
 pub async fn list_task_pods(api: &Api<Pod>) -> Result<Vec<TaskPod>> {
     let params = ListParams::default().labels(TASK_LABEL);
     let pods = api
@@ -92,7 +108,13 @@ pub async fn list_task_pods(api: &Api<Pod>) -> Result<Vec<TaskPod>> {
             let name = metadata.name?;
             let tes_id = metadata.labels?.get(TASK_LABEL)?.clone();
             let node = pod.spec?.node_name?;
-            Some(TaskPod { name, tes_id, node })
+            let host_ip = pod.status?.host_ip?;
+            Some(TaskPod {
+                name,
+                tes_id,
+                node,
+                host_ip,
+            })
         })
         .collect())
 }
@@ -106,25 +128,115 @@ pub async fn list_task_pods(api: &Api<Pod>) -> Result<Vec<TaskPod>> {
 /// delaying monitor shutdown.
 const NODE_METRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// Fetches the resource metrics of a node's kubelet through the API server's
-/// node proxy.
-///
-/// The fetch is bounded by [`NODE_METRICS_TIMEOUT`].
-pub async fn fetch_node_metrics(client: &Client, node: &str) -> Result<String> {
-    let request = http::Request::get(format!("/api/v1/nodes/{node}/proxy/metrics/resource"))
-        .body(Vec::new())
-        .context("failed to build node metrics request")?;
+/// The default kubelet port.
+pub const DEFAULT_KUBELET_PORT: u16 = 10250;
 
-    tokio::time::timeout(NODE_METRICS_TIMEOUT, client.request_text(request))
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "request timed out after {timeout} seconds",
-                timeout = NODE_METRICS_TIMEOUT.as_secs()
-            )
+/// The in-cluster path of the service account token.
+const SERVICE_ACCOUNT_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+
+/// The in-cluster path of the cluster certificate authority bundle.
+const SERVICE_ACCOUNT_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
+
+/// A client for reading resource metrics directly from kubelets.
+///
+/// Requests carry the monitor's service account token; the kubelet authorizes
+/// them through a `SubjectAccessReview` for `get` on `nodes/metrics`. The
+/// kubelet's serving certificate is verified against the cluster certificate
+/// authority unless `insecure_tls` is enabled — an escape hatch for clusters
+/// whose kubelets serve self-signed certificates (for example, `kind`).
+pub struct KubeletClient {
+    /// The underlying HTTP client.
+    client: reqwest::Client,
+    /// The kubelet port.
+    port: u16,
+    /// The path of the bearer token presented to kubelets.
+    ///
+    /// The token is re-read for every fetch, as service account tokens are
+    /// rotated.
+    token_path: PathBuf,
+}
+
+impl KubeletClient {
+    /// Creates a new kubelet client using in-cluster service account
+    /// credentials.
+    pub fn new(port: u16, insecure_tls: bool) -> Result<Self> {
+        Self::with_paths(
+            port,
+            insecure_tls,
+            SERVICE_ACCOUNT_CA_PATH.into(),
+            SERVICE_ACCOUNT_TOKEN_PATH.into(),
+        )
+    }
+
+    /// Creates a new kubelet client with explicit credential paths.
+    pub fn with_paths(
+        port: u16,
+        insecure_tls: bool,
+        ca_path: PathBuf,
+        token_path: PathBuf,
+    ) -> Result<Self> {
+        let mut builder = reqwest::Client::builder().timeout(NODE_METRICS_TIMEOUT);
+
+        if insecure_tls {
+            builder = builder.danger_accept_invalid_certs(true);
+        } else {
+            let ca = std::fs::read(&ca_path).with_context(|| {
+                format!(
+                    "failed to read the cluster certificate authority bundle from `{path}`",
+                    path = ca_path.display()
+                )
+            })?;
+            let cert = reqwest::Certificate::from_pem(&ca)
+                .context("failed to parse the cluster certificate authority bundle")?;
+            builder = builder.add_root_certificate(cert);
+        }
+
+        Ok(Self {
+            client: builder.build().context("failed to build kubelet client")?,
+            port,
+            token_path,
         })
-        .and_then(|result| result.map_err(Into::into))
-        .with_context(|| format!("failed to fetch resource metrics from node `{node}`"))
+    }
+
+    /// Fetches the resource metrics of a node's kubelet.
+    ///
+    /// The fetch is bounded by [`NODE_METRICS_TIMEOUT`].
+    pub async fn fetch_node_metrics(&self, node: &str, host_ip: &str) -> Result<String> {
+        let token = tokio::fs::read_to_string(&self.token_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read the service account token from `{path}`",
+                    path = self.token_path.display()
+                )
+            })?;
+
+        let response = self
+            .client
+            .get(kubelet_metrics_url(host_ip, self.port))
+            .bearer_auth(token.trim())
+            .send()
+            .await
+            .and_then(|response| response.error_for_status())
+            .with_context(|| {
+                format!("failed to fetch resource metrics from node `{node}` at `{host_ip}`")
+            })?;
+
+        response
+            .text()
+            .await
+            .with_context(|| format!("failed to read resource metrics from node `{node}`"))
+    }
+}
+
+/// Builds the URL of a kubelet's resource metrics endpoint.
+fn kubelet_metrics_url(host_ip: &str, port: u16) -> String {
+    if host_ip.contains(':') {
+        // Bracket IPv6 addresses
+        format!("https://[{host_ip}]:{port}/metrics/resource")
+    } else {
+        format!("https://{host_ip}:{port}/metrics/resource")
+    }
 }
 
 /// A single container's metrics point parsed from a kubelet's resource
@@ -267,25 +379,28 @@ pub fn build_samples(
 
 /// Samples the resource usage of all task pods.
 ///
-/// Lists the task pods, fetches the kubelet resource metrics of each hosting
-/// node through the API server's node proxy, and builds the per-container
-/// resource usage observations for the database to record.
+/// Lists the task pods, fetches the resource metrics of each hosting node's
+/// kubelet, and builds the per-container resource usage observations for the
+/// database to record.
 ///
 /// A node whose metrics cannot be fetched is skipped (its pods simply miss a
 /// sampling round, losslessly); an error is returned only if the task pods
 /// cannot be listed.
 pub async fn sample_task_pods(
-    client: &Client,
+    kubelet: &KubeletClient,
     pods_api: &Api<Pod>,
     namespace: &str,
 ) -> Result<Vec<ContainerUsageSample>> {
     let pods = list_task_pods(pods_api).await?;
 
-    let nodes: HashSet<&str> = pods.iter().map(|pod| pod.node.as_str()).collect();
+    let nodes: HashSet<(&str, &str)> = pods
+        .iter()
+        .map(|pod| (pod.node.as_str(), pod.host_ip.as_str()))
+        .collect();
 
     let mut metrics = HashMap::new();
-    for node in nodes {
-        match fetch_node_metrics(client, node).await {
+    for (node, host_ip) in nodes {
+        match kubelet.fetch_node_metrics(node, host_ip).await {
             Ok(text) => metrics.extend(parse_node_metrics(&text, namespace)),
             Err(e) => {
                 warn!("failed to sample resource metrics from node `{node}`: {e:#}");
@@ -306,12 +421,45 @@ mod tests {
             name: name.to_string(),
             tes_id: tes_id.to_string(),
             node: "node-1".to_string(),
+            host_ip: "10.0.0.1".to_string(),
         }
     }
 
     /// Builds a metrics key for tests.
     fn key(pod: &str, container: &str) -> (String, String) {
         (pod.to_string(), container.to_string())
+    }
+
+    #[test]
+    fn kubelet_urls_bracket_ipv6_addresses() {
+        assert_eq!(
+            kubelet_metrics_url("10.0.0.7", 10250),
+            "https://10.0.0.7:10250/metrics/resource"
+        );
+        assert_eq!(
+            kubelet_metrics_url("fd00::7", 10250),
+            "https://[fd00::7]:10250/metrics/resource"
+        );
+    }
+
+    #[test]
+    fn kubelet_clients_require_a_certificate_authority_unless_insecure() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_ca = dir.path().join("ca.crt");
+        let token = dir.path().join("token");
+        std::fs::write(&token, "token").unwrap();
+
+        // Verified TLS requires a readable certificate authority bundle
+        let error = match KubeletClient::with_paths(10250, false, missing_ca.clone(), token.clone())
+        {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("certificate authority"));
+
+        // The insecure escape hatch does not read the bundle
+        let _ = KubeletClient::with_paths(10250, true, missing_ca, token)
+            .expect("insecure client should build");
     }
 
     #[test]

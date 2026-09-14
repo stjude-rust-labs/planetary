@@ -13,6 +13,7 @@ use secrecy::SecretString;
 use url::Url;
 
 use crate::monitor::Intervals;
+use crate::monitor::KubeletConfig;
 use crate::monitor::Monitor;
 use crate::monitor::Namespaces;
 use crate::monitor::OrchestratorServiceInfo;
@@ -57,6 +58,20 @@ pub struct Server {
     /// enters a terminal state.
     #[builder(into)]
     keep_interval: Duration,
+
+    /// The port kubelets listen on for resource usage sampling.
+    ///
+    /// Defaults to 10250.
+    #[builder(default = crate::usage::DEFAULT_KUBELET_PORT)]
+    kubelet_port: u16,
+
+    /// Whether to skip verification of kubelet serving certificates when
+    /// sampling resource usage.
+    ///
+    /// An escape hatch for clusters whose kubelets serve self-signed
+    /// certificates (for example, `kind`). Defaults to `false`.
+    #[builder(default)]
+    kubelet_insecure_tls: bool,
 
     /// The interval for sampling task pod resource usage from the kubelets
     /// hosting task pods (through the Kubernetes API server's node proxy).
@@ -116,6 +131,10 @@ impl Server {
                 check: self.check_interval,
                 keep: self.keep_interval,
                 usage: self.usage_sample_interval,
+            },
+            KubeletConfig {
+                port: self.kubelet_port,
+                insecure_tls: self.kubelet_insecure_tls,
             },
         )
         .await?;

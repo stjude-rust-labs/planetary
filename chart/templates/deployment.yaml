@@ -262,6 +262,10 @@ spec:
             value: {{ .Values.tasks.namespace }}
           - name: USAGE_SAMPLE_INTERVAL
             value: "{{ .Values.monitor.usageSampleInterval | default 0 }}"
+          - name: KUBELET_PORT
+            value: "{{ .Values.monitor.kubeletPort | default 10250 }}"
+          - name: KUBELET_INSECURE_TLS
+            value: "{{ .Values.monitor.kubeletInsecureTls | default false }}"
           - name: TEMPLATES_DIR
             value: /etc/templates
           - name: ORCHESTRATOR_URL

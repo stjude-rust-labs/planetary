@@ -67,33 +67,33 @@ rules:
   verbs: ["delete"]
 ---
 {{- if gt (int .Values.monitor.usageSampleInterval) 0 }}
-# Cluster role for the monitor to proxy to kubelets through the API server;
+# Cluster role for the monitor to read resource metrics from kubelets;
 # granted only when task resource usage sampling is enabled.
 #
-# The monitor uses this solely to read `/metrics/resource` from the kubelets
-# of the nodes hosting task pods, but Kubernetes cannot restrict
-# `nodes/proxy` to specific kubelet paths: this role grants read access to
-# the entire kubelet API of every node. The `get` verb limits the HTTP
-# method (ruling out exec, attach, and port-forward, which require `create`)
-# but not which endpoints are readable.
+# The monitor connects to each kubelet directly and is authorized by the
+# kubelet through a `SubjectAccessReview` for `get` on `nodes/metrics`,
+# which maps only to the kubelet's read-only `/metrics/*` paths. The
+# `nodes/proxy` resource is deliberately not used: kubelet authorization
+# also accepts it for the command execution endpoints (whose WebSocket
+# upgrades ride on HTTP GET), so it cannot be scoped to reads.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ .Release.Namespace }}-monitor-kubelet-proxy
+  name: {{ .Release.Namespace }}-monitor-kubelet-metrics
 rules:
 - apiGroups: [""]
-  resources: ["nodes/proxy"]
+  resources: ["nodes/metrics"]
   verbs: ["get"]
 ---
-# Cluster role binding for the monitor to proxy to kubelets
+# Cluster role binding for the monitor to read kubelet resource metrics
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ .Release.Namespace }}-monitor-kubelet-proxy
+  name: {{ .Release.Namespace }}-monitor-kubelet-metrics
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ .Release.Namespace }}-monitor-kubelet-proxy
+  name: {{ .Release.Namespace }}-monitor-kubelet-metrics
 subjects:
 - kind: ServiceAccount
   name: {{ .Values.monitor.account.name }}

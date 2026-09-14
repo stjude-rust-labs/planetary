@@ -9,18 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * Added `monitor.usageSampleInterval` to enable per-container task resource
   usage sampling from the kubelet `/metrics/resource` endpoints of the nodes
-  hosting task pods (through the Kubernetes API server's node proxy), along
-  with a conditional cluster role granting the monitor `get` on `nodes/proxy`
-  and a `Recreate` rollout strategy for the monitor. The task-level
+  hosting task pods, along with a conditional cluster role granting the
+  monitor `get` on `nodes/metrics` and a `Recreate` rollout strategy for the
+  monitor. Kubelets are contacted directly and their serving certificates are
+  verified against the cluster certificate authority;
+  `monitor.kubeletInsecureTls` skips verification for clusters whose kubelets
+  serve self-signed certificates (for example, `kind`), and
+  `monitor.kubeletPort` overrides the default port of 10250. The task-level
   `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` task log
   metadata keys cover the task's executor containers, and the
   `resource_usage` key carries the per-container breakdown (`inputs`,
-  `executor-N`, `outputs`). **Security note**: `get` on `nodes/proxy` is the
-  chart's only cluster-scoped permission and permits read access to the
-  entire kubelet API of every node (Kubernetes cannot restrict `nodes/proxy`
-  to specific kubelet paths; the `get` verb rules out exec and attach but
-  not which endpoints are readable); the role is not created while sampling
-  is disabled (the default)
+  `executor-N`, `outputs`). The `nodes/metrics` grant is the chart's only
+  cluster-scoped permission; kubelet authorization maps it exclusively to the
+  read-only `/metrics/*` paths, and the role is not created while sampling is
+  disabled (the default)
   ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 * Added `local.storage` to support local inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
 * Added `transporter.storage.azure` values for Azure Storage authentication ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).
