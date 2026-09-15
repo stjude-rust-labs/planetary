@@ -278,24 +278,24 @@ impl Monitor {
     /// per-container observations in the database, which folds them into the
     /// tasks' aggregate usage.
     async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
-        let kubelet = match crate::usage::KubeletClient::new(
-            state.kubelet.port,
-            state.kubelet.insecure_tls,
-            state.kubelet.ca_path.clone(),
-        ) {
-            Ok(kubelet) => kubelet,
-            Err(e) => {
-                error!("failed to initialize the kubelet client: {e:#}");
-                return;
-            }
-        };
-
         info!("task resource usage sampler has started");
 
         let pods: Api<Pod> = Api::namespaced(state.client.clone(), &state.namespaces.tasks);
 
         let mut interval = tokio::time::interval(sample_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        // The kubelet client, built lazily on the first successful tick and
+        // reused thereafter; if construction fails (for example, a
+        // certificate authority bundle that hasn't mounted yet), it is
+        // retried on every subsequent tick, using the sampling interval
+        // itself as a retry backoff
+        let mut kubelet: Option<crate::usage::KubeletClient> = None;
+
+        // Whether the previous kubelet client construction attempt failed;
+        // used to log the first failure and the recovery visibly without
+        // per-tick noise
+        let mut client_failing = false;
 
         // Whether the previous sampling attempt failed; used to log the
         // first failure and the recovery visibly without per-tick noise
@@ -314,8 +314,42 @@ impl Monitor {
                     // failed round is simply spanned by the next successful
                     // observation's delta
                     let round = async {
+                        if kubelet.is_none() {
+                            match crate::usage::KubeletClient::new(
+                                state.kubelet.port,
+                                state.kubelet.insecure_tls,
+                                state.kubelet.ca_path.clone(),
+                            ) {
+                                Ok(client) => {
+                                    if client_failing {
+                                        client_failing = false;
+                                        info!("kubelet client initialization has recovered");
+                                    }
+
+                                    kubelet = Some(client);
+                                }
+                                Err(e) => {
+                                    if client_failing {
+                                        debug!("failed to initialize the kubelet client: {e:#}");
+                                    } else {
+                                        client_failing = true;
+                                        error!(
+                                            "failed to initialize the kubelet client (will retry \
+                                             every sampling interval): {e:#}"
+                                        );
+                                    }
+
+                                    return;
+                                }
+                            }
+                        }
+
+                        let kubelet = kubelet
+                            .as_ref()
+                            .expect("kubelet client should be initialized above");
+
                         match crate::usage::sample_task_pods(
-                            &kubelet,
+                            kubelet,
                             &pods,
                             &state.namespaces.tasks,
                         )
@@ -349,7 +383,7 @@ impl Monitor {
                                     warn!(
                                         "failed to sample task pod resource usage (does the \
                                          monitor's service account have permission to list task \
-                                         pods and proxy to nodes?): {e:#}"
+                                         pods, and to `get` `nodes/metrics`?): {e:#}"
                                     );
                                 }
                             }
