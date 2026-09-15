@@ -149,9 +149,11 @@ const SERVICE_ACCOUNT_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceacc
 ///
 /// Requests carry the monitor's service account token; the kubelet authorizes
 /// them through a `SubjectAccessReview` for `get` on `nodes/metrics`. The
-/// kubelet's serving certificate is verified against the cluster certificate
-/// authority unless `insecure_tls` is enabled — an escape hatch for clusters
-/// whose kubelets serve self-signed certificates (for example, `kind`).
+/// kubelet's serving certificate is verified against a certificate authority
+/// bundle (the in-cluster bundle by default, or a custom bundle — see
+/// [`KubeletClient::new`]) to the exclusion of any other trust anchor,
+/// unless `insecure_tls` is enabled — an escape hatch for clusters whose
+/// kubelets serve self-signed certificates (for example, `kind`).
 ///
 /// Cheaply cloneable (the underlying `reqwest::Client` is itself
 /// `Arc`-backed): [`fetch_all_node_metrics`] clones a client into each
@@ -195,17 +197,31 @@ impl KubeletClient {
         let mut builder = reqwest::Client::builder().timeout(NODE_METRICS_TIMEOUT);
 
         if insecure_tls {
+            warn!(
+                "kubelet TLS verification is disabled (`--kubelet-insecure-tls` / \
+                 `KUBELET_INSECURE_TLS`): resource usage sampling will accept a kubelet's \
+                 certificate regardless of who issued it or which host it was issued for; this \
+                 should only be enabled on development clusters whose kubelets serve self-signed \
+                 certificates (for example, `kind`)"
+            );
             builder = builder.danger_accept_invalid_certs(true);
         } else {
             let ca = std::fs::read(&ca_path).with_context(|| {
                 format!(
-                    "failed to read the cluster certificate authority bundle from `{path}`",
+                    "failed to read the certificate authority bundle from `{path}`",
                     path = ca_path.display()
                 )
             })?;
             let cert = reqwest::Certificate::from_pem(&ca)
-                .context("failed to parse the cluster certificate authority bundle")?;
-            builder = builder.add_root_certificate(cert);
+                .context("failed to parse the certificate authority bundle")?;
+            // Trust only the configured certificate authority bundle, not
+            // reqwest's platform default trust store. The (deprecated)
+            // `add_root_certificate` only augments the default roots rather
+            // than replacing them, which would otherwise also accept a
+            // kubelet certificate issued by any publicly trusted
+            // certificate authority; `tls_certs_only` replaces the trust
+            // store with exactly the certificates given.
+            builder = builder.tls_certs_only(std::iter::once(cert));
         }
 
         Ok(Self {
