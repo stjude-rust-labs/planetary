@@ -266,6 +266,10 @@ spec:
             value: "{{ .Values.monitor.kubeletPort | default 10250 }}"
           - name: KUBELET_INSECURE_TLS
             value: "{{ .Values.monitor.kubeletInsecureTls | default false }}"
+          {{- if .Values.monitor.kubeletCaSecretName }}
+          - name: KUBELET_CA_PATH
+            value: /etc/planetary/kubelet-ca/ca.crt
+          {{- end }}
           - name: TEMPLATES_DIR
             value: /etc/templates
           - name: ORCHESTRATOR_URL
@@ -280,6 +284,11 @@ spec:
             mountPath: /mnt/orchestrator
           - name: templates
             mountPath: /etc/templates
+          {{- if .Values.monitor.kubeletCaSecretName }}
+          - name: kubelet-ca
+            mountPath: /etc/planetary/kubelet-ca
+            readOnly: true
+          {{- end }}
       volumes:
       - name: templates
         configMap:
@@ -288,6 +297,11 @@ spec:
         {{- with $storage }}
         {{- include "render" (dict "value" . "context" $) | nindent 8 }}
         {{- end }}
+      {{- if .Values.monitor.kubeletCaSecretName }}
+      - name: kubelet-ca
+        secret:
+          secretName: {{ .Values.monitor.kubeletCaSecretName }}
+      {{- end }}
 ---
 {{- if .Values.postgresql.enabled }}
 # Deployment for the PostgreSQL database

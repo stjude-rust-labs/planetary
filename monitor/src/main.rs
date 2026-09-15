@@ -78,6 +78,17 @@ pub struct Args {
     #[clap(long, env, default_value_t = false)]
     kubelet_insecure_tls: bool,
 
+    /// The path to a certificate authority bundle used to verify kubelet
+    /// serving certificates.
+    ///
+    /// Overrides the in-cluster service account certificate authority
+    /// bundle (`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`).
+    /// Useful when kubelet serving certificates are issued by a different
+    /// certificate authority than the cluster's own. Ignored when
+    /// `--kubelet-insecure-tls` is set.
+    #[clap(long, env)]
+    kubelet_ca_path: Option<PathBuf>,
+
     /// The name of the pod running the service.
     #[clap(long, env)]
     pod_name: String,
@@ -206,6 +217,7 @@ pub async fn main() -> anyhow::Result<()> {
         .keep_interval(Duration::from_secs(args.keep_interval))
         .kubelet_port(args.kubelet_port)
         .kubelet_insecure_tls(args.kubelet_insecure_tls)
+        .maybe_kubelet_ca_path(args.kubelet_ca_path)
         .maybe_usage_sample_interval(match args.usage_sample_interval {
             0 => None,
             secs => Some(Duration::from_secs(secs)),

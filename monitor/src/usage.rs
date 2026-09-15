@@ -178,11 +178,18 @@ pub struct KubeletClient {
 impl KubeletClient {
     /// Creates a new kubelet client using in-cluster service account
     /// credentials.
-    pub fn new(port: u16, insecure_tls: bool) -> Result<Self> {
+    ///
+    /// `ca_path` overrides the certificate authority bundle used to verify
+    /// kubelet serving certificates; `None` uses the in-cluster bundle
+    /// (`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`), which is
+    /// appropriate unless kubelet serving certificates are issued by a
+    /// different certificate authority than the cluster's own. Ignored when
+    /// `insecure_tls` is enabled.
+    pub fn new(port: u16, insecure_tls: bool, ca_path: Option<PathBuf>) -> Result<Self> {
         Self::with_paths(
             port,
             insecure_tls,
-            SERVICE_ACCOUNT_CA_PATH.into(),
+            ca_path.unwrap_or_else(|| SERVICE_ACCOUNT_CA_PATH.into()),
             SERVICE_ACCOUNT_TOKEN_PATH.into(),
         )
     }

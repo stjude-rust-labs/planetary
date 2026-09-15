@@ -73,6 +73,13 @@ pub struct Server {
     #[builder(default)]
     kubelet_insecure_tls: bool,
 
+    /// An override for the certificate authority bundle used to verify
+    /// kubelet serving certificates.
+    ///
+    /// `None` uses the in-cluster service account certificate authority
+    /// bundle. Ignored when `kubelet_insecure_tls` is enabled.
+    kubelet_ca_path: Option<PathBuf>,
+
     /// The interval for sampling task pod resource usage from the kubelets
     /// hosting task pods (through the Kubernetes API server's node proxy).
     ///
@@ -135,6 +142,7 @@ impl Server {
             KubeletConfig {
                 port: self.kubelet_port,
                 insecure_tls: self.kubelet_insecure_tls,
+                ca_path: self.kubelet_ca_path,
             },
         )
         .await?;

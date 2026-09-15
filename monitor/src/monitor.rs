@@ -105,7 +105,7 @@ pub struct Intervals {
 }
 
 /// Configuration for reading resource metrics from kubelets.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct KubeletConfig {
     /// The kubelet port.
     pub port: u16,
@@ -114,6 +114,12 @@ pub struct KubeletConfig {
     /// An escape hatch for clusters whose kubelets serve self-signed
     /// certificates (for example, `kind`).
     pub insecure_tls: bool,
+    /// An override for the certificate authority bundle used to verify
+    /// kubelet serving certificates.
+    ///
+    /// `None` uses the in-cluster service account certificate authority
+    /// bundle.
+    pub ca_path: Option<std::path::PathBuf>,
 }
 
 /// Represents state shared between different monitor tokio tasks.
@@ -275,6 +281,7 @@ impl Monitor {
         let kubelet = match crate::usage::KubeletClient::new(
             state.kubelet.port,
             state.kubelet.insecure_tls,
+            state.kubelet.ca_path.clone(),
         ) {
             Ok(kubelet) => kubelet,
             Err(e) => {

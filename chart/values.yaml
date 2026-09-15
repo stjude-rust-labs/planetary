@@ -150,6 +150,14 @@ monitor:
   # clusters whose kubelets serve self-signed certificates (for example,
   # `kind`).
   kubeletInsecureTls: false
+  # The name of a Secret (in this release's namespace) containing a `ca.crt`
+  # key with a certificate authority bundle used to verify kubelet serving
+  # certificates, when they are issued by a certificate authority different
+  # from the cluster's own (used to verify the in-cluster service account
+  # bundle by default). Leave unset (the default) to verify against the
+  # default in-cluster certificate authority bundle. Ignored when
+  # `kubeletInsecureTls` is enabled.
+  kubeletCaSecretName: ""
 
 # Configuration relating to the transporter used by Planetary for
 # transferring files to and from cloud storage.
