@@ -128,6 +128,14 @@ pub async fn list_task_pods(api: &Api<Pod>) -> Result<Vec<TaskPod>> {
 /// delaying monitor shutdown.
 const NODE_METRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// The maximum number of nodes to fetch resource metrics from concurrently.
+///
+/// Bounds the number of simultaneous kubelet connections (and apiserver
+/// `SubjectAccessReview` calls, one per fetch) a sampling round can open,
+/// while still letting a slow or unreachable node's [`NODE_METRICS_TIMEOUT`]
+/// elapse independently of other nodes instead of serializing behind them.
+const NODE_METRICS_CONCURRENCY: usize = 8;
+
 /// The default kubelet port.
 pub const DEFAULT_KUBELET_PORT: u16 = 10250;
 
@@ -144,6 +152,15 @@ const SERVICE_ACCOUNT_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceacc
 /// kubelet's serving certificate is verified against the cluster certificate
 /// authority unless `insecure_tls` is enabled — an escape hatch for clusters
 /// whose kubelets serve self-signed certificates (for example, `kind`).
+///
+/// Cheaply cloneable (the underlying `reqwest::Client` is itself
+/// `Arc`-backed): [`fetch_all_node_metrics`] clones a client into each
+/// concurrent per-node fetch so the future it hands to
+/// `buffer_unordered` is fully `'static`, sidestepping a known rustc
+/// limitation (<https://github.com/rust-lang/rust/issues/100013>) that
+/// otherwise surfaces as a spurious lifetime error elsewhere in the crate
+/// when a borrowed reference is threaded through a generic async helper.
+#[derive(Debug, Clone)]
 pub struct KubeletClient {
     /// The underlying HTTP client.
     client: reqwest::Client,
@@ -393,14 +410,64 @@ pub async fn sample_task_pods(
 ) -> Result<Vec<ContainerUsageSample>> {
     let pods = list_task_pods(pods_api).await?;
 
-    let nodes: HashSet<(&str, &str)> = pods
+    let nodes: HashSet<(String, String)> = pods
         .iter()
-        .map(|pod| (pod.node.as_str(), pod.host_ip.as_str()))
+        .map(|pod| (pod.node.clone(), pod.host_ip.clone()))
         .collect();
 
+    let metrics = fetch_all_node_metrics(
+        nodes,
+        namespace,
+        NODE_METRICS_CONCURRENCY,
+        |node, host_ip| {
+            let kubelet = kubelet.clone();
+            Box::pin(async move { kubelet.fetch_node_metrics(&node, &host_ip).await })
+        },
+    )
+    .await;
+
+    Ok(build_samples(&pods, &metrics))
+}
+
+/// The future type returned by a node-metrics fetch closure passed to
+/// [`fetch_all_node_metrics`].
+///
+/// Fully `'static` (the closure clones an owned [`KubeletClient`] into each
+/// future rather than borrowing one) so `fetch_all_node_metrics` itself
+/// carries no lifetime parameter — see [`KubeletClient`]'s doc comment for
+/// why that matters.
+type NodeMetricsFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>;
+
+/// Fetches resource metrics from a set of nodes concurrently, tolerating
+/// individual node failures.
+///
+/// At most `concurrency` fetches are in flight at once. A node whose fetch
+/// fails is logged and skipped; the merged result reflects only the nodes
+/// that succeeded.
+async fn fetch_all_node_metrics<F>(
+    nodes: HashSet<(String, String)>,
+    namespace: &str,
+    concurrency: usize,
+    fetch: F,
+) -> HashMap<(String, String), ContainerMetrics>
+where
+    F: Fn(String, String) -> NodeMetricsFuture,
+{
+    use futures::stream::StreamExt as _;
+
     let mut metrics = HashMap::new();
-    for (node, host_ip) in nodes {
-        match kubelet.fetch_node_metrics(node, host_ip).await {
+    let results: Vec<(String, Result<String>)> = futures::stream::iter(nodes)
+        .map(|(node, host_ip)| {
+            let fut = fetch(node.clone(), host_ip);
+            async move { (node, fut.await) }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    for (node, result) in results {
+        match result {
             Ok(text) => metrics.extend(parse_node_metrics(&text, namespace)),
             Err(e) => {
                 warn!("failed to sample resource metrics from node `{node}`: {e:#}");
@@ -408,7 +475,7 @@ pub async fn sample_task_pods(
         }
     }
 
-    Ok(build_samples(&pods, &metrics))
+    metrics
 }
 
 #[cfg(test)]
@@ -483,6 +550,73 @@ node_cpu_usage_seconds_total 100.0
         assert_eq!(point.cpu_seconds, Some(1.5));
         assert_eq!(point.memory_bytes, Some(380928));
         assert_eq!(point.start_time_seconds, Some(1.7879459339754386e+09));
+    }
+
+    #[tokio::test]
+    async fn fetch_all_node_metrics_bounds_concurrency() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+
+        let nodes: HashSet<(String, String)> = [
+            ("node-1", "10.0.0.1"),
+            ("node-2", "10.0.0.2"),
+            ("node-3", "10.0.0.3"),
+            ("node-4", "10.0.0.4"),
+        ]
+        .into_iter()
+        .map(|(node, host_ip)| (node.to_string(), host_ip.to_string()))
+        .collect();
+
+        let results = fetch_all_node_metrics(nodes, "planetary-tasks", 2, |_node, _host_ip| {
+            let in_flight = in_flight.clone();
+            let max_in_flight = max_in_flight.clone();
+            Box::pin(async move {
+                let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                max_in_flight.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(String::new())
+            })
+        })
+        .await;
+
+        assert!(results.is_empty());
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            2,
+            "expected exactly 2 concurrent fetches at peak, saw {}",
+            max_in_flight.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_all_node_metrics_skips_failed_nodes() {
+        let nodes: HashSet<(String, String)> = [("good", "10.0.0.1"), ("bad", "10.0.0.2")]
+            .into_iter()
+            .map(|(node, host_ip)| (node.to_string(), host_ip.to_string()))
+            .collect();
+
+        let results = fetch_all_node_metrics(nodes, "planetary-tasks", 8, |node, _host_ip| {
+            Box::pin(async move {
+                if node == "bad" {
+                    anyhow::bail!("simulated failure");
+                }
+
+                Ok(
+                    "container_cpu_usage_seconds_total{container=\"executor-0\",namespace=\"\
+                     planetary-tasks\",pod=\"good-pod\"} 1.0 0"
+                        .to_string(),
+                )
+            })
+        })
+        .await;
+
+        assert_eq!(results.len(), 1);
+        assert!(results.contains_key(&key("good-pod", "executor-0")));
     }
 
     #[test]
