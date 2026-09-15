@@ -80,8 +80,8 @@ pub struct Server {
     /// bundle. Ignored when `kubelet_insecure_tls` is enabled.
     kubelet_ca_path: Option<PathBuf>,
 
-    /// The interval for sampling task pod resource usage from the kubelets
-    /// hosting task pods (through the Kubernetes API server's node proxy).
+    /// The interval for sampling task pod resource usage directly from the
+    /// kubelets hosting task pods (authorized via `nodes/metrics`).
     ///
     /// `None` disables resource usage sampling.
     usage_sample_interval: Option<Duration>,
