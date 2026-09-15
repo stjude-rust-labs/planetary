@@ -393,10 +393,16 @@ the `get` verb on `nodes/metrics`, which kubelet authorization maps only to
 the kubelet's read-only `/metrics/*` paths (see
 [RBAC Authorization](#rbac-authorization)). Requests carry the monitor's
 service account token, and each kubelet's serving certificate is verified
-against the cluster certificate authority. On clusters whose kubelets serve
-self-signed certificates (for example, `kind`), set
-`monitor.kubeletInsecureTls: true` to skip verification; the kubelet port
-defaults to `10250` and can be changed with `monitor.kubeletPort`.
+against a certificate authority bundle, to the exclusion of any other trust
+anchor: the in-cluster service account bundle by default, or the bundle
+named by `monitor.kubeletCaSecretName` (a `Secret` in the release's
+namespace with a `ca.crt` key) if kubelet serving certificates are issued by
+a different certificate authority than the cluster's own. On clusters whose
+kubelets serve self-signed certificates (for example, `kind`), set
+`monitor.kubeletInsecureTls: true` to skip verification entirely instead —
+this disables both certificate and hostname verification, so it should only
+be used on development clusters. The kubelet port defaults to `10250` and
+can be changed with `monitor.kubeletPort`.
 
 The monitor periodically samples the usage of each of a task pod's
 containers and folds the samples into per-container aggregates. The

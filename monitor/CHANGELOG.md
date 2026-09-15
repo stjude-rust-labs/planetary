@@ -12,13 +12,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Added an opt-in task resource usage sampler (`--usage-sample-interval` /
   `USAGE_SAMPLE_INTERVAL`) that reads the kubelet `/metrics/resource`
   endpoints of the nodes hosting task pods and records per-container
-  aggregates in the database. Kubelets are contacted directly at each node's
-  address with the monitor's service account token, authorized via `get` on
-  `nodes/metrics`, and their serving certificates are verified against the
-  cluster certificate authority (`--kubelet-insecure-tls` /
-  `KUBELET_INSECURE_TLS` skips verification for clusters with self-signed
-  kubelet certificates, and `--kubelet-port` / `KUBELET_PORT` overrides the
-  default port of 10250)
+  aggregates in the database. Nodes are fetched concurrently (bounded, so a
+  slow or unreachable node cannot delay sampling the rest). Kubelets are
+  contacted directly at each node's address with the monitor's service
+  account token, authorized via `get` on `nodes/metrics`, and their serving
+  certificates are verified against a certificate authority bundle to the
+  exclusion of any other trust anchor: the in-cluster bundle by default, or
+  an override path (`--kubelet-ca-path` / `KUBELET_CA_PATH`) for clusters
+  whose kubelets are issued certificates by a different certificate
+  authority (`--kubelet-insecure-tls` / `KUBELET_INSECURE_TLS` instead skips
+  verification entirely, for clusters with self-signed kubelet
+  certificates, and logs a warning when enabled; `--kubelet-port` /
+  `KUBELET_PORT` overrides the default port of 10250). Kubelet client
+  initialization retries every sampling interval until it succeeds, rather
+  than disabling sampling for the life of the process on the first failure
   ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 * Added creating Kubernetes resources via a template ([#38](https://github.com/stjude-rust-labs/planetary/pull/38)).
 
