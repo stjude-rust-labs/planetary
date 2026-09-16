@@ -96,7 +96,8 @@ fn validate_task(task: &RequestTask, allow_file_urls: bool) -> Result<()> {
                 ensure_supported_url(url, "input", allow_file_urls)?;
             }
             (_, Some(_)) => {
-                // If content is specified, URL is ignored; it must be a file type
+                // If content is specified, URL is ignored; it must be a file
+                // type
                 if input.ty != IoType::File {
                     bail!("input specifies content but is not a file")
                 }
@@ -290,8 +291,9 @@ pub async fn create_task(
     Retry::spawn_notify(
         retry_durations(),
         || async {
-            // Retry the operation is there is a problem sending the request to the server
-            // Don't retry if the service returned an error response
+            // Retry the operation is there is a problem sending the request to
+            // the server Don't retry if the service returned an
+            // error response
             state
                 .client
                 .post(
@@ -415,8 +417,9 @@ pub async fn cancel_task(
     Retry::spawn_notify(
         retry_durations(),
         || async {
-            // Retry the operation is there is a problem sending the request to the server
-            // Don't retry if the service returned an error response
+            // Retry the operation is there is a problem sending the request to
+            // the server Don't retry if the service returned an
+            // error response
             state
                 .client
                 .delete(

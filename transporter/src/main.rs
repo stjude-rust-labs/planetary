@@ -437,8 +437,8 @@ async fn prepare_input(context: TransferContext, input: &Input, path: &Path) -> 
         }
     };
 
-    // Set the permissions (world-readable) so any user an executor container runs
-    // as will be able to read the input
+    // Set the permissions (world-readable) so any user an executor container
+    // runs as will be able to read the input
     set_permissions(&path, Permissions::from_mode(permissions))
         .await
         .with_context(|| {
@@ -537,8 +537,8 @@ async fn prepare_inputs(
     let stats = handler.await.expect("failed to join events handler");
     result?;
 
-    // We also need to create any file outputs so that Kubernetes will mount them as
-    // files and not directories
+    // We also need to create any file outputs so that Kubernetes will mount
+    // them as files and not directories
     for (index, output) in outputs.into_iter().enumerate() {
         // For local `file://` output URLs, create the file or directory at the
         // expected output location; executor containers will mount it directly.
@@ -560,8 +560,9 @@ async fn prepare_inputs(
                 })?;
             }
 
-            // If the output is a file *without* a path prefix, create it as a file
-            // If it has a path prefix, it's really a directory that we're filtering
+            // If the output is a file *without* a path prefix, create it as a
+            // file If it has a path prefix, it's really a directory
+            // that we're filtering
             if output.ty == IoType::File && output.path_prefix.is_none() {
                 // Create the file
                 File::create(&path).await.with_context(|| {
@@ -596,8 +597,8 @@ async fn prepare_inputs(
             0o777
         };
 
-        // Set the permissions (world-writable) so any user an executor container runs
-        // as will be able to write to the output.
+        // Set the permissions (world-writable) so any user an executor
+        // container runs as will be able to write to the output.
         set_permissions(&path, Permissions::from_mode(permissions))
             .await
             .with_context(|| {
