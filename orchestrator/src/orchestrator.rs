@@ -274,8 +274,8 @@ fn format_executor_script(executor: &Executor) -> Result<String> {
         script.push_str("if [[ ${CODE:-0} -ne 0 ]]; then exit $CODE; fi;");
     }
 
-    // We must wait for the background tee jobs to complete, otherwise buffers might
-    // not be flushed
+    // We must wait for the background tee jobs to complete, otherwise buffers
+    // might not be flushed
     script.push_str("wait $(jobs -p) 2>&1 >/dev/null");
     Ok(script)
 }
@@ -378,8 +378,8 @@ impl PodExt for Pod {
                 }
 
                 // Check for all terminated init containers
-                // If the pod is pending, it means it is waiting on the main (outputs) container
-                // to start
+                // If the pod is pending, it means it is waiting on the main
+                // (outputs) container to start
                 if !init_statuses.is_empty()
                     && init_statuses.iter().all(|s| {
                         s.state
@@ -398,7 +398,8 @@ impl PodExt for Pod {
                         .map(|s| s.running.is_some())
                         .unwrap_or(false)
                 }) {
-                    // If the first init container (inputs) is running, the task is initializing
+                    // If the first init container (inputs) is running, the task
+                    // is initializing
                     if index == 0 {
                         TaskPodState::Initializing
                     } else {
@@ -531,9 +532,9 @@ impl TaskOrchestrator {
 
         let template = Template::new(templates_dir.into())?;
 
-        // Do an up-front rendering with a dummy identifier to catch errors in the
-        // template. Note: this will not catch an error in the template that would
-        // result from a branch or loop not taken.
+        // Do an up-front rendering with a dummy identifier to catch errors in
+        // the template. Note: this will not catch an error in the
+        // template that would result from a branch or loop not taken.
         let tasks_namespace = tasks_namespace.into();
         template
             .render_id_only("validation", &discovery, &tasks_namespace)
@@ -640,8 +641,8 @@ impl TaskOrchestrator {
         let cancel = async {
             let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.tasks_namespace);
 
-            // Get the pod information so we can record the terminated containers at the
-            // time it was canceled.
+            // Get the pod information so we can record the terminated
+            // containers at the time it was canceled.
             let pod = Retry::spawn_notify(
                 retry_durations(),
                 || async {
@@ -688,7 +689,8 @@ impl TaskOrchestrator {
                         )
                         .await
                 {
-                    // Ignore if the pod is not found as the monitor may have GC'd already
+                    // Ignore if the pod is not found as the monitor may have
+                    // GC'd already
                     match e {
                         kube::Error::Api(status) if status.is_not_found() => {}
                         _ => {
@@ -897,7 +899,8 @@ impl TaskOrchestrator {
                 {
                     Ok(output) => Ok(output),
                     Err(kube::Error::Api(s)) if s.is_not_found() || s.code == 400 => {
-                        // The pod or container no longer exists; treat as empty output
+                        // The pod or container no longer exists; treat as empty
+                        // output
                         Ok(String::new())
                     }
                     Err(e) => Err(into_retry_error(e)),
@@ -1102,7 +1105,8 @@ impl TaskOrchestrator {
                     {
                         Ok(output) => Ok(output),
                         Err(kube::Error::Api(s)) if s.is_not_found() || s.code == 400 => {
-                            // The pod or container no longer exists; treat as empty output
+                            // The pod or container no longer exists; treat as
+                            // empty output
                             Ok(String::new())
                         }
                         Err(e) => Err(into_retry_error(e)),
@@ -1114,8 +1118,8 @@ impl TaskOrchestrator {
 
             let executor_index = executor_index(&status.name);
 
-            // If the output contains the magic exit prefix, use the contained exit code
-            // rather than the containers
+            // If the output contains the magic exit prefix, use the contained
+            // exit code rather than the containers
             let exit_code = if executor_index.is_some()
                 && let Some(pos) = output.rfind(EXIT_PREFIX)
             {
@@ -1127,8 +1131,9 @@ impl TaskOrchestrator {
                 terminated.exit_code
             };
 
-            // TODO: once k8s supports split logs, read both stdout and stderr streams
-            // Until then, use `stdout` if the pod succeeded and `stderr` if it failed
+            // TODO: once k8s supports split logs, read both stdout and stderr
+            // streams Until then, use `stdout` if the pod succeeded
+            // and `stderr` if it failed
             let (stdout, stderr) = if exit_code == 0 {
                 (Some(output.into()), None)
             } else {
