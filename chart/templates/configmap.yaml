@@ -148,6 +148,23 @@ data:
           readOnly: true
           recursiveReadOnly: IfPossible
         {{ end -}}
+        # Also mount the task's inputs at the same paths the executors used.
+        # A task's work directory may still contain symlinks pointing at
+        # input files (e.g. if the task's own cleanup step didn't run
+        # because the task failed). Without these mounts, the outputs
+        # container can't resolve such symlinks and sweeping the work
+        # directory for outputs fails with a spurious "no such file or
+        # directory" error, masking the task's real failure.
+        {% for input in inputs %}
+        {{- if not .Values.local.storage }}
+        {% if input.local_path %}{% continue %}{% endif %}
+        {{ end -}}
+        - name: {% if input.local_path %}local{% else %}storage{% endif %}
+          mountPath: {{ `{{ input.path }}` }}
+          subPath: {% if input.local_path %}{{ `{{ input.local_path }}` }}{% else %}inputs/{{ `{{ loop.index0 }}` }}{% endif %}
+          readOnly: true
+          recursiveReadOnly: IfPossible
+        {% endfor %}
         - name: orchestrator-storage
           mountPath: /mnt/orchestrator
         resources:
