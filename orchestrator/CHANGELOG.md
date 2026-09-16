@@ -15,16 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Added shared storage for communicating inputs and outputs to task pods ([#38](https://github.com/stjude-rust-labs/planetary/pull/38)).
 * Added support for reading Azure Storage credentials from the K8s secret ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).
 
-#### Changed
-
-* The system error message reported when the `outputs` container fails to
-  upload a task's outputs now notes any concurrently-failed executor
-  container, to avoid misleadingly attributing the failure solely to the
-  output upload step when an executor genuinely failed first
-  ([#XX](https://github.com/stjude-rust-labs/planetary/pull/XX)).
-
 #### Fixed
 
+* Included failed executor details when a task is otherwise reported with an
+  I/O or system error
+  ([#51](https://github.com/stjude-rust-labs/planetary/pull/51)).
 * Fixed returning a 403 for when there is an invalid or missing authorization
   header ([#26](https://github.com/stjude-rust-labs/planetary/pull/26)).
 * Fixed incorrect task state when a system error was encountered ([#28](https://github.com/stjude-rust-labs/planetary/pull/28)).

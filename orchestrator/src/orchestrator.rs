@@ -60,6 +60,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 use crate::into_retry_error;
 use crate::notify_retry;
@@ -286,14 +287,7 @@ fn executor_index(name: &str) -> Option<i32> {
         .and_then(|n| n.parse().ok())
 }
 
-/// Builds a note describing any executor container that failed (non-zero
-/// exit) in the given pod's current status snapshot.
-///
-/// Returns an empty string if no executor has failed. This is used to
-/// augment io-processing error messages (see `handle_io_error`) since an
-/// io-processing failure (e.g. sweeping the outputs directory) can be a
-/// downstream/secondary effect of an executor that already failed, and the
-/// executor's failure is typically the more useful root cause to report.
+/// Describes failed executor containers in the pod's current status.
 fn failed_executor_note(pod: &Pod) -> String {
     pod.status
         .as_ref()
@@ -795,6 +789,20 @@ impl TaskOrchestrator {
 
         debug!("task pod `{tes_id}` is in state `{state}`");
 
+        // Preserve executor diagnostics without changing task classification.
+        if matches!(
+            state,
+            TaskPodState::InputsError | TaskPodState::OutputsError | TaskPodState::SystemError
+        ) {
+            let note = failed_executor_note(pod);
+            if !note.is_empty() {
+                warn!(
+                    "task pod `{tes_id}` was classified as `{state}` but its status also shows a \
+                     failed executor ({note}); the executor failure may be the true root cause"
+                );
+            }
+        }
+
         match state {
             TaskPodState::Unknown => self.handle_unknown_pod(tes_id, pod).await?,
             TaskPodState::Waiting => self.handle_waiting_task(tes_id).await?,
@@ -934,12 +942,6 @@ impl TaskOrchestrator {
         )
         .await?;
 
-        // Check whether an executor also failed in this same pod snapshot. An
-        // outputs-processing failure can be a downstream/secondary effect of
-        // an executor that failed earlier (e.g. the executor aborted before
-        // cleaning up a file that the outputs sweep then failed to find), so
-        // surface that fact explicitly rather than only reporting the
-        // (possibly misleading) io error.
         let executor_note = failed_executor_note(pod);
 
         let message = format_log_message!(
@@ -1354,8 +1356,7 @@ mod tests {
 
     use super::*;
 
-    /// Builds a terminated `ContainerStatus` with the given name and exit
-    /// code, for use in tests.
+    /// Builds a terminated container status for tests.
     fn terminated_status(name: &str, exit_code: i32) -> ContainerStatus {
         ContainerStatus {
             name: name.to_string(),
@@ -1370,6 +1371,7 @@ mod tests {
         }
     }
 
+    /// Builds a pod with the given init container statuses.
     fn pod_with_init_statuses(statuses: Vec<ContainerStatus>) -> Pod {
         Pod {
             status: Some(PodStatus {
@@ -1412,9 +1414,6 @@ mod tests {
 
     #[test]
     fn failed_executor_note_ignores_a_failed_inputs_container() {
-        // Only executor container failures should be reported by this
-        // helper; a failed `inputs` container is handled separately (as
-        // `TaskPodState::InputsError`) and shouldn't be duplicated here.
         let pod = pod_with_init_statuses(vec![terminated_status(INPUTS_CONTAINER_NAME, 1)]);
 
         assert_eq!(failed_executor_note(&pod), "");
