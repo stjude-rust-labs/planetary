@@ -204,6 +204,11 @@ networkPolicies:
       - port: 443
         protocol: TCP
 
+# Storage configuration for task PVCs.
+task:
+  # StorageClass for task PVCs. If null, Kubernetes uses the cluster default.
+  storageClass: null
+
 # The configuration for local (i.e., `file://` URLs) storage.
 # By default, support for local storage will be disabled.
 local:

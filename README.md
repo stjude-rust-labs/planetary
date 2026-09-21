@@ -293,6 +293,9 @@ By default, the template creates a `PersistentVolumeClaim` resource to
 provision storage for the task and a single `Pod` resource for executing the
 task.
 
+Task PVCs use the cluster's default `StorageClass`. Set `task.storageClass` to
+select another class, such as higher-throughput storage for large transfers.
+
 The task pod consists of several containers:
 
 * An _init container_ for downloading inputs.
