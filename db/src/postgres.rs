@@ -74,9 +74,9 @@ macro_rules! load_task_container_usage {
     }};
 }
 
-mod usage;
 #[allow(clippy::missing_docs_in_private_items)]
 pub(crate) mod schema;
+mod usage;
 
 /// Used to embed the migrations into the binary so they can be applied at
 /// runtime.
@@ -722,9 +722,7 @@ impl Database for PostgresDatabase {
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
         // See `Database::add_task_resource_usage_samples` for the full
-        // idempotency contract this query implements. The scenario battery
-        // in `postgres/usage-fold-scenarios.sql` exercises it against a
-        // deployed database.
+        // idempotency contract this query implements.
         sql_query(
             r#"
             -- Unnest the batched observation arrays and resolve each to its

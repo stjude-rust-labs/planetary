@@ -219,13 +219,6 @@ There are currently four images created for use with Planetary:
 
 ### API Server Request Authentication
 
-> [!NOTE]
-> The Planetary API server serves the TES API under the `/v1` path prefix.
-> When configuring a TES client, use a base URL that includes the prefix
-> (e.g. `http://localhost:8080/v1`), as clients append endpoint paths like
-> `/tasks` and `/service-info` to it; omitting the prefix results in `404
-> Not Found` responses.
-
 The Planetary API server ***performs no authentication of requests***.
 
 However, requests must be associated with a username in one of two ways (in

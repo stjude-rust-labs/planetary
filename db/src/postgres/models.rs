@@ -659,4 +659,3 @@ pub struct NewError<'a> {
     /// The error message.
     pub message: &'a str,
 }
-
