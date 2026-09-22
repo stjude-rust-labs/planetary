@@ -90,7 +90,7 @@ research to create a complete list of concerns to consider in your situation:
   least-privilege access.
 
   Note that enabling [task resource usage reporting](#task-resource-usage-reporting)
-  (`monitor.usageSampleInterval > 0`; disabled by default) grants the monitor
+  (`monitor.usageSampleInterval` set; disabled by default) grants the monitor
   a **cluster-scoped** `get` permission on `nodes/metrics`, which kubelet
   authorization maps only to the read-only `/metrics/*` endpoints of each
   node's kubelet.
@@ -357,26 +357,19 @@ If additional resource kinds are required in the task template, ensure that the
 Planetary orchestrator is granted the `create` verb and that the Planetary
 monitor is granted the `delete` verb for the resource.
 
-When [task resource usage reporting](#task-resource-usage-reporting) is
-enabled (`monitor.usageSampleInterval > 0`; disabled by default), the chart
-additionally grants the monitor a **cluster-scoped** role with the `get` verb
-on `nodes/metrics`, used to read the `/metrics/resource` endpoint of the
-kubelets hosting task pods. This is the only cluster-scoped permission in the
-chart. Kubelet authorization maps `nodes/metrics` only to the read-only
-`/metrics/*` paths; the broader `nodes/proxy` resource is deliberately not
-used, because kubelet authorization also accepts it for the command
-execution endpoints (whose WebSocket upgrades ride on HTTP GET), making it
-impossible to scope to reads.
-
-See [`rbac.yaml`](./chart/templates/rbac.yaml) for more information.
+Enabling [task resource usage reporting](#task-resource-usage-reporting)
+additionally grants the monitor a **cluster-scoped** role — see that section
+for the full rationale. See [`rbac.yaml`](./chart/templates/rbac.yaml) for
+more information.
 
 ### Task Resource Usage Reporting
 
 Planetary can optionally sample the resource usage of task pods and report it
 through the TES API.
 
-Sampling is disabled by default and is enabled by setting the chart value
-`monitor.usageSampleInterval` to a sampling interval in seconds.
+Sampling is disabled by default (`monitor.usageSampleInterval` is unset) and
+is enabled by setting `monitor.usageSampleInterval` to a sampling interval in
+seconds.
 
 Usage is read from the `/metrics/resource` endpoint of the kubelets hosting
 task pods, contacted directly at each node's address. The
@@ -388,21 +381,27 @@ remain `Pending` while executing — and its documentation states that it is
 meant only for autoscaling purposes, directing monitoring consumers to
 collect from the kubelet `/metrics/resource` endpoint directly.
 
-When sampling is enabled, the chart grants the monitor a cluster role with
-the `get` verb on `nodes/metrics`, which kubelet authorization maps only to
-the kubelet's read-only `/metrics/*` paths (see
-[RBAC Authorization](#rbac-authorization)). Requests carry the monitor's
-service account token, and each kubelet's serving certificate is verified
-against a certificate authority bundle, to the exclusion of any other trust
-anchor: the in-cluster service account bundle by default, or the bundle
-named by `monitor.kubeletCaSecretName` (a `Secret` in the release's
-namespace with a `ca.crt` key) if kubelet serving certificates are issued by
-a different certificate authority than the cluster's own. On clusters whose
-kubelets serve self-signed certificates (for example, `kind`), set
-`monitor.kubeletInsecureTls: true` to skip verification entirely instead —
-this disables both certificate and hostname verification, so it should only
-be used on development clusters. The kubelet port defaults to `10250` and
-can be changed with `monitor.kubeletPort`.
+When sampling is enabled, the chart grants the monitor a **cluster-scoped**
+role with the `get` verb on `nodes/metrics`. This is the only cluster-scoped
+permission in the chart, and it is granted only while sampling is enabled.
+Kubelet authorization maps `nodes/metrics` only to the read-only
+`/metrics/*` paths; the broader `nodes/proxy` resource is deliberately not
+used, because kubelet authorization also accepts it for the command
+execution endpoints (whose WebSocket upgrades ride on HTTP GET), making it
+impossible to scope to reads.
+
+Requests carry the monitor's service account token, and each kubelet's
+serving certificate is verified against a certificate authority bundle, to
+the exclusion of any other trust anchor: the in-cluster service account
+bundle by default, or the bundle named by `monitor.kubeletCaSecretName` (a
+`Secret` in the release's namespace with a `ca.crt` key) if kubelet serving
+certificates are issued by a different certificate authority than the
+cluster's own. On clusters whose kubelets serve self-signed certificates
+(for example, `kind`), set `monitor.kubeletInsecureTls: true` to skip
+verification entirely instead — this disables both certificate and
+hostname verification, so it should only be used on development clusters.
+The kubelet port defaults to `10250` and can be changed with
+`monitor.kubeletPort`.
 
 The monitor periodically samples the usage of each of a task pod's
 containers and folds the samples into per-container aggregates. The
@@ -640,11 +639,6 @@ curl -v http://localhost:8080/v1/service-info
 ```
 
 Congratulations, Planetary is now ready to receive requests 🎉!
-
-**Note:** when pointing a TES client at this deployment, configure the
-client's base URL as `http://localhost:8080/v1` — the `/v1` prefix is
-required, as TES clients append endpoint paths (e.g. `/tasks`) to the base
-URL.
 
 ### Deploying Development Changes
 

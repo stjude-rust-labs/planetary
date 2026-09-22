@@ -103,15 +103,9 @@ pub struct TaskTemplateData {
 /// A single resource usage observation for one container of a task's pod.
 ///
 /// Containers are identified by their pod name and Kubernetes container name
-/// (`inputs`, `executor-N`, or `outputs`).
-///
-/// CPU is reported as the observed *cumulative* counter value (seconds since
-/// the container instance started); the database computes the delta against
-/// its stored baseline for the container and advances the baseline
-/// atomically with the aggregate, making recording idempotent.
-///
-/// Each dimension is optional; a dimension that could not be measured for a
-/// sampling round is `None` and does not affect the container's aggregate.
+/// (`inputs`, `executor-N`, or `outputs`). Each dimension is optional; a
+/// dimension that could not be measured for a sampling round is `None` and
+/// does not affect the container's aggregate.
 #[derive(Debug, Clone, Default)]
 pub struct ContainerUsageSample {
     /// The TES identifier of the task.
@@ -215,14 +209,6 @@ pub trait Database: Send + Sync + 'static {
     /// Records a round of per-container resource usage observations for
     /// tasks.
     ///
-    /// Observations are folded into each task container's running aggregate
-    /// in a single atomic statement: the peak working set memory is kept,
-    /// the sampled memory is added to the running total used for computing
-    /// the average, and the CPU counter's delta against the stored
-    /// per-container baseline is accumulated, with the baseline advanced in
-    /// the same statement. A `None` dimension in an observation leaves the
-    /// corresponding aggregate untouched.
-    ///
     /// Recording is **idempotent** with respect to CPU time: re-recording an
     /// observation whose previous write already committed (e.g. after an
     /// ambiguous commit outcome) yields a zero delta, and an observation
@@ -230,11 +216,6 @@ pub trait Database: Send + Sync + 'static {
     /// since the stored baseline. A container instance with no stored
     /// baseline (first observation, or a restart detected by a changed
     /// start time or a decreasing counter) attributes its full counter.
-    ///
-    /// The observations may contain multiple entries for the same task and
-    /// container name from different pods (e.g. when more than one pod
-    /// carries the same task label); each is accounted independently via
-    /// its own baseline.
     ///
     /// The aggregates are reported in the task's log metadata: the
     /// `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys carry

@@ -5,45 +5,25 @@
 //! observation in the database, which folds it into the task's aggregate
 //! resource usage.
 //!
-//! The kubelet is contacted directly at its node's address rather than
-//! through the API server's node proxy: proxying requires `get` on the
-//! `nodes/proxy` resource, which kubelet authorization also accepts for its
-//! command execution endpoints (WebSocket upgrades ride on HTTP GET), so the
-//! permission cannot be scoped to reads. A direct request is authorized by
-//! the kubelet itself through a `SubjectAccessReview` for `get` on
-//! `nodes/metrics`, which maps only to the kubelet's `/metrics/*` paths.
+//! The kubelet is read directly, rather than through the `metrics.k8s.io`
+//! API, because the reference Kubernetes metrics-server only serves metrics
+//! for `Running`-phase pods — task pods run their work in *init* containers
+//! and stay `Pending` while executing, so their usage would never be
+//! visible through `metrics.k8s.io` — and because metrics-server's own
+//! documentation directs monitoring consumers to the kubelet
+//! `/metrics/resource` endpoint directly:
+//! <https://github.com/kubernetes-sigs/metrics-server#use-cases>. A direct
+//! request is authorized by the kubelet itself through a
+//! `SubjectAccessReview` for `get` on `nodes/metrics` (see
+//! [RBAC Authorization](../../../README.md#rbac-authorization) for why
+//! `nodes/proxy` is not used instead).
 //!
-//! The kubelet is read directly — rather than through the `metrics.k8s.io`
-//! API — for two reasons:
-//!
-//! * The reference Kubernetes metrics-server only serves metrics for pods in
-//!   the `Running` phase: its pod informer watches with the field selector
-//!   `status.phase=Running` (`pkg/server/informer.go`, moved there from an
-//!   explicit check in `pkg/api/pod.go` by kubernetes-sigs/metrics-server
-//!   commit `fd1f74df`, first released in v0.5.0). Task pods execute their work
-//!   in *init* containers and therefore remain in the `Pending` phase while
-//!   executing, so their usage is never visible through `metrics.k8s.io` on any
-//!   metrics-server version.
-//!
-//! * The metrics-server documentation itself states that it is meant only
-//!   for autoscaling purposes and that monitoring consumers should "collect
-//!   metrics from Kubelet `/metrics/resource` endpoint directly":
-//!   <https://github.com/kubernetes-sigs/metrics-server#use-cases>
-//!
-//! The kubelet reports cumulative CPU time and instantaneous working set
-//! memory per container, keyed by namespace, pod, and container name, for
-//! all running containers (including init containers).
-//!
-//! Observations carry the *cumulative* CPU counter values; the database
+//! Observations carry the *cumulative* CPU counter value; the database
 //! computes each counter's delta against a stored per-container baseline
 //! and advances the baseline atomically with the aggregate (see
-//! [`planetary_db::Database::add_task_resource_usage_samples`]). Keeping the
-//! accounting state durable with the write makes recording idempotent and
-//! exactly-once for observed counter movement: skipped or failed rounds are
-//! spanned by the next successful observation's delta, ambiguous database
-//! commit outcomes resolve to a zero delta on the next observation, and
-//! monitor restarts continue accounting from the stored baseline. The
-//! sampling client itself is stateless.
+//! [`planetary_db::Database::add_task_resource_usage_samples`]), making
+//! recording idempotent across monitor restarts and ambiguous database
+//! commit outcomes. The sampling client itself is stateless.
 //!
 //! The aggregate usage is reported through the TES API as task log metadata:
 //! the `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys carry
@@ -121,11 +101,9 @@ pub async fn list_task_pods(api: &Api<Pod>) -> Result<Vec<TaskPod>> {
 
 /// The timeout for fetching a node's resource metrics.
 ///
-/// Bounds the impact of an unresponsive kubelet: a fetch that exceeds the
-/// timeout is treated like any other failed fetch, so the node's pods miss
-/// the round (losslessly — the next successful observation's counter delta
-/// spans the gap) instead of stalling the sampling of other nodes or
-/// delaying monitor shutdown.
+/// Bounds the impact of an unresponsive kubelet: a timed-out fetch is
+/// treated like any other failed fetch, so the node's pods miss the round
+/// instead of stalling the rest of the sampling round.
 const NODE_METRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The maximum number of nodes to fetch resource metrics from concurrently.
@@ -147,21 +125,17 @@ const SERVICE_ACCOUNT_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceacc
 
 /// A client for reading resource metrics directly from kubelets.
 ///
-/// Requests carry the monitor's service account token; the kubelet authorizes
-/// them through a `SubjectAccessReview` for `get` on `nodes/metrics`. The
-/// kubelet's serving certificate is verified against a certificate authority
-/// bundle (the in-cluster bundle by default, or a custom bundle — see
-/// [`KubeletClient::new`]) to the exclusion of any other trust anchor,
-/// unless `insecure_tls` is enabled — an escape hatch for clusters whose
-/// kubelets serve self-signed certificates (for example, `kind`).
+/// Requests carry the monitor's service account token; the kubelet
+/// authorizes them through a `SubjectAccessReview` for `get` on
+/// `nodes/metrics`. The kubelet's serving certificate is verified against a
+/// certificate authority bundle (the in-cluster bundle by default, or a
+/// custom bundle — see [`KubeletClient::new`]), unless `insecure_tls` is
+/// enabled for clusters with self-signed kubelet certificates.
 ///
-/// Cheaply cloneable (the underlying `reqwest::Client` is itself
-/// `Arc`-backed): [`fetch_all_node_metrics`] clones a client into each
-/// concurrent per-node fetch so the future it hands to
-/// `buffer_unordered` is fully `'static`, sidestepping a known rustc
-/// limitation (<https://github.com/rust-lang/rust/issues/100013>) that
-/// otherwise surfaces as a spurious lifetime error elsewhere in the crate
-/// when a borrowed reference is threaded through a generic async helper.
+/// Cheaply cloneable (the underlying `reqwest::Client` is `Arc`-backed):
+/// [`fetch_all_node_metrics`] clones a client into each concurrent per-node
+/// fetch so the future it hands to `buffer_unordered` is fully `'static`
+/// (see <https://github.com/rust-lang/rust/issues/100013>).
 #[derive(Debug, Clone)]
 pub struct KubeletClient {
     /// The underlying HTTP client.
@@ -369,7 +343,7 @@ pub fn parse_node_metrics(
             CPU_METRIC => metrics.cpu_seconds = Some(value),
             MEMORY_METRIC => metrics.memory_bytes = Some(value as u64),
             START_TIME_METRIC => metrics.start_time_seconds = Some(value),
-            _ => unreachable!(),
+            _ => unreachable!("unsupported metric `{name}`; add a case for it above"),
         }
     }
 

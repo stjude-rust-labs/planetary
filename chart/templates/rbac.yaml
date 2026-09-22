@@ -66,16 +66,10 @@ rules:
   resources: ["persistentvolumeclaims"]
   verbs: ["delete"]
 ---
-{{- if gt (int .Values.monitor.usageSampleInterval) 0 }}
-# Cluster role for the monitor to read resource metrics from kubelets;
-# granted only when task resource usage sampling is enabled.
-#
-# The monitor connects to each kubelet directly and is authorized by the
-# kubelet through a `SubjectAccessReview` for `get` on `nodes/metrics`,
-# which maps only to the kubelet's read-only `/metrics/*` paths. The
-# `nodes/proxy` resource is deliberately not used: kubelet authorization
-# also accepts it for the command execution endpoints (whose WebSocket
-# upgrades ride on HTTP GET), so it cannot be scoped to reads.
+{{- if .Values.monitor.usageSampleInterval }}
+# Cluster role for the monitor to read resource metrics from kubelets,
+# granted only when task resource usage sampling is enabled. See
+# "RBAC Authorization" in the top-level README for the full rationale.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

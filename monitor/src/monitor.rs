@@ -417,13 +417,10 @@ impl Monitor {
                 biased;
                 _ = state.shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    // Racing the round against shutdown keeps shutdown from
-                    // waiting on slow cluster or database requests. Aborting
-                    // the round is safe: orphan detection is recomputed from
-                    // cluster and database state every round, and each
-                    // adoption request and task state transition is applied
-                    // individually, so any remaining work is picked up by
-                    // the next round
+                    // Aborting the round on shutdown is safe: orphan
+                    // detection is recomputed from cluster and database
+                    // state every round, and any remaining work is picked
+                    // up by the next round.
                     let round = async {
                         // Start by getting the current pod map
                         match Self::get_task_pod_map(&task_pods).await {
@@ -619,13 +616,9 @@ impl Monitor {
 
     /// Performs a garbage collection for terminated tasks.
     ///
-    /// Cancellation is cooperative rather than racing the whole collection
-    /// against shutdown: the shutdown token is checked between pages and
-    /// between tasks, so that an in-progress [`Self::delete_resources`] for
-    /// a task is never abandoned partway (which could delete the task's pod
-    /// — through which garbage is discovered — while leaking its other
-    /// resources). Shutdown latency is therefore bounded by a single task's
-    /// resource deletion; any remaining garbage is collected by the next
+    /// Cancellation is cooperative: the shutdown token is checked between
+    /// pages and tasks so an in-progress [`Self::delete_resources`] is never
+    /// abandoned partway. Any remaining garbage is collected by the next
     /// monitor instance.
     async fn gc(state: &State, task_pods: &Api<Pod>) -> Result<()> {
         /// The maximum number of tasks to collect per iteration
@@ -809,14 +802,10 @@ impl Monitor {
                     match event {
                         Some(Ok(Event::InitApply(pod) | Event::Apply(pod))) => {
                             let state = state.clone();
-                            // The deletion is deliberately detached: it is
-                            // not joined on shutdown, so an in-flight
-                            // deletion may be cut short by process exit
-                            // (just as by a crash). This is recoverable, as
+                            // Detached deliberately: an in-flight deletion
+                            // cut short by process exit is recoverable, as
                             // the cancellation label persists on the pod and
-                            // the next monitor instance's watcher re-observes
-                            // it; joining with a timeout would instead delay
-                            // shutdown behind slow deletions
+                            // the next monitor instance re-observes it.
                             tokio::spawn(async move {
                                 if let Some(id) = pod.labels().get(TASK_LABEL) &&
                                     let Err(e) = Self::delete_resources(&state, id).await {

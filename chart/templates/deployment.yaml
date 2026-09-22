@@ -260,8 +260,10 @@ spec:
             value: "{{ .Release.Namespace }}"
           - name: TASKS_NAMESPACE
             value: {{ .Values.tasks.namespace }}
+          {{- if .Values.monitor.usageSampleInterval }}
           - name: USAGE_SAMPLE_INTERVAL
-            value: "{{ .Values.monitor.usageSampleInterval | default 0 }}"
+            value: "{{ .Values.monitor.usageSampleInterval }}"
+          {{- end }}
           - name: KUBELET_PORT
             value: "{{ .Values.monitor.kubeletPort | default 10250 }}"
           - name: KUBELET_INSECURE_TLS
@@ -301,6 +303,7 @@ spec:
       - name: kubelet-ca
         secret:
           secretName: {{ .Values.monitor.kubeletCaSecretName }}
+          optional: true
       {{- end }}
 ---
 {{- if .Values.postgresql.enabled }}

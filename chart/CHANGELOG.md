@@ -14,24 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Added a 15 minute TTL on the migration job ([#25](https://github.com/stjude-rust-labs/planetary/pull/25)).
 * Addes dynamic egress network policy additions for cloud and user exceptions ([#34](https://github.com/stjude-rust-labs/planetary/pull/34)).
 * Added `monitor.usageSampleInterval` to enable per-container task resource
-  usage sampling from the kubelet `/metrics/resource` endpoints of the nodes
-  hosting task pods, along with a conditional cluster role granting the
-  monitor `get` on `nodes/metrics` and a `Recreate` rollout strategy for the
-  monitor. Kubelets are contacted directly and their serving certificates
-  are verified against a certificate authority bundle to the exclusion of
-  any other trust anchor: the in-cluster bundle by default, or the bundle
-  named by `monitor.kubeletCaSecretName` for clusters whose kubelets are
-  issued certificates by a different certificate authority.
-  `monitor.kubeletInsecureTls` instead skips verification entirely for
-  clusters whose kubelets serve self-signed certificates (for example,
-  `kind`), and `monitor.kubeletPort` overrides the default port of 10250.
-  The task-level `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms`
-  task log metadata keys cover the task's executor containers, and the
-  `resource_usage` key carries the per-container breakdown (`inputs`,
-  `executor-N`, `outputs`). The `nodes/metrics` grant is the chart's only
-  cluster-scoped permission; kubelet authorization maps it exclusively to
-  the read-only `/metrics/*` paths, and the role is not created while
-  sampling is disabled (the default)
+  usage sampling directly from the kubelets hosting task pods, along with a
+  conditional cluster role granting the monitor `get` on `nodes/metrics`
+  (the chart's only cluster-scoped permission, granted only while sampling
+  is enabled) and a `Recreate` rollout strategy for the monitor. Kubelet
+  serving certificates are verified by default, with `monitor.kubeletCaSecretName`
+  and `monitor.kubeletInsecureTls` as escape hatches for non-default
+  certificate authorities and self-signed certificates, respectively
   ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 
 ### Fixed

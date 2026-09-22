@@ -135,13 +135,8 @@ monitor:
       memory: 4Gi
   log: info
   # The interval (in seconds) for sampling task pod resource usage directly
-  # from the kubelets hosting task pods. A value of zero disables resource
-  # usage sampling.
-  #
-  # The monitor's cluster role for reading kubelet resource metrics
-  # (`nodes/metrics`) is granted only when sampling is enabled; changing this
-  # value requires re-applying the chart.
-  usageSampleInterval: 0
+  # from the kubelets hosting task pods. Unset (null) disables sampling.
+  usageSampleInterval: null
   # The port kubelets listen on for resource usage sampling.
   kubeletPort: 10250
   # Skip verification of kubelet serving certificates when sampling resource
