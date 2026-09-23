@@ -271,8 +271,8 @@ pub struct ContainerUsage {
     pub memory_total_bytes: Option<i64>,
     /// The number of memory samples taken.
     pub memory_sample_count: Option<i64>,
-    /// The accumulated CPU time of the container, in milliseconds.
-    pub cpu_time_ms: Option<i64>,
+    /// The accumulated CPU time of the container, in seconds.
+    pub cpu_seconds: Option<f64>,
 }
 
 /// Represents a basic view of a task.

@@ -25,9 +25,7 @@ const MONITORING_INTERVAL_SECONDS: u64 = 60;
 /// The default interval for keeping task resources, in seconds.
 const KEEP_INTERVAL_SECONDS: u64 = 300;
 
-/// Parses the `--usage-sample-interval` argument, rejecting an explicit zero.
-///
-/// Omit the argument entirely to disable resource usage sampling.
+/// Parses a nonzero resource usage sampling interval.
 fn parse_usage_sample_interval(s: &str) -> Result<u64, String> {
     match s.parse::<u64>() {
         Ok(0) => Err(
@@ -68,33 +66,20 @@ pub struct Args {
     #[clap(long, default_value_t = KEEP_INTERVAL_SECONDS)]
     keep_interval: u64,
 
-    /// The interval (in seconds) for sampling task pod resource usage
-    /// directly from the kubelets hosting task pods.
-    ///
-    /// Omit this argument to disable resource usage sampling.
+    /// The resource usage sampling interval in seconds; omitted disables
+    /// sampling.
     #[clap(long, env, value_parser = parse_usage_sample_interval)]
     usage_sample_interval: Option<u64>,
 
-    /// The port kubelets listen on for resource usage sampling.
+    /// The kubelet HTTPS port.
     #[clap(long, env, default_value_t = 10250)]
     kubelet_port: u16,
 
-    /// Skip verification of kubelet serving certificates when sampling
-    /// resource usage.
-    ///
-    /// An escape hatch for clusters whose kubelets serve self-signed
-    /// certificates (for example, `kind`).
+    /// Disable kubelet certificate and hostname verification.
     #[clap(long, env, default_value_t = false)]
     kubelet_insecure_tls: bool,
 
-    /// The path to a certificate authority bundle used to verify kubelet
-    /// serving certificates.
-    ///
-    /// Overrides the in-cluster service account certificate authority
-    /// bundle (`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`).
-    /// Useful when kubelet serving certificates are issued by a different
-    /// certificate authority than the cluster's own. Ignored when
-    /// `--kubelet-insecure-tls` is set.
+    /// An optional kubelet CA bundle path.
     #[clap(long, env)]
     kubelet_ca_path: Option<PathBuf>,
 

@@ -98,9 +98,7 @@ pub struct Intervals {
     /// The interval for the keeping Kubernetes resources after a task enters a
     /// terminal state.
     pub keep: Duration,
-    /// The interval for sampling task pod resource usage.
-    ///
-    /// `None` disables resource usage sampling.
+    /// The resource usage sampling interval, or `None` to disable sampling.
     pub usage: Option<Duration>,
 }
 
@@ -109,16 +107,9 @@ pub struct Intervals {
 pub struct KubeletConfig {
     /// The kubelet port.
     pub port: u16,
-    /// Whether to skip verification of kubelet serving certificates.
-    ///
-    /// An escape hatch for clusters whose kubelets serve self-signed
-    /// certificates (for example, `kind`).
+    /// Whether to disable kubelet certificate and hostname verification.
     pub insecure_tls: bool,
-    /// An override for the certificate authority bundle used to verify
-    /// kubelet serving certificates.
-    ///
-    /// `None` uses the in-cluster service account certificate authority
-    /// bundle.
+    /// An optional kubelet CA bundle path.
     pub ca_path: Option<std::path::PathBuf>,
 }
 
@@ -234,9 +225,8 @@ impl Monitor {
         // Spawn the cancellations monitoring tokio task
         let cancellations = tokio::spawn(Self::monitor_cancellations(state.clone()));
 
-        // Spawn the resource usage sampling tokio task, if enabled; a zero
-        // interval is normalized to disabled so that no caller can spawn a
-        // sampler with an interval Tokio would panic on
+        // A zero interval would panic in `tokio::time::interval`, so treat it
+        // as disabled.
         let usage = state
             .intervals
             .usage
@@ -271,12 +261,7 @@ impl Monitor {
         }
     }
 
-    /// Implements the resource usage sampling tokio task.
-    ///
-    /// Samples task pod resource usage directly from the kubelets hosting
-    /// task pods at the given interval and records each round of
-    /// per-container observations in the database, which folds them into the
-    /// tasks' aggregate usage.
+    /// Samples and records task pod resource usage.
     async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
         info!("task resource usage sampler has started");
 
@@ -285,20 +270,10 @@ impl Monitor {
         let mut interval = tokio::time::interval(sample_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-        // The kubelet client, built lazily on the first successful tick and
-        // reused thereafter; if construction fails (for example, a
-        // certificate authority bundle that hasn't mounted yet), it is
-        // retried on every subsequent tick, using the sampling interval
-        // itself as a retry backoff
         let mut kubelet: Option<crate::usage::KubeletClient> = None;
 
-        // Whether the previous kubelet client construction attempt failed;
-        // used to log the first failure and the recovery visibly without
-        // per-tick noise
         let mut client_failing = false;
 
-        // Whether the previous sampling attempt failed; used to log the
-        // first failure and the recovery visibly without per-tick noise
         let mut failing = false;
 
         loop {
@@ -306,13 +281,8 @@ impl Monitor {
                 biased;
                 _ = state.shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    // Racing the round against shutdown keeps shutdown from
-                    // waiting on a slow node or database. Aborting the round
-                    // is safe: observations carry cumulative counters and
-                    // the database advances its accounting baselines
-                    // atomically with each recorded round, so an aborted or
-                    // failed round is simply spanned by the next successful
-                    // observation's delta
+                    // Cumulative counters make an aborted round recoverable on
+                    // the next sample.
                     let round = async {
                         if kubelet.is_none() {
                             match crate::usage::KubeletClient::new(
@@ -366,9 +336,9 @@ impl Monitor {
                                     .add_task_resource_usage_samples(&samples)
                                     .await
                                 {
-                                    // Recording is idempotent, so this is
-                                    // self-healing regardless of whether the
-                                    // write actually committed
+                                    // CPU baselines advance atomically with aggregates, so the
+                                    // next cumulative sample safely covers an interrupted or
+                                    // ambiguously committed round.
                                     error!(
                                         "failed to record resource usage samples (the round \
                                          will be covered by the next successful sample): {e:#}"
@@ -417,20 +387,13 @@ impl Monitor {
                 biased;
                 _ = state.shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    // Aborting the round on shutdown is safe: orphan
-                    // detection is recomputed from cluster and database
-                    // state every round, and any remaining work is picked
-                    // up by the next round.
                     let round = async {
-                        // Start by getting the current pod map
                         match Self::get_task_pod_map(&task_pods).await {
                             Ok(pod_map) => {
-                                // Check for orphaned tasks
                                 if let Err(e) = Self::check_orphaned_tasks(&http_client, &orchestrator, &planetary_pods, &pod_map).await {
                                     state.log_error(None,  &format!("failed to check for orphaned pods: {e:#}")).await;
                                 }
 
-                                // Check for missing task resources
                                 if let Err(e) = Self::check_missing_resources(state.database.as_ref(), &pod_map).await {
                                     state.log_error(None,  &format!("failed to check for missing Kubernetes resources: {e:#}")).await;
                                 }
@@ -614,12 +577,10 @@ impl Monitor {
         info!("garbage monitor has shut down");
     }
 
-    /// Performs a garbage collection for terminated tasks.
+    /// Performs garbage collection for terminated tasks.
     ///
-    /// Cancellation is cooperative: the shutdown token is checked between
-    /// pages and tasks so an in-progress [`Self::delete_resources`] is never
-    /// abandoned partway. Any remaining garbage is collected by the next
-    /// monitor instance.
+    /// Cancellation is checked between pages and tasks so an in-progress
+    /// resource deletion is not abandoned.
     async fn gc(state: &State, task_pods: &Api<Pod>) -> Result<()> {
         /// The maximum number of tasks to collect per iteration
         const MAX_TASKS: u32 = 100;
@@ -661,7 +622,6 @@ impl Monitor {
         let now = Timestamp::now();
 
         loop {
-            // Stop between pages when shutting down
             if state.shutdown.is_cancelled() {
                 return Ok(());
             }
@@ -683,7 +643,6 @@ impl Monitor {
             token = metadata.continue_;
 
             for pod in &items {
-                // Stop between tasks when shutting down
                 if state.shutdown.is_cancelled() {
                     return Ok(());
                 }

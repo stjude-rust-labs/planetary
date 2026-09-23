@@ -59,31 +59,18 @@ pub struct Server {
     #[builder(into)]
     keep_interval: Duration,
 
-    /// The port kubelets listen on for resource usage sampling.
-    ///
-    /// Defaults to 10250.
+    /// The kubelet HTTPS port, defaulting to 10250.
     #[builder(default = crate::usage::DEFAULT_KUBELET_PORT)]
     kubelet_port: u16,
 
-    /// Whether to skip verification of kubelet serving certificates when
-    /// sampling resource usage.
-    ///
-    /// An escape hatch for clusters whose kubelets serve self-signed
-    /// certificates (for example, `kind`). Defaults to `false`.
+    /// Whether to disable kubelet certificate and hostname verification.
     #[builder(default)]
     kubelet_insecure_tls: bool,
 
-    /// An override for the certificate authority bundle used to verify
-    /// kubelet serving certificates.
-    ///
-    /// `None` uses the in-cluster service account certificate authority
-    /// bundle. Ignored when `kubelet_insecure_tls` is enabled.
+    /// An optional kubelet CA bundle path.
     kubelet_ca_path: Option<PathBuf>,
 
-    /// The interval for sampling task pod resource usage directly from the
-    /// kubelets hosting task pods (authorized via `nodes/metrics`).
-    ///
-    /// `None` disables resource usage sampling.
+    /// The resource usage sampling interval, or `None` to disable sampling.
     usage_sample_interval: Option<Duration>,
 
     /// The Planetary orchestrator service URL.
@@ -122,7 +109,6 @@ impl Server {
             .port(self.port)
             .build();
 
-        // Spawn the monitor
         let monitor = Monitor::spawn(
             self.database,
             OrchestratorServiceInfo {
@@ -147,10 +133,8 @@ impl Server {
         )
         .await?;
 
-        // Run the server to completion
         server.run((), shutdown).await?;
 
-        // Finally, shutdown the monitor
         monitor.shutdown().await;
         Ok(())
     }

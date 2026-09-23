@@ -13,14 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Added `transporter.storage.azure` values for Azure Storage authentication ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).
 * Added a 15 minute TTL on the migration job ([#25](https://github.com/stjude-rust-labs/planetary/pull/25)).
 * Addes dynamic egress network policy additions for cloud and user exceptions ([#34](https://github.com/stjude-rust-labs/planetary/pull/34)).
-* Added `monitor.usageSampleInterval` to enable per-container task resource
-  usage sampling directly from the kubelets hosting task pods, along with a
-  conditional cluster role granting the monitor `get` on `nodes/metrics`
-  (the chart's only cluster-scoped permission, granted only while sampling
-  is enabled) and a `Recreate` rollout strategy for the monitor. Kubelet
-  serving certificates are verified by default, with `monitor.kubeletCaSecretName`
-  and `monitor.kubeletInsecureTls` as escape hatches for non-default
-  certificate authorities and self-signed certificates, respectively
+* Added optional per-container task resource usage sampling with kubelet TLS
+  configuration
   ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 
 ### Fixed

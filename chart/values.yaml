@@ -134,24 +134,13 @@ monitor:
     limits:
       memory: 4Gi
   log: info
-  # The interval (in seconds) for sampling task pod resource usage directly
-  # from the kubelets hosting task pods. Unset (null) disables sampling.
+  # Resource usage sampling interval in seconds; null disables sampling.
   usageSampleInterval: null
-  # The port kubelets listen on for resource usage sampling.
+  # Kubelet HTTPS port.
   kubeletPort: 10250
-  # Skip verification of kubelet serving certificates when sampling resource
-  # usage. Kubelet serving certificates are verified against the cluster
-  # certificate authority by default; enable this escape hatch only on
-  # clusters whose kubelets serve self-signed certificates (for example,
-  # `kind`).
+  # Disable kubelet certificate and hostname verification. Development only.
   kubeletInsecureTls: false
-  # The name of a Secret (in this release's namespace) containing a `ca.crt`
-  # key with a certificate authority bundle used to verify kubelet serving
-  # certificates, when they are issued by a certificate authority different
-  # from the cluster's own (used to verify the in-cluster service account
-  # bundle by default). Leave unset (the default) to verify against the
-  # default in-cluster certificate authority bundle. Ignored when
-  # `kubeletInsecureTls` is enabled.
+  # Secret containing the kubelet CA bundle in `ca.crt`.
   kubeletCaSecretName: ""
 
 # Configuration relating to the transporter used by Planetary for

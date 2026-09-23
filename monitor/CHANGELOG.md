@@ -9,14 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
-* Added an opt-in task resource usage sampler (`--usage-sample-interval` /
-  `USAGE_SAMPLE_INTERVAL`) that reads the kubelet `/metrics/resource`
-  endpoints of the nodes hosting task pods (bounded-concurrency fetch) and
-  records per-container aggregates in the database. Kubelet serving
-  certificates are verified by default, with `--kubelet-ca-path` and
-  `--kubelet-insecure-tls` as escape hatches. Kubelet client initialization
-  retries every sampling interval until it succeeds, rather than disabling
-  sampling for the life of the process on the first failure
+* Added optional per-container task resource usage sampling from kubelets via
+  `--usage-sample-interval` / `USAGE_SAMPLE_INTERVAL`
   ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 * Added creating Kubernetes resources via a template ([#38](https://github.com/stjude-rust-labs/planetary/pull/38)).
 

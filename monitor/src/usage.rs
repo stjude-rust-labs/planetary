@@ -1,34 +1,4 @@
-//! Sampling of task pod resource usage from kubelet resource metrics.
-//!
-//! When enabled, the monitor periodically reads the `/metrics/resource`
-//! endpoint of the kubelets hosting task pods and records each per-container
-//! observation in the database, which folds it into the task's aggregate
-//! resource usage.
-//!
-//! The kubelet is read directly, rather than through the `metrics.k8s.io`
-//! API, because the reference Kubernetes metrics-server only serves metrics
-//! for `Running`-phase pods — task pods run their work in *init* containers
-//! and stay `Pending` while executing, so their usage would never be
-//! visible through `metrics.k8s.io` — and because metrics-server's own
-//! documentation directs monitoring consumers to the kubelet
-//! `/metrics/resource` endpoint directly:
-//! <https://github.com/kubernetes-sigs/metrics-server#use-cases>. A direct
-//! request is authorized by the kubelet itself through a
-//! `SubjectAccessReview` for `get` on `nodes/metrics` (see
-//! [RBAC Authorization](../../../README.md#rbac-authorization) for why
-//! `nodes/proxy` is not used instead).
-//!
-//! Observations carry the *cumulative* CPU counter value; the database
-//! computes each counter's delta against a stored per-container baseline
-//! and advances the baseline atomically with the aggregate (see
-//! [`planetary_db::Database::add_task_resource_usage_samples`]), making
-//! recording idempotent across monitor restarts and ambiguous database
-//! commit outcomes. The sampling client itself is stateless.
-//!
-//! The aggregate usage is reported through the TES API as task log metadata:
-//! the `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys carry
-//! the usage of the task's executor containers, and the `resource_usage` key
-//! carries the per-container breakdown.
+//! Samples per-container task resource usage from kubelets.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -68,11 +38,7 @@ pub struct TaskPod {
     pub host_ip: String,
 }
 
-/// Lists the task pods to sample, together with the nodes hosting them.
-///
-/// Pods that are not yet scheduled to a node (or whose host address is not
-/// yet reported) are omitted. The host address comes from the pod's own
-/// status, so sampling requires no permission on `Node` resources.
+/// Lists scheduled task pods with reported host addresses.
 pub async fn list_task_pods(api: &Api<Pod>) -> Result<Vec<TaskPod>> {
     let params = ListParams::default().labels(TASK_LABEL);
     let pods = api
@@ -100,18 +66,9 @@ pub async fn list_task_pods(api: &Api<Pod>) -> Result<Vec<TaskPod>> {
 }
 
 /// The timeout for fetching a node's resource metrics.
-///
-/// Bounds the impact of an unresponsive kubelet: a timed-out fetch is
-/// treated like any other failed fetch, so the node's pods miss the round
-/// instead of stalling the rest of the sampling round.
 const NODE_METRICS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The maximum number of nodes to fetch resource metrics from concurrently.
-///
-/// Bounds the number of simultaneous kubelet connections (and apiserver
-/// `SubjectAccessReview` calls, one per fetch) a sampling round can open,
-/// while still letting a slow or unreachable node's [`NODE_METRICS_TIMEOUT`]
-/// elapse independently of other nodes instead of serializing behind them.
+/// The maximum number of concurrent node metrics requests.
 const NODE_METRICS_CONCURRENCY: usize = 8;
 
 /// The default kubelet port.
@@ -124,41 +81,19 @@ const SERVICE_ACCOUNT_TOKEN_PATH: &str = "/var/run/secrets/kubernetes.io/service
 const SERVICE_ACCOUNT_CA_PATH: &str = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
 
 /// A client for reading resource metrics directly from kubelets.
-///
-/// Requests carry the monitor's service account token; the kubelet
-/// authorizes them through a `SubjectAccessReview` for `get` on
-/// `nodes/metrics`. The kubelet's serving certificate is verified against a
-/// certificate authority bundle (the in-cluster bundle by default, or a
-/// custom bundle — see [`KubeletClient::new`]), unless `insecure_tls` is
-/// enabled for clusters with self-signed kubelet certificates.
-///
-/// Cheaply cloneable (the underlying `reqwest::Client` is `Arc`-backed):
-/// [`fetch_all_node_metrics`] clones a client into each concurrent per-node
-/// fetch so the future it hands to `buffer_unordered` is fully `'static`
-/// (see <https://github.com/rust-lang/rust/issues/100013>).
 #[derive(Debug, Clone)]
 pub struct KubeletClient {
     /// The underlying HTTP client.
     client: reqwest::Client,
     /// The kubelet port.
     port: u16,
-    /// The path of the bearer token presented to kubelets.
-    ///
-    /// The token is re-read for every fetch, as service account tokens are
-    /// rotated.
+    /// The path of the bearer token, which is re-read for every request.
     token_path: PathBuf,
 }
 
 impl KubeletClient {
-    /// Creates a new kubelet client using in-cluster service account
-    /// credentials.
-    ///
-    /// `ca_path` overrides the certificate authority bundle used to verify
-    /// kubelet serving certificates; `None` uses the in-cluster bundle
-    /// (`/var/run/secrets/kubernetes.io/serviceaccount/ca.crt`), which is
-    /// appropriate unless kubelet serving certificates are issued by a
-    /// different certificate authority than the cluster's own. Ignored when
-    /// `insecure_tls` is enabled.
+    /// Creates a kubelet client using in-cluster credentials and an optional CA
+    /// override.
     pub fn new(port: u16, insecure_tls: bool, ca_path: Option<PathBuf>) -> Result<Self> {
         Self::with_paths(
             port,
@@ -212,9 +147,7 @@ impl KubeletClient {
         })
     }
 
-    /// Fetches the resource metrics of a node's kubelet.
-    ///
-    /// The fetch is bounded by [`NODE_METRICS_TIMEOUT`].
+    /// Fetches a node's resource metrics within [`NODE_METRICS_TIMEOUT`].
     pub async fn fetch_node_metrics(&self, node: &str, host_ip: &str) -> Result<String> {
         let token = tokio::fs::read_to_string(&self.token_path)
             .await
@@ -246,15 +179,13 @@ impl KubeletClient {
 /// Builds the URL of a kubelet's resource metrics endpoint.
 fn kubelet_metrics_url(host_ip: &str, port: u16) -> String {
     if host_ip.contains(':') {
-        // Bracket IPv6 addresses
         format!("https://[{host_ip}]:{port}/metrics/resource")
     } else {
         format!("https://{host_ip}:{port}/metrics/resource")
     }
 }
 
-/// A single container's metrics point parsed from a kubelet's resource
-/// metrics.
+/// A container metrics point parsed from kubelet resource metrics.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ContainerMetrics {
     /// The cumulative CPU time of the container, in seconds.
@@ -265,10 +196,18 @@ pub struct ContainerMetrics {
     pub start_time_seconds: Option<f64>,
 }
 
-/// Parses the labels of a Prometheus text format series.
-///
-/// Returns the `namespace`, `pod`, and `container` label values; kubelet
-/// resource metric label values do not contain escapes or commas.
+/// Returns a valid cumulative CPU counter value.
+fn normalize_cpu_seconds(cpu_seconds: f64) -> Option<f64> {
+    if !cpu_seconds.is_finite() || cpu_seconds < 0.0 {
+        None
+    } else if cpu_seconds == 0.0 {
+        Some(0.0)
+    } else {
+        Some(cpu_seconds)
+    }
+}
+
+/// Parses the namespace, pod, and container labels of a Prometheus series.
 fn parse_labels(labels: &str) -> Option<(&str, &str, &str)> {
     let mut namespace = None;
     let mut pod = None;
@@ -288,11 +227,8 @@ fn parse_labels(labels: &str) -> Option<(&str, &str, &str)> {
     Some((namespace?, pod?, container?))
 }
 
-/// Parses kubelet resource metrics in the Prometheus text format into
-/// per-container metrics points.
-///
-/// Only the containers of pods in the given namespace are returned; the
-/// result is keyed by pod name and container name.
+/// Parses container metrics for the given namespace, keyed by pod and
+/// container.
 pub fn parse_node_metrics(
     text: &str,
     namespace: &str,
@@ -305,7 +241,6 @@ pub fn parse_node_metrics(
             continue;
         }
 
-        // Split the series into `name{labels}` and `value [timestamp]`
         let Some(labels_start) = line.find('{') else {
             continue;
         };
@@ -327,7 +262,6 @@ pub fn parse_node_metrics(
             continue;
         }
 
-        // The value is followed by an optional timestamp
         let Some(value) = rest
             .split_ascii_whitespace()
             .next()
@@ -340,7 +274,7 @@ pub fn parse_node_metrics(
             .entry((pod.to_string(), container.to_string()))
             .or_default();
         match name {
-            CPU_METRIC => metrics.cpu_seconds = Some(value),
+            CPU_METRIC => metrics.cpu_seconds = normalize_cpu_seconds(value),
             MEMORY_METRIC => metrics.memory_bytes = Some(value as u64),
             START_TIME_METRIC => metrics.start_time_seconds = Some(value),
             _ => unreachable!("unsupported metric `{name}`; add a case for it above"),
@@ -350,14 +284,7 @@ pub fn parse_node_metrics(
     containers
 }
 
-/// Builds resource usage observations from a round of per-container metrics
-/// points.
-///
-/// Points for pods that are not task pods, and points carrying no
-/// measurements, are omitted. Observations are per pod container: if
-/// multiple pods carry the same task label, a round yields multiple
-/// observations for the same task and container name, which the database
-/// accounts independently via per-pod baselines.
+/// Builds per-pod container samples, omitting unknown pods and empty points.
 pub fn build_samples(
     pods: &[TaskPod],
     metrics: &HashMap<(String, String), ContainerMetrics>,
@@ -391,15 +318,7 @@ pub fn build_samples(
     samples
 }
 
-/// Samples the resource usage of all task pods.
-///
-/// Lists the task pods, fetches the resource metrics of each hosting node's
-/// kubelet, and builds the per-container resource usage observations for the
-/// database to record.
-///
-/// A node whose metrics cannot be fetched is skipped (its pods simply miss a
-/// sampling round, losslessly); an error is returned only if the task pods
-/// cannot be listed.
+/// Samples task pods, skipping nodes whose metrics cannot be fetched.
 pub async fn sample_task_pods(
     kubelet: &KubeletClient,
     pods_api: &Api<Pod>,
@@ -426,22 +345,11 @@ pub async fn sample_task_pods(
     Ok(build_samples(&pods, &metrics))
 }
 
-/// The future type returned by a node-metrics fetch closure passed to
-/// [`fetch_all_node_metrics`].
-///
-/// Fully `'static` (the closure clones an owned [`KubeletClient`] into each
-/// future rather than borrowing one) so `fetch_all_node_metrics` itself
-/// carries no lifetime parameter — see [`KubeletClient`]'s doc comment for
-/// why that matters.
+/// The future returned by a node metrics fetch.
 type NodeMetricsFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>;
 
-/// Fetches resource metrics from a set of nodes concurrently, tolerating
-/// individual node failures.
-///
-/// At most `concurrency` fetches are in flight at once. A node whose fetch
-/// fails is logged and skipped; the merged result reflects only the nodes
-/// that succeeded.
+/// Fetches node metrics concurrently, logging and skipping failed nodes.
 async fn fetch_all_node_metrics<F>(
     nodes: HashSet<(String, String)>,
     namespace: &str,
@@ -513,7 +421,6 @@ mod tests {
         let token = dir.path().join("token");
         std::fs::write(&token, "token").unwrap();
 
-        // Verified TLS requires a readable certificate authority bundle
         let error = match KubeletClient::with_paths(10250, false, missing_ca.clone(), token.clone())
         {
             Ok(_) => panic!("expected an error"),
@@ -521,7 +428,6 @@ mod tests {
         };
         assert!(error.contains("certificate authority"));
 
-        // The insecure escape hatch does not read the bundle
         let _ = KubeletClient::with_paths(10250, true, missing_ca, token)
             .expect("insecure client should build");
     }
@@ -547,6 +453,38 @@ node_cpu_usage_seconds_total 100.0
         assert_eq!(point.cpu_seconds, Some(1.5));
         assert_eq!(point.memory_bytes, Some(380928));
         assert_eq!(point.start_time_seconds, Some(1.7879459339754386e+09));
+    }
+
+    #[test]
+    fn node_metrics_reject_invalid_cpu_observations() {
+        for value in ["NaN", "+Inf", "-Inf", "-0.001"] {
+            let text = format!(
+                r#"container_cpu_usage_seconds_total{{container="executor-0",namespace="planetary-tasks",pod="task-pod"}} {value}
+container_memory_working_set_bytes{{container="executor-0",namespace="planetary-tasks",pod="task-pod"}} 1024"#
+            );
+
+            let metrics = parse_node_metrics(&text, "planetary-tasks");
+            let point = &metrics[&key("task-pod", "executor-0")];
+            assert_eq!(
+                point.cpu_seconds, None,
+                "accepted invalid CPU value {value}"
+            );
+            assert_eq!(point.memory_bytes, Some(1024));
+        }
+    }
+
+    #[test]
+    fn node_metrics_normalize_negative_zero_cpu() {
+        let text = "container_cpu_usage_seconds_total{container=\"executor-0\",namespace=\"\
+                    planetary-tasks\",pod=\"task-pod\"} -0";
+
+        let metrics = parse_node_metrics(text, "planetary-tasks");
+        let cpu = metrics[&key("task-pod", "executor-0")]
+            .cpu_seconds
+            .expect("CPU observation should be retained");
+
+        assert_eq!(cpu, 0.0);
+        assert!(!cpu.is_sign_negative());
     }
 
     #[tokio::test]
@@ -636,8 +574,6 @@ node_cpu_usage_seconds_total 100.0
         assert_eq!(samples[0].pod_name, "task-pod");
         assert_eq!(samples[0].container_name, "executor-0");
         assert_eq!(samples[0].memory_bytes, Some(1024));
-        // The cumulative counter and start time are passed through for the
-        // database to compute the delta against its stored baseline
         assert_eq!(samples[0].cpu_seconds, Some(1.5));
         assert_eq!(samples[0].start_time_seconds, Some(1000.0));
     }
@@ -699,9 +635,6 @@ node_cpu_usage_seconds_total 100.0
         let mut samples = build_samples(&pods, &metrics);
         samples.sort_by(|a, b| a.pod_name.cmp(&b.pod_name));
 
-        // The same task and container name from different pods yields
-        // distinct observations, accounted independently via per-pod
-        // baselines in the database
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0].pod_name, "task-pod-a");
         assert_eq!(samples[1].pod_name, "task-pod-b");
@@ -714,7 +647,6 @@ node_cpu_usage_seconds_total 100.0
         let pods = [task_pod("task-pod", "task-1234")];
 
         let metrics = [
-            // Not a task pod
             (
                 key("other-pod", "app"),
                 ContainerMetrics {
@@ -723,7 +655,6 @@ node_cpu_usage_seconds_total 100.0
                     start_time_seconds: None,
                 },
             ),
-            // A task pod container with no measurements
             (key("task-pod", "executor-0"), ContainerMetrics::default()),
         ]
         .into();

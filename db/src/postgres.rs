@@ -95,6 +95,114 @@ const MAX_CONNECTION_AGE: Duration = Duration::from_secs(60);
 /// This is currently a fixed-size limit as we keep a connection pool per-pod.
 const MAX_POOL_SIZE: usize = 10;
 
+/// Folds observed memory samples into per-container usage aggregates.
+const MEMORY_USAGE_FOLD_SQL: &str = r#"
+    INSERT INTO task_container_usage (
+        task_id,
+        container_name,
+        peak_memory_bytes,
+        memory_total_bytes,
+        memory_sample_count
+    )
+    SELECT
+        tasks.id,
+        samples.container_name,
+        MAX(samples.memory_bytes),
+        SUM(samples.memory_bytes),
+        COUNT(samples.memory_bytes)
+    FROM UNNEST($1::text[], $2::text[], $3::bigint[])
+        AS samples(tes_id, container_name, memory_bytes)
+    JOIN tasks ON tasks.tes_id = samples.tes_id
+    WHERE samples.memory_bytes IS NOT NULL
+    GROUP BY tasks.id, samples.container_name
+    ORDER BY tasks.id, samples.container_name
+    ON CONFLICT (task_id, container_name) DO UPDATE SET
+        peak_memory_bytes = GREATEST(
+            COALESCE(task_container_usage.peak_memory_bytes, 0),
+            EXCLUDED.peak_memory_bytes
+        ),
+        memory_total_bytes =
+            COALESCE(task_container_usage.memory_total_bytes, 0)
+            + EXCLUDED.memory_total_bytes,
+        memory_sample_count =
+            COALESCE(task_container_usage.memory_sample_count, 0)
+            + EXCLUDED.memory_sample_count
+"#;
+
+/// Folds CPU counter deltas into usage aggregates and advances their baselines.
+const CPU_USAGE_FOLD_SQL: &str = r#"
+    WITH samples AS (
+        SELECT
+            tasks.id AS task_id,
+            observations.pod_name,
+            observations.container_name,
+            observations.cpu_seconds,
+            observations.start_time_seconds
+        FROM UNNEST($1::text[], $2::text[], $3::text[], $4::float8[], $5::float8[])
+            AS observations(
+                tes_id,
+                pod_name,
+                container_name,
+                cpu_seconds,
+                start_time_seconds
+            )
+        JOIN tasks ON tasks.tes_id = observations.tes_id
+        WHERE observations.cpu_seconds IS NOT NULL
+    ),
+    deltas AS (
+        SELECT
+            samples.*,
+            CASE
+                WHEN baseline.cpu_seconds IS NULL THEN samples.cpu_seconds
+                WHEN baseline.start_time_seconds
+                        IS NOT DISTINCT FROM samples.start_time_seconds
+                    AND samples.cpu_seconds >= baseline.cpu_seconds
+                    THEN samples.cpu_seconds - baseline.cpu_seconds
+                ELSE samples.cpu_seconds
+            END AS cpu_delta_seconds
+        FROM samples
+        LEFT JOIN task_container_baseline AS baseline
+            USING (task_id, pod_name, container_name)
+    ),
+    -- Baseline advancement and aggregation must stay atomic for retry idempotence.
+    advanced AS (
+        INSERT INTO task_container_baseline (
+            task_id,
+            pod_name,
+            container_name,
+            start_time_seconds,
+            cpu_seconds
+        )
+        SELECT
+            task_id,
+            pod_name,
+            container_name,
+            start_time_seconds,
+            cpu_seconds
+        FROM deltas
+        ON CONFLICT (task_id, pod_name, container_name) DO UPDATE SET
+            start_time_seconds = EXCLUDED.start_time_seconds,
+            cpu_seconds = EXCLUDED.cpu_seconds
+    )
+    INSERT INTO task_container_usage (
+        task_id,
+        container_name,
+        cpu_seconds
+    )
+    SELECT
+        task_id,
+        container_name,
+        SUM(cpu_delta_seconds)
+    FROM deltas
+    -- Multiple pods can map to one row, so group before ON CONFLICT.
+    GROUP BY task_id, container_name
+    ORDER BY task_id, container_name
+    ON CONFLICT (task_id, container_name) DO UPDATE SET
+        cpu_seconds =
+            COALESCE(task_container_usage.cpu_seconds, 0.0)
+            + EXCLUDED.cpu_seconds
+"#;
+
 /// Helper for zipping two uneven iterators.
 ///
 /// The shorter iterator will yield default values after it terminates.
@@ -715,114 +823,36 @@ impl Database for PostgresDatabase {
             pods.push(sample.pod_name.as_str());
             names.push(sample.container_name.as_str());
             memory.push(sample.memory_bytes);
-            cpu.push(sample.cpu_seconds);
+            cpu.push(sample.cpu_seconds.and_then(usage::normalize_cpu_seconds));
             start.push(sample.start_time_seconds);
         }
 
         let mut conn = self.pool.get().await.map_err(Error::Pool)?;
 
         // See `Database::add_task_resource_usage_samples` for the full
-        // idempotency contract this query implements.
-        sql_query(
-            r#"
-            -- Unnest the batched observation arrays and resolve each to its
-            -- task id, dropping observations for unknown tasks via the join.
-            WITH s AS (
-                SELECT
-                    t.id AS task_id,
-                    u.pod_name,
-                    u.container_name,
-                    u.memory_bytes,
-                    u.cpu_seconds,
-                    u.start_time_seconds
-                FROM UNNEST($1::text[], $2::text[], $3::text[], $4::bigint[], $5::float8[], $6::float8[])
-                    AS u(tes_id, pod_name, container_name, memory_bytes, cpu_seconds, start_time_seconds)
-                JOIN tasks t ON t.tes_id = u.tes_id
-            ),
-            -- Compute each observation's CPU delta against its stored
-            -- per-(task, pod, container) baseline: the full counter value
-            -- if there is no stored baseline or a restart was detected
-            -- (changed start time or a decreasing counter), otherwise the
-            -- monotonic delta since the baseline. A NULL CPU observation
-            -- yields a NULL delta.
-            d AS (
-                SELECT
-                    s.task_id,
-                    s.pod_name,
-                    s.container_name,
-                    s.memory_bytes,
-                    s.cpu_seconds,
-                    s.start_time_seconds,
-                    CASE
-                        WHEN s.cpu_seconds IS NULL THEN NULL
-                        WHEN b.cpu_seconds IS NULL THEN s.cpu_seconds
-                        WHEN b.start_time_seconds IS NOT DISTINCT FROM s.start_time_seconds
-                            AND s.cpu_seconds >= b.cpu_seconds
-                            THEN s.cpu_seconds - b.cpu_seconds
-                        ELSE s.cpu_seconds
-                    END AS cpu_delta_seconds
-                FROM s
-                LEFT JOIN task_container_baseline b
-                    USING (task_id, pod_name, container_name)
-            ),
-            -- Advance each container instance's baseline to the latest
-            -- observed counter value and start time, durable with the
-            -- aggregate update below in the same statement.
-            advanced AS (
-                INSERT INTO task_container_baseline (
-                    task_id, pod_name, container_name, start_time_seconds, cpu_seconds
-                )
-                SELECT task_id, pod_name, container_name, start_time_seconds, cpu_seconds
-                FROM d
-                WHERE cpu_seconds IS NOT NULL
-                ON CONFLICT (task_id, pod_name, container_name) DO UPDATE SET
-                    start_time_seconds = EXCLUDED.start_time_seconds,
-                    cpu_seconds = EXCLUDED.cpu_seconds
-            )
-            -- Fold the computed deltas into each container's running
-            -- aggregate, grouping by (task, container) so that observations
-            -- for the same container name from multiple pods are combined
-            -- into a single row per statement (required since `ON CONFLICT
-            -- DO UPDATE` cannot affect the same row twice in one statement).
-            -- A NULL dimension leaves the corresponding aggregate untouched.
-            INSERT INTO task_container_usage (
-                task_id, container_name, peak_memory_bytes, memory_total_bytes,
-                memory_sample_count, cpu_time_ms
-            )
-            SELECT
-                task_id,
-                container_name,
-                MAX(memory_bytes),
-                SUM(memory_bytes),
-                COUNT(memory_bytes),
-                CAST(SUM(cpu_delta_seconds) * 1000.0 AS bigint)
-            FROM d
-            GROUP BY task_id, container_name
-            ON CONFLICT (task_id, container_name) DO UPDATE SET
-                peak_memory_bytes = CASE
-                    WHEN EXCLUDED.peak_memory_bytes IS NULL THEN task_container_usage.peak_memory_bytes
-                    ELSE GREATEST(COALESCE(task_container_usage.peak_memory_bytes, 0), EXCLUDED.peak_memory_bytes)
-                END,
-                memory_total_bytes = CASE
-                    WHEN EXCLUDED.memory_total_bytes IS NULL THEN task_container_usage.memory_total_bytes
-                    ELSE COALESCE(task_container_usage.memory_total_bytes, 0) + EXCLUDED.memory_total_bytes
-                END,
-                memory_sample_count = COALESCE(task_container_usage.memory_sample_count, 0) + EXCLUDED.memory_sample_count,
-                cpu_time_ms = CASE
-                    WHEN EXCLUDED.cpu_time_ms IS NULL THEN task_container_usage.cpu_time_ms
-                    ELSE COALESCE(task_container_usage.cpu_time_ms, 0) + EXCLUDED.cpu_time_ms
-                END
-            "#,
-        )
-        .bind::<Array<Text>, _>(&ids)
-        .bind::<Array<Text>, _>(&pods)
-        .bind::<Array<Text>, _>(&names)
-        .bind::<Array<Nullable<BigInt>>, _>(&memory)
-        .bind::<Array<Nullable<Double>>, _>(&cpu)
-        .bind::<Array<Nullable<Double>>, _>(&start)
-        .execute(&mut conn)
-        .await
-        .map_err(Error::Diesel)?;
+        // idempotency contract these queries implement.
+        conn.transaction(async |conn| {
+            sql_query(MEMORY_USAGE_FOLD_SQL)
+                .bind::<Array<Text>, _>(&ids)
+                .bind::<Array<Text>, _>(&names)
+                .bind::<Array<Nullable<BigInt>>, _>(&memory)
+                .execute(conn)
+                .await
+                .map_err(Error::Diesel)?;
+
+            sql_query(CPU_USAGE_FOLD_SQL)
+                .bind::<Array<Text>, _>(&ids)
+                .bind::<Array<Text>, _>(&pods)
+                .bind::<Array<Text>, _>(&names)
+                .bind::<Array<Nullable<Double>>, _>(&cpu)
+                .bind::<Array<Nullable<Double>>, _>(&start)
+                .execute(conn)
+                .await
+                .map_err(Error::Diesel)?;
+
+            Ok::<(), Error>(())
+        })
+        .await?;
 
         Ok(())
     }

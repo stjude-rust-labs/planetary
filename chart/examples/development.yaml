@@ -26,9 +26,7 @@ monitor:
     tag: dev
   # Sample task pod resource usage every 30 seconds (see README.md).
   usageSampleInterval: 30
-  # `kind`'s kubelets serve self-signed certificates, which the monitor
-  # cannot verify against the cluster certificate authority bundle; skip
-  # verification for this development-only deployment.
+  # `kind` uses self-signed kubelet certificates.
   kubeletInsecureTls: true
 
 transporter:

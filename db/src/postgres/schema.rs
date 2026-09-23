@@ -48,7 +48,7 @@ diesel::table! {
         peak_memory_bytes -> Nullable<Int8>,
         memory_total_bytes -> Nullable<Int8>,
         memory_sample_count -> Nullable<Int8>,
-        cpu_time_ms -> Nullable<Int8>,
+        cpu_seconds -> Nullable<Float8>,
     }
 }
 

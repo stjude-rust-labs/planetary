@@ -67,9 +67,7 @@ rules:
   verbs: ["delete"]
 ---
 {{- if .Values.monitor.usageSampleInterval }}
-# Cluster role for the monitor to read resource metrics from kubelets,
-# granted only when task resource usage sampling is enabled. See
-# "RBAC Authorization" in the top-level README for the full rationale.
+# Created only when resource usage sampling is enabled.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -79,7 +77,6 @@ rules:
   resources: ["nodes/metrics"]
   verbs: ["get"]
 ---
-# Cluster role binding for the monitor to read kubelet resource metrics
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

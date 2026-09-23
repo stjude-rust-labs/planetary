@@ -8,6 +8,18 @@ use super::models::ContainerUsage;
 /// template (`executor-N` for the task's Nth executor).
 const EXECUTOR_CONTAINER_PREFIX: &str = "executor-";
 
+/// Returns a finite, non-negative CPU observation with negative zero
+/// normalized to zero.
+pub(super) fn normalize_cpu_seconds(cpu_seconds: f64) -> Option<f64> {
+    if !cpu_seconds.is_finite() || cpu_seconds < 0.0 {
+        None
+    } else if cpu_seconds == 0.0 {
+        Some(0.0)
+    } else {
+        Some(cpu_seconds)
+    }
+}
+
 /// Builds a usage metadata entry from aggregate values.
 ///
 /// Values are encoded as strings, as the TES specification types
@@ -17,7 +29,7 @@ fn usage_entry(
     peak_memory_bytes: Option<i64>,
     memory_total_bytes: Option<i64>,
     memory_sample_count: Option<i64>,
-    cpu_time_ms: Option<i64>,
+    cpu_seconds: Option<f64>,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
     let mut entry = serde_json::Map::new();
 
@@ -34,8 +46,11 @@ fn usage_entry(
         );
     }
 
-    if let Some(cpu) = cpu_time_ms {
-        entry.insert("cpu_time_ms".to_string(), cpu.to_string().into());
+    if let Some(cpu) = cpu_seconds.and_then(normalize_cpu_seconds) {
+        entry.insert(
+            "cpu_time_ms".to_string(),
+            (cpu * 1000.0).round().to_string().into(),
+        );
     }
 
     if entry.is_empty() { None } else { Some(entry) }
@@ -63,7 +78,7 @@ pub(super) fn resource_usage_metadata(usage: &[ContainerUsage]) -> Option<serde_
     let mut peak: Option<i64> = None;
     let mut total: Option<i64> = None;
     let mut count: Option<i64> = None;
-    let mut cpu: Option<i64> = None;
+    let mut cpu_seconds: Option<f64> = None;
     for container in usage {
         if !container
             .container_name
@@ -84,12 +99,12 @@ pub(super) fn resource_usage_metadata(usage: &[ContainerUsage]) -> Option<serde_
             count = Some(count.unwrap_or(0) + c);
         }
 
-        if let Some(c) = container.cpu_time_ms {
-            cpu = Some(cpu.unwrap_or(0) + c);
+        if let Some(seconds) = container.cpu_seconds.and_then(normalize_cpu_seconds) {
+            cpu_seconds = Some(cpu_seconds.unwrap_or(0.0) + seconds);
         }
     }
 
-    if let Some(entry) = usage_entry(peak, total, count, cpu) {
+    if let Some(entry) = usage_entry(peak, total, count, cpu_seconds) {
         metadata.extend(entry);
     }
 
@@ -100,7 +115,7 @@ pub(super) fn resource_usage_metadata(usage: &[ContainerUsage]) -> Option<serde_
             container.peak_memory_bytes,
             container.memory_total_bytes,
             container.memory_sample_count,
-            container.cpu_time_ms,
+            container.cpu_seconds,
         ) {
             breakdown.insert(container.container_name.clone(), entry.into());
         }
@@ -127,7 +142,7 @@ mod tests {
         peak: Option<i64>,
         total: Option<i64>,
         count: Option<i64>,
-        cpu: Option<i64>,
+        cpu: Option<f64>,
     ) -> ContainerUsage {
         ContainerUsage {
             task_id: 1,
@@ -135,7 +150,7 @@ mod tests {
             peak_memory_bytes: peak,
             memory_total_bytes: total,
             memory_sample_count: count,
-            cpu_time_ms: cpu,
+            cpu_seconds: cpu,
         }
     }
 
@@ -151,10 +166,10 @@ mod tests {
     #[test]
     fn task_level_keys_cover_executors_only() {
         let metadata = resource_usage_metadata(&[
-            usage("inputs", Some(500), Some(1000), Some(2), Some(50)),
-            usage("executor-0", Some(100), Some(150), Some(2), Some(1000)),
-            usage("executor-1", Some(300), Some(300), Some(1), Some(2000)),
-            usage("outputs", Some(400), Some(400), Some(1), Some(25)),
+            usage("inputs", Some(500), Some(1000), Some(2), Some(0.05)),
+            usage("executor-0", Some(100), Some(150), Some(2), Some(1.0)),
+            usage("executor-1", Some(300), Some(300), Some(1), Some(2.0)),
+            usage("outputs", Some(400), Some(400), Some(1), Some(0.025)),
         ])
         .expect("should have metadata");
 
@@ -177,7 +192,7 @@ mod tests {
     #[test]
     fn transporter_only_usage_omits_task_level_keys() {
         let metadata =
-            resource_usage_metadata(&[usage("inputs", Some(500), Some(500), Some(1), Some(50))])
+            resource_usage_metadata(&[usage("inputs", Some(500), Some(500), Some(1), Some(0.05))])
                 .expect("should have metadata");
 
         assert!(metadata.get("peak_memory_bytes").is_none());
@@ -189,11 +204,66 @@ mod tests {
     #[test]
     fn partial_dimensions_are_omitted() {
         let metadata =
-            resource_usage_metadata(&[usage("executor-0", None, None, Some(0), Some(123))])
+            resource_usage_metadata(&[usage("executor-0", None, None, Some(0), Some(0.123))])
                 .expect("should have metadata");
 
         assert!(metadata.get("peak_memory_bytes").is_none());
         assert!(metadata.get("avg_memory_bytes").is_none());
         assert_eq!(metadata["cpu_time_ms"], "123");
+    }
+
+    #[test]
+    fn cpu_milliseconds_are_rounded_after_aggregation() {
+        let single_container_metadata =
+            resource_usage_metadata(&[usage("executor-0", None, None, None, Some(0.0008))])
+                .expect("should have metadata");
+
+        assert_eq!(single_container_metadata["cpu_time_ms"], "1");
+        assert_eq!(
+            single_container_metadata["resource_usage"]["executor-0"]["cpu_time_ms"],
+            "1"
+        );
+
+        let multi_container_metadata = resource_usage_metadata(&[
+            usage("executor-0", None, None, None, Some(0.0004)),
+            usage("executor-1", None, None, None, Some(0.0004)),
+        ])
+        .expect("should have metadata");
+
+        assert_eq!(multi_container_metadata["cpu_time_ms"], "1");
+        assert_eq!(
+            multi_container_metadata["resource_usage"]["executor-0"]["cpu_time_ms"],
+            "0"
+        );
+        assert_eq!(
+            multi_container_metadata["resource_usage"]["executor-1"]["cpu_time_ms"],
+            "0"
+        );
+    }
+
+    #[test]
+    fn invalid_cpu_values_are_omitted() {
+        for cpu in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.001] {
+            let metadata =
+                resource_usage_metadata(&[usage("executor-0", Some(1), None, None, Some(cpu))])
+                    .expect("memory should produce metadata");
+
+            assert!(metadata.get("cpu_time_ms").is_none());
+            assert!(
+                metadata["resource_usage"]["executor-0"]
+                    .get("cpu_time_ms")
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn negative_zero_cpu_is_normalized() {
+        let metadata =
+            resource_usage_metadata(&[usage("executor-0", None, None, None, Some(-0.0))])
+                .expect("zero CPU should produce metadata");
+
+        assert_eq!(metadata["cpu_time_ms"], "0");
+        assert_eq!(metadata["resource_usage"]["executor-0"]["cpu_time_ms"], "0");
     }
 }

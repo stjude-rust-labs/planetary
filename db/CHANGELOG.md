@@ -9,11 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 
-* Added per-container task resource usage aggregation: `task_container_usage`
-  and `task_container_baseline` tables, a batched
-  `add_task_resource_usage_samples` database method (idempotent across
-  monitor restarts and ambiguous commit outcomes), and reporting of the
-  aggregates in task log metadata
+* Added per-container task resource usage aggregation and TES task log
+  metadata reporting
   ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
 * Added `name` column to containers table ([#43](https://github.com/stjude-rust-labs/planetary/pull/43)).
 * Added support retrieving usernames of tasks for template rendering ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).

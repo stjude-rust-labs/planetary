@@ -206,21 +206,11 @@ pub trait Database: Send + Sync + 'static {
     /// Appends the given messages to the task's system log.
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()>;
 
-    /// Records a round of per-container resource usage observations for
-    /// tasks.
+    /// Records per-container resource usage observations.
     ///
-    /// Recording is **idempotent** with respect to CPU time: re-recording an
-    /// observation whose previous write already committed (e.g. after an
-    /// ambiguous commit outcome) yields a zero delta, and an observation
-    /// following unrecorded rounds attributes the full counter movement
-    /// since the stored baseline. A container instance with no stored
-    /// baseline (first observation, or a restart detected by a changed
-    /// start time or a decreasing counter) attributes its full counter.
-    ///
-    /// The aggregates are reported in the task's log metadata: the
-    /// `peak_memory_bytes`, `avg_memory_bytes`, and `cpu_time_ms` keys carry
-    /// the usage of the task's executor containers, and the `resource_usage`
-    /// key carries the per-container breakdown.
+    /// CPU counters are folded idempotently against durable per-container
+    /// baselines, including after retries, missed rounds, and container
+    /// restarts.
     async fn add_task_resource_usage_samples(
         &self,
         samples: &[ContainerUsageSample],
