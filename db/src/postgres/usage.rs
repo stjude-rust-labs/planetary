@@ -1,24 +1,13 @@
 //! TES task log metadata built from per-container resource usage.
 
 use super::models::ContainerUsage;
+use crate::normalize_cpu_seconds;
 
 /// The name prefix of executor containers within a task pod.
 ///
 /// This must match the container naming used by the orchestrator's task pod
 /// template (`executor-N` for the task's Nth executor).
 const EXECUTOR_CONTAINER_PREFIX: &str = "executor-";
-
-/// Returns a finite, non-negative CPU observation with negative zero
-/// normalized to zero.
-pub(super) fn normalize_cpu_seconds(cpu_seconds: f64) -> Option<f64> {
-    if !cpu_seconds.is_finite() || cpu_seconds < 0.0 {
-        None
-    } else if cpu_seconds == 0.0 {
-        Some(0.0)
-    } else {
-        Some(cpu_seconds)
-    }
-}
 
 /// Builds a usage metadata entry from aggregate values.
 ///

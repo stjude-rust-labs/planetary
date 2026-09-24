@@ -131,6 +131,40 @@ impl ContainerUsageSample {
     }
 }
 
+/// Returns a finite, non-negative CPU observation with negative zero
+/// normalized to zero.
+pub fn normalize_cpu_seconds(cpu_seconds: f64) -> Option<f64> {
+    if !cpu_seconds.is_finite() || cpu_seconds < 0.0 {
+        None
+    } else if cpu_seconds == 0.0 {
+        Some(0.0)
+    } else {
+        Some(cpu_seconds)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_seconds_require_finite_non_negative_values() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.001] {
+            assert_eq!(normalize_cpu_seconds(value), None);
+        }
+
+        assert_eq!(normalize_cpu_seconds(1.5), Some(1.5));
+    }
+
+    #[test]
+    fn cpu_seconds_normalize_negative_zero() {
+        let value = normalize_cpu_seconds(-0.0).expect("negative zero should be valid");
+
+        assert_eq!(value, 0.0);
+        assert!(!value.is_sign_negative());
+    }
+}
+
 /// An abstraction for the planetary database.
 #[async_trait::async_trait]
 pub trait Database: Send + Sync + 'static {

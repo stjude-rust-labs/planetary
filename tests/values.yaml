@@ -38,6 +38,8 @@ orchestrator:
 
 monitor:
   log: info
+  usageSampleInterval: 1
+  kubeletInsecureTls: true
   image:
     name: stjude-rust-labs/planetary-monitor
     tag: test

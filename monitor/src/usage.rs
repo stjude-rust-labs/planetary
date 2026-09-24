@@ -10,6 +10,7 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
 use kube::api::ListParams;
 use planetary_db::ContainerUsageSample;
+use planetary_db::normalize_cpu_seconds;
 use tracing::warn;
 
 /// The task id label.
@@ -194,17 +195,6 @@ pub struct ContainerMetrics {
     pub memory_bytes: Option<u64>,
     /// The container's start time, in seconds since the Unix epoch.
     pub start_time_seconds: Option<f64>,
-}
-
-/// Returns a valid cumulative CPU counter value.
-fn normalize_cpu_seconds(cpu_seconds: f64) -> Option<f64> {
-    if !cpu_seconds.is_finite() || cpu_seconds < 0.0 {
-        None
-    } else if cpu_seconds == 0.0 {
-        Some(0.0)
-    } else {
-        Some(cpu_seconds)
-    }
 }
 
 /// Parses the namespace, pod, and container labels of a Prometheus series.

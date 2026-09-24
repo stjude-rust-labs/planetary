@@ -37,6 +37,7 @@ use super::Database;
 use super::DatabaseResult;
 use crate::TaskTemplateData;
 use crate::TerminatedContainer;
+use crate::normalize_cpu_seconds;
 
 pub(crate) mod models;
 
@@ -823,7 +824,7 @@ impl Database for PostgresDatabase {
             pods.push(sample.pod_name.as_str());
             names.push(sample.container_name.as_str());
             memory.push(sample.memory_bytes);
-            cpu.push(sample.cpu_seconds.and_then(usage::normalize_cpu_seconds));
+            cpu.push(sample.cpu_seconds.and_then(normalize_cpu_seconds));
             start.push(sample.start_time_seconds);
         }
 
