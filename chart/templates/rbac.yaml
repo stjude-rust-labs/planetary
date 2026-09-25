@@ -66,6 +66,31 @@ rules:
   resources: ["persistentvolumeclaims"]
   verbs: ["delete"]
 ---
+{{- if .Values.monitor.usageSampleInterval }}
+# Created only when resource usage sampling is enabled.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-monitor-kubelet-metrics
+rules:
+- apiGroups: [""]
+  resources: ["nodes/metrics"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-monitor-kubelet-metrics
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-monitor-kubelet-metrics
+subjects:
+- kind: ServiceAccount
+  name: {{ .Values.monitor.account.name }}
+  namespace: {{ .Release.Namespace }}
+---
+{{- end }}
 # Service account for the monitor
 apiVersion: v1
 kind: ServiceAccount

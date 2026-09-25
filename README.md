@@ -89,6 +89,10 @@ research to create a complete list of concerns to consider in your situation:
   We've scoped roles and bindings according to what we believe to be
   least-privilege access.
 
+  Review the conditional cluster-scoped permission described in
+  [Task Resource Usage Reporting](#task-resource-usage-reporting) before
+  enabling sampling.
+
   Review these to ensure they align with your internal access control policies
   and compliance standards.
 
@@ -344,7 +348,79 @@ If additional resource kinds are required in the task template, ensure that the
 Planetary orchestrator is granted the `create` verb and that the Planetary
 monitor is granted the `delete` verb for the resource.
 
-See [`rbac.yaml`](./chart/templates/rbac.yaml) for more information.
+### Task Resource Usage Reporting
+
+Resource usage reporting samples task containers and exposes their usage in TES
+task log metadata.
+
+Sampling is disabled by default (`monitor.usageSampleInterval` is unset) and
+is enabled by setting `monitor.usageSampleInterval` to a sampling interval in
+seconds.
+
+Usage is read from the `/metrics/resource` endpoint of the kubelets hosting
+task pods, contacted directly at each node's address. The
+[Kubernetes metrics server](https://github.com/kubernetes-sigs/metrics-server)
+is not used because it only serves `Running` pods, while task pods execute
+in init containers and remain `Pending`; its documentation also directs
+monitoring consumers to the kubelet endpoint.
+
+When sampling is enabled, the chart grants the monitor a **cluster-scoped**
+`get` permission on `nodes/metrics`. This is the chart's only cluster-scoped
+permission and exists only while sampling is enabled; Kubelet authorization
+maps `nodes/metrics` only to the read-only `/metrics/*` endpoints.
+
+Requests carry the monitor's service account token, and the monitor verifies
+each kubelet's serving certificate against exactly one CA bundle: the
+in-cluster service account bundle by default, or the `ca.crt` bundle from the
+Secret selected by `monitor.kubeletCaSecretName`. The custom CA setting is
+ignored when `monitor.kubeletInsecureTls: true`; this disables certificate
+and hostname verification and should be used only for development clusters.
+The kubelet port defaults to `10250` and can be changed with
+`monitor.kubeletPort`.
+
+Usage is reported in task log `metadata` in `BASIC` and `FULL` task views,
+with all values encoded as strings.
+
+The task-level keys cover the task's **executor containers only** (excluding
+Planetary's input and output transporter containers):
+
+| Key                 | Meaning                                                                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `peak_memory_bytes` | peak sampled memory across the task's executors, in bytes                                                                              |
+| `avg_memory_bytes`  | average sampled memory of the task's executors, in bytes; arithmetic mean of samples taken at the sampling interval, not time-weighted |
+| `cpu_time_ms`       | accumulated executor CPU time, rounded to milliseconds                                                                                 |
+
+The `resource_usage` key carries a per-container breakdown as an object keyed
+by container name, where `inputs` and `outputs` are Planetary's transporter
+containers and `executor-N` corresponds to `executors[N]` of the TES task:
+
+```json
+{
+  "peak_memory_bytes": "134217728",
+  "avg_memory_bytes": "100663296",
+  "cpu_time_ms": "4520",
+  "resource_usage": {
+    "inputs":     { "peak_memory_bytes": "8388608",   "avg_memory_bytes": "8388608",   "cpu_time_ms": "150" },
+    "executor-0": { "peak_memory_bytes": "134217728", "avg_memory_bytes": "100663296", "cpu_time_ms": "4520" },
+    "outputs":    { "peak_memory_bytes": "16777216",  "avg_memory_bytes": "16777216",  "cpu_time_ms": "230" }
+  }
+}
+```
+
+Notes on semantics:
+
+* Memory values are the Kubernetes _working set_ (which may include file-backed
+  cache pages), not process RSS.
+* CPU time uses durable per-container baselines, so retries and monitor
+  restarts do not double-count observations, missed rounds are included in
+  the next observation, and restarted containers resume from their new
+  counter.
+* A container that starts and completes between two sampling rounds is never
+  observed and is absent from `resource_usage`; absence means "not sampled,"
+  not zero usage.
+* Task pods must run on nodes with a real kubelet; virtual nodes (e.g.
+  AKS virtual nodes backed by Azure Container Instances) are not supported
+  for task execution.
 
 ## 🚀 Getting Started
 

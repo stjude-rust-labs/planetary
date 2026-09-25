@@ -37,10 +37,47 @@ use super::Database;
 use super::DatabaseResult;
 use crate::TaskTemplateData;
 use crate::TerminatedContainer;
+use crate::normalize_cpu_seconds;
 
 pub(crate) mod models;
+
+/// Loads a batch of tasks' per-container resource usage, grouped by task.
+///
+/// The result is ordered to match `tasks` (via [`GroupedBy::grouped_by`]),
+/// so it can be `zip`-ed directly against it.
+macro_rules! load_container_usage {
+    ($conn:expr, $tasks:expr) => {{
+        use diesel::*;
+        use diesel_async::RunQueryDsl;
+
+        models::ContainerUsage::belonging_to($tasks)
+            .select(models::ContainerUsage::as_select())
+            .order_by(schema::task_container_usage::container_name)
+            .load($conn)
+            .await
+            .map_err(Error::Diesel)?
+            .grouped_by($tasks)
+    }};
+}
+
+/// Loads a single task's per-container resource usage.
+macro_rules! load_task_container_usage {
+    ($conn:expr, $task:expr) => {{
+        use diesel::*;
+        use diesel_async::RunQueryDsl;
+
+        models::ContainerUsage::belonging_to($task)
+            .select(models::ContainerUsage::as_select())
+            .order_by(schema::task_container_usage::container_name)
+            .load($conn)
+            .await
+            .map_err(Error::Diesel)?
+    }};
+}
+
 #[allow(clippy::missing_docs_in_private_items)]
 pub(crate) mod schema;
+mod usage;
 
 /// Used to embed the migrations into the binary so they can be applied at
 /// runtime.
@@ -58,6 +95,114 @@ const MAX_CONNECTION_AGE: Duration = Duration::from_secs(60);
 ///
 /// This is currently a fixed-size limit as we keep a connection pool per-pod.
 const MAX_POOL_SIZE: usize = 10;
+
+/// Folds observed memory samples into per-container usage aggregates.
+const MEMORY_USAGE_FOLD_SQL: &str = r#"
+    INSERT INTO task_container_usage (
+        task_id,
+        container_name,
+        peak_memory_bytes,
+        memory_total_bytes,
+        memory_sample_count
+    )
+    SELECT
+        tasks.id,
+        samples.container_name,
+        MAX(samples.memory_bytes),
+        SUM(samples.memory_bytes),
+        COUNT(samples.memory_bytes)
+    FROM UNNEST($1::text[], $2::text[], $3::bigint[])
+        AS samples(tes_id, container_name, memory_bytes)
+    JOIN tasks ON tasks.tes_id = samples.tes_id
+    WHERE samples.memory_bytes IS NOT NULL
+    GROUP BY tasks.id, samples.container_name
+    ORDER BY tasks.id, samples.container_name
+    ON CONFLICT (task_id, container_name) DO UPDATE SET
+        peak_memory_bytes = GREATEST(
+            COALESCE(task_container_usage.peak_memory_bytes, 0),
+            EXCLUDED.peak_memory_bytes
+        ),
+        memory_total_bytes =
+            COALESCE(task_container_usage.memory_total_bytes, 0)
+            + EXCLUDED.memory_total_bytes,
+        memory_sample_count =
+            COALESCE(task_container_usage.memory_sample_count, 0)
+            + EXCLUDED.memory_sample_count
+"#;
+
+/// Folds CPU counter deltas into usage aggregates and advances their baselines.
+const CPU_USAGE_FOLD_SQL: &str = r#"
+    WITH samples AS (
+        SELECT
+            tasks.id AS task_id,
+            observations.pod_name,
+            observations.container_name,
+            observations.cpu_seconds,
+            observations.start_time_seconds
+        FROM UNNEST($1::text[], $2::text[], $3::text[], $4::float8[], $5::float8[])
+            AS observations(
+                tes_id,
+                pod_name,
+                container_name,
+                cpu_seconds,
+                start_time_seconds
+            )
+        JOIN tasks ON tasks.tes_id = observations.tes_id
+        WHERE observations.cpu_seconds IS NOT NULL
+    ),
+    deltas AS (
+        SELECT
+            samples.*,
+            CASE
+                WHEN baseline.cpu_seconds IS NULL THEN samples.cpu_seconds
+                WHEN baseline.start_time_seconds
+                        IS NOT DISTINCT FROM samples.start_time_seconds
+                    AND samples.cpu_seconds >= baseline.cpu_seconds
+                    THEN samples.cpu_seconds - baseline.cpu_seconds
+                ELSE samples.cpu_seconds
+            END AS cpu_delta_seconds
+        FROM samples
+        LEFT JOIN task_container_baseline AS baseline
+            USING (task_id, pod_name, container_name)
+    ),
+    -- Baseline advancement and aggregation must stay atomic for retry idempotence.
+    advanced AS (
+        INSERT INTO task_container_baseline (
+            task_id,
+            pod_name,
+            container_name,
+            start_time_seconds,
+            cpu_seconds
+        )
+        SELECT
+            task_id,
+            pod_name,
+            container_name,
+            start_time_seconds,
+            cpu_seconds
+        FROM deltas
+        ON CONFLICT (task_id, pod_name, container_name) DO UPDATE SET
+            start_time_seconds = EXCLUDED.start_time_seconds,
+            cpu_seconds = EXCLUDED.cpu_seconds
+    )
+    INSERT INTO task_container_usage (
+        task_id,
+        container_name,
+        cpu_seconds
+    )
+    SELECT
+        task_id,
+        container_name,
+        SUM(cpu_delta_seconds)
+    FROM deltas
+    -- Multiple pods can map to one row, so group before ON CONFLICT.
+    GROUP BY task_id, container_name
+    ORDER BY task_id, container_name
+    ON CONFLICT (task_id, container_name) DO UPDATE SET
+        cpu_seconds =
+            COALESCE(task_container_usage.cpu_seconds, 0.0)
+            + EXCLUDED.cpu_seconds
+"#;
 
 /// Helper for zipping two uneven iterators.
 ///
@@ -107,21 +252,26 @@ pub enum Error {
 }
 
 /// Converts a task model into a TES task.
-fn into_task<T, C>(task: T, containers: Vec<C>) -> Task
+fn into_task<T, C>(task: T, containers: Vec<C>, usage: Vec<models::ContainerUsage>) -> Task
 where
     T: Into<(Task, Vec<OutputFile>, Vec<String>)>,
     C: Into<ExecutorLog>,
 {
     let (mut task, outputs, system_logs) = task.into();
+    let metadata = usage::resource_usage_metadata(&usage);
     let executor_logs: Vec<_> = containers.into_iter().map(Into::into).collect();
 
-    if !outputs.is_empty() || !executor_logs.is_empty() || !system_logs.is_empty() {
+    if !outputs.is_empty()
+        || !executor_logs.is_empty()
+        || !system_logs.is_empty()
+        || metadata.is_some()
+    {
         let start_time = executor_logs.first().and_then(|e| e.start_time);
         let end_time = executor_logs.last().and_then(|e| e.end_time);
 
         task.logs = Some(vec![TaskLog {
             logs: executor_logs,
-            metadata: None,
+            metadata,
             start_time,
             end_time,
             outputs,
@@ -270,7 +420,9 @@ impl Database for PostgresDatabase {
                     .await
                     .map_err(Error::Diesel)?;
 
-                Ok(TaskResponse::Basic(into_task(task, containers)))
+                let usage = load_task_container_usage!(&mut conn, &task);
+
+                Ok(TaskResponse::Basic(into_task(task, containers, usage)))
             }
             View::Full => {
                 let task = schema::tasks::table
@@ -294,7 +446,9 @@ impl Database for PostgresDatabase {
                     .await
                     .map_err(Error::Diesel)?;
 
-                Ok(TaskResponse::Full(into_task(task, containers)))
+                let usage = load_task_container_usage!(&mut conn, &task);
+
+                Ok(TaskResponse::Full(into_task(task, containers, usage)))
             }
         }
     }
@@ -410,6 +564,8 @@ impl Database for PostgresDatabase {
                     Some((offset as usize + tasks.len()).to_string())
                 };
 
+                let usage = load_container_usage!(&mut conn, &tasks);
+
                 Ok((
                     models::BasicContainer::belonging_to(&tasks)
                         .select(models::BasicContainer::as_select())
@@ -420,8 +576,11 @@ impl Database for PostgresDatabase {
                         .map_err(Error::Diesel)?
                         .grouped_by(&tasks)
                         .into_iter()
+                        .zip(usage)
                         .zip(tasks)
-                        .map(|(containers, task)| TaskResponse::Basic(into_task(task, containers)))
+                        .map(|((containers, usage), task)| {
+                            TaskResponse::Basic(into_task(task, containers, usage))
+                        })
                         .collect(),
                     token,
                 ))
@@ -441,6 +600,8 @@ impl Database for PostgresDatabase {
                     Some((offset as usize + tasks.len()).to_string())
                 };
 
+                let usage = load_container_usage!(&mut conn, &tasks);
+
                 Ok((
                     models::FullContainer::belonging_to(&tasks)
                         .select(models::FullContainer::as_select())
@@ -451,8 +612,11 @@ impl Database for PostgresDatabase {
                         .map_err(Error::Diesel)?
                         .grouped_by(&tasks)
                         .into_iter()
+                        .zip(usage)
                         .zip(tasks)
-                        .map(|(containers, task)| TaskResponse::Full(into_task(task, containers)))
+                        .map(|((containers, usage), task)| {
+                            TaskResponse::Full(into_task(task, containers, usage))
+                        })
                         .collect(),
                     token,
                 ))
@@ -629,6 +793,67 @@ impl Database for PostgresDatabase {
             .execute(&mut conn)
             .await
             .map_err(Error::Diesel)?;
+
+        Ok(())
+    }
+
+    async fn add_task_resource_usage_samples(
+        &self,
+        samples: &[crate::ContainerUsageSample],
+    ) -> DatabaseResult<()> {
+        use diesel::pg::sql_types::Array;
+        use diesel::sql_types::BigInt;
+        use diesel::sql_types::Double;
+        use diesel::sql_types::Nullable;
+        use diesel::sql_types::Text;
+        use diesel::*;
+        use diesel_async::RunQueryDsl;
+
+        if samples.is_empty() {
+            return Ok(());
+        }
+
+        let mut ids = Vec::with_capacity(samples.len());
+        let mut pods = Vec::with_capacity(samples.len());
+        let mut names = Vec::with_capacity(samples.len());
+        let mut memory = Vec::with_capacity(samples.len());
+        let mut cpu = Vec::with_capacity(samples.len());
+        let mut start = Vec::with_capacity(samples.len());
+        for sample in samples {
+            ids.push(sample.tes_id.as_str());
+            pods.push(sample.pod_name.as_str());
+            names.push(sample.container_name.as_str());
+            memory.push(sample.memory_bytes);
+            cpu.push(sample.cpu_seconds.and_then(normalize_cpu_seconds));
+            start.push(sample.start_time_seconds);
+        }
+
+        let mut conn = self.pool.get().await.map_err(Error::Pool)?;
+
+        // See `Database::add_task_resource_usage_samples` for the full
+        // idempotency contract these queries implement.
+        conn.transaction(async |conn| {
+            sql_query(MEMORY_USAGE_FOLD_SQL)
+                .bind::<Array<Text>, _>(&ids)
+                .bind::<Array<Text>, _>(&names)
+                .bind::<Array<Nullable<BigInt>>, _>(&memory)
+                .execute(conn)
+                .await
+                .map_err(Error::Diesel)?;
+
+            sql_query(CPU_USAGE_FOLD_SQL)
+                .bind::<Array<Text>, _>(&ids)
+                .bind::<Array<Text>, _>(&pods)
+                .bind::<Array<Text>, _>(&names)
+                .bind::<Array<Nullable<Double>>, _>(&cpu)
+                .bind::<Array<Nullable<Double>>, _>(&start)
+                .execute(conn)
+                .await
+                .map_err(Error::Diesel)?;
+
+            Ok::<(), Error>(())
+        })
+        .await?;
 
         Ok(())
     }

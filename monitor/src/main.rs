@@ -25,6 +25,18 @@ const MONITORING_INTERVAL_SECONDS: u64 = 60;
 /// The default interval for keeping task resources, in seconds.
 const KEEP_INTERVAL_SECONDS: u64 = 300;
 
+/// Parses a nonzero resource usage sampling interval.
+fn parse_usage_sample_interval(s: &str) -> Result<u64, String> {
+    match s.parse::<u64>() {
+        Ok(0) => Err(
+            "usage sample interval must not be zero; omit the argument to disable sampling"
+                .to_string(),
+        ),
+        Ok(secs) => Ok(secs),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// A tool for executing tasks in Kubernetes via the GA4GH TES specification.
 #[derive(Parser)]
 pub struct Args {
@@ -53,6 +65,23 @@ pub struct Args {
     /// Defaults to 300 seconds.
     #[clap(long, default_value_t = KEEP_INTERVAL_SECONDS)]
     keep_interval: u64,
+
+    /// The resource usage sampling interval in seconds; omitted disables
+    /// sampling.
+    #[clap(long, env, value_parser = parse_usage_sample_interval)]
+    usage_sample_interval: Option<u64>,
+
+    /// The kubelet HTTPS port.
+    #[clap(long, env, default_value_t = 10250)]
+    kubelet_port: u16,
+
+    /// Disable kubelet certificate and hostname verification.
+    #[clap(long, env, default_value_t = false)]
+    kubelet_insecure_tls: bool,
+
+    /// An optional kubelet CA bundle path.
+    #[clap(long, env)]
+    kubelet_ca_path: Option<PathBuf>,
 
     /// The name of the pod running the service.
     #[clap(long, env)]
@@ -180,6 +209,10 @@ pub async fn main() -> anyhow::Result<()> {
         .templates_dir(args.templates_dir)
         .check_interval(Duration::from_secs(args.check_interval))
         .keep_interval(Duration::from_secs(args.keep_interval))
+        .kubelet_port(args.kubelet_port)
+        .kubelet_insecure_tls(args.kubelet_insecure_tls)
+        .maybe_kubelet_ca_path(args.kubelet_ca_path)
+        .maybe_usage_sample_interval(args.usage_sample_interval.map(Duration::from_secs))
         .orchestrator_url(args.orchestrator_url)
         .orchestrator_api_key(args.orchestrator_api_key)
         .build()

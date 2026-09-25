@@ -100,6 +100,71 @@ pub struct TaskTemplateData {
     pub executors: Vec<Executor>,
 }
 
+/// A single resource usage observation for one container of a task's pod.
+///
+/// Containers are identified by their pod name and Kubernetes container name
+/// (`inputs`, `executor-N`, or `outputs`). Each dimension is optional; a
+/// dimension that could not be measured for a sampling round is `None` and
+/// does not affect the container's aggregate.
+#[derive(Debug, Clone, Default)]
+pub struct ContainerUsageSample {
+    /// The TES identifier of the task.
+    pub tes_id: String,
+    /// The name of the pod hosting the container.
+    pub pod_name: String,
+    /// The name of the container within the pod.
+    pub container_name: String,
+    /// The sampled working set memory of the container, in bytes.
+    pub memory_bytes: Option<i64>,
+    /// The observed cumulative CPU time of the container instance, in
+    /// seconds.
+    pub cpu_seconds: Option<f64>,
+    /// The container instance's start time, in seconds since the Unix epoch
+    /// of the node's clock, used to detect container restarts.
+    pub start_time_seconds: Option<f64>,
+}
+
+impl ContainerUsageSample {
+    /// Whether the sample carries no measurements.
+    pub fn is_empty(&self) -> bool {
+        self.memory_bytes.is_none() && self.cpu_seconds.is_none()
+    }
+}
+
+/// Returns a finite, non-negative CPU observation with negative zero
+/// normalized to zero.
+pub fn normalize_cpu_seconds(cpu_seconds: f64) -> Option<f64> {
+    if !cpu_seconds.is_finite() || cpu_seconds < 0.0 {
+        None
+    } else if cpu_seconds == 0.0 {
+        Some(0.0)
+    } else {
+        Some(cpu_seconds)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_seconds_require_finite_non_negative_values() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.001] {
+            assert_eq!(normalize_cpu_seconds(value), None);
+        }
+
+        assert_eq!(normalize_cpu_seconds(1.5), Some(1.5));
+    }
+
+    #[test]
+    fn cpu_seconds_normalize_negative_zero() {
+        let value = normalize_cpu_seconds(-0.0).expect("negative zero should be valid");
+
+        assert_eq!(value, 0.0);
+        assert!(!value.is_sign_negative());
+    }
+}
+
 /// An abstraction for the planetary database.
 #[async_trait::async_trait]
 pub trait Database: Send + Sync + 'static {
@@ -174,6 +239,16 @@ pub trait Database: Send + Sync + 'static {
 
     /// Appends the given messages to the task's system log.
     async fn append_system_log(&self, tes_id: &str, messages: &[&str]) -> DatabaseResult<()>;
+
+    /// Records per-container resource usage observations.
+    ///
+    /// CPU counters are folded idempotently against durable per-container
+    /// baselines, including after retries, missed rounds, and container
+    /// restarts.
+    async fn add_task_resource_usage_samples(
+        &self,
+        samples: &[ContainerUsageSample],
+    ) -> DatabaseResult<()>;
 
     /// Inserts an internal system error with the database.
     async fn insert_error(
