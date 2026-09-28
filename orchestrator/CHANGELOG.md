@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fixed
 
+* Included failed executor details when a task is otherwise reported with an
+  I/O or system error
+  ([#51](https://github.com/stjude-rust-labs/planetary/pull/51)).
 * Fixed returning a 403 for when there is an invalid or missing authorization
   header ([#26](https://github.com/stjude-rust-labs/planetary/pull/26)).
 * Fixed incorrect task state when a system error was encountered ([#28](https://github.com/stjude-rust-labs/planetary/pull/28)).

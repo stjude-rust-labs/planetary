@@ -270,6 +270,42 @@ fn task_lifecycle() {
     );
 }
 
+/// Tests that a finished task includes sampled resource usage metadata.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn task_resource_usage() {
+    let env = TestEnvironment::get();
+    let client = env.client(Some(&unique_username("resource-usage")));
+
+    let id = client.create_task(&shell_task("sleep 5"));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let metadata = &body["logs"][0]["metadata"];
+    let cpu_time_ms = metadata["cpu_time_ms"]
+        .as_str()
+        .and_then(|value| value.parse::<u64>().ok());
+    let peak_memory_bytes = metadata["peak_memory_bytes"]
+        .as_str()
+        .and_then(|value| value.parse::<u64>().ok());
+
+    assert!(
+        cpu_time_ms.is_some_and(|value| value > 0),
+        "missing task CPU usage: {body:#}"
+    );
+    assert!(
+        peak_memory_bytes.is_some_and(|value| value > 0),
+        "missing task memory usage: {body:#}"
+    );
+    assert!(
+        metadata["resource_usage"]["executor-0"].is_object(),
+        "missing executor resource usage: {body:#}"
+    );
+}
+
 /// Tests that tasks are only visible to the user that created them.
 #[test]
 #[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]

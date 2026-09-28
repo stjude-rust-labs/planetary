@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Added
+
+* Added `local.storage` to support local inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
+* Added `transporter.storage.azure` values for Azure Storage authentication ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).
+* Added a 15 minute TTL on the migration job ([#25](https://github.com/stjude-rust-labs/planetary/pull/25)).
+* Addes dynamic egress network policy additions for cloud and user exceptions ([#34](https://github.com/stjude-rust-labs/planetary/pull/34)).
+* Added optional per-container task resource usage sampling with kubelet TLS
+  configuration
+  ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
+* Added `task.storageClass` for selecting the task PVC StorageClass ([#52](https://github.com/stjude-rust-labs/planetary/pull/52)).
+
 ### Fixed
 
 * Fixed the task pod's `outputs` container so that it also mounts the task's
@@ -16,14 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed), and the `outputs` container had no way to resolve such
   symlinks, causing the output sweep to fail with a misleading "no such
   file or directory" error that masked the task's real failure. ([#50](https://github.com/stjude-rust-labs/planetary/pull/50))
-
-### Added
-
-* Added `local.storage` to support local inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
-* Added `transporter.storage.azure` values for Azure Storage authentication ([#27](https://github.com/stjude-rust-labs/planetary/pull/27)).
-* Added a 15 minute TTL on the migration job ([#25](https://github.com/stjude-rust-labs/planetary/pull/25)).
-* Addes dynamic egress network policy additions for cloud and user exceptions ([#34](https://github.com/stjude-rust-labs/planetary/pull/34)).
-* Added `task.storageClass` for selecting the task PVC StorageClass ([#52](https://github.com/stjude-rust-labs/planetary/pull/52)).
 
 ## v0.1.0 (2025-10-13)
 

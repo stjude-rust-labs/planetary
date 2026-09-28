@@ -60,6 +60,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 use crate::into_retry_error;
 use crate::notify_retry;
@@ -284,6 +285,23 @@ fn format_executor_script(executor: &Executor) -> Result<String> {
 fn executor_index(name: &str) -> Option<i32> {
     name.strip_prefix(EXECUTOR_CONTAINER_PREFIX)
         .and_then(|n| n.parse().ok())
+}
+
+/// Describes failed executor containers in the pod's current status.
+fn failed_executor_note(pod: &Pod) -> String {
+    pod.status
+        .as_ref()
+        .and_then(|status| status.init_container_statuses.as_deref())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| {
+            let index = executor_index(&s.name)?;
+            let exit_code = s.state.as_ref()?.terminated.as_ref()?.exit_code;
+            (exit_code != 0)
+                .then(|| format!("executor {index} also failed with exit code {exit_code}"))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Used to determine what state a task pod is in.
@@ -771,6 +789,20 @@ impl TaskOrchestrator {
 
         debug!("task pod `{tes_id}` is in state `{state}`");
 
+        // Preserve executor diagnostics without changing task classification.
+        if matches!(
+            state,
+            TaskPodState::InputsError | TaskPodState::OutputsError | TaskPodState::SystemError
+        ) {
+            let note = failed_executor_note(pod);
+            if !note.is_empty() {
+                warn!(
+                    "task pod `{tes_id}` was classified as `{state}` but its status also shows a \
+                     failed executor ({note}); the executor failure may be the true root cause"
+                );
+            }
+        }
+
         match state {
             TaskPodState::Unknown => self.handle_unknown_pod(tes_id, pod).await?,
             TaskPodState::Waiting => self.handle_waiting_task(tes_id).await?,
@@ -910,10 +942,17 @@ impl TaskOrchestrator {
         )
         .await?;
 
+        let executor_note = failed_executor_note(pod);
+
         let message = format_log_message!(
             "task `{tes_id}` has failed due to an error encountered while processing {kind} (last \
-             {MAX_LOG_LINES} lines of output):\n{output}",
+             {MAX_LOG_LINES} lines of output){note}:\n{output}",
             kind = if inputs { "inputs" } else { "outputs" },
+            note = if executor_note.is_empty() {
+                String::new()
+            } else {
+                format!(" ({executor_note})")
+            },
             output = output.trim()
         );
 
@@ -1305,5 +1344,106 @@ impl Monitor {
         }
 
         info!("cluster event processing has shut down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use k8s_openapi::api::core::v1::ContainerState;
+    use k8s_openapi::api::core::v1::ContainerStateTerminated;
+    use k8s_openapi::api::core::v1::ContainerStatus;
+    use k8s_openapi::api::core::v1::PodStatus;
+
+    use super::*;
+
+    /// Builds a terminated container status for tests.
+    fn terminated_status(name: &str, exit_code: i32) -> ContainerStatus {
+        ContainerStatus {
+            name: name.to_string(),
+            state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated {
+                    exit_code,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Builds a pod with the given init container statuses.
+    fn pod_with_init_statuses(statuses: Vec<ContainerStatus>) -> Pod {
+        Pod {
+            status: Some(PodStatus {
+                init_container_statuses: Some(statuses),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn failed_executor_note_is_empty_when_no_executor_failed() {
+        let pod = pod_with_init_statuses(vec![
+            terminated_status(INPUTS_CONTAINER_NAME, 0),
+            terminated_status("executor-0", 0),
+        ]);
+
+        assert_eq!(failed_executor_note(&pod), "");
+    }
+
+    #[test]
+    fn failed_executor_note_is_empty_when_pod_has_no_status() {
+        let pod = Pod::default();
+
+        assert_eq!(failed_executor_note(&pod), "");
+    }
+
+    #[test]
+    fn failed_executor_note_reports_a_single_failed_executor() {
+        let pod = pod_with_init_statuses(vec![
+            terminated_status(INPUTS_CONTAINER_NAME, 0),
+            terminated_status("executor-0", 1),
+        ]);
+
+        assert_eq!(
+            failed_executor_note(&pod),
+            "executor 0 also failed with exit code 1"
+        );
+    }
+
+    #[test]
+    fn failed_executor_note_ignores_a_failed_inputs_container() {
+        let pod = pod_with_init_statuses(vec![terminated_status(INPUTS_CONTAINER_NAME, 1)]);
+
+        assert_eq!(failed_executor_note(&pod), "");
+    }
+
+    #[test]
+    fn failed_executor_note_reports_multiple_failed_executors() {
+        let pod = pod_with_init_statuses(vec![
+            terminated_status(INPUTS_CONTAINER_NAME, 0),
+            terminated_status("executor-0", 1),
+            terminated_status("executor-1", 2),
+        ]);
+
+        assert_eq!(
+            failed_executor_note(&pod),
+            "executor 0 also failed with exit code 1; executor 1 also failed with exit code 2"
+        );
+    }
+
+    #[test]
+    fn failed_executor_note_ignores_a_still_running_executor() {
+        let pod = pod_with_init_statuses(vec![ContainerStatus {
+            name: "executor-0".to_string(),
+            state: Some(ContainerState {
+                running: Some(Default::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]);
+
+        assert_eq!(failed_executor_note(&pod), "");
     }
 }

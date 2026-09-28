@@ -52,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 use url::Url;
 
 /// The task id label.
@@ -97,6 +98,19 @@ pub struct Intervals {
     /// The interval for the keeping Kubernetes resources after a task enters a
     /// terminal state.
     pub keep: Duration,
+    /// The resource usage sampling interval, or `None` to disable sampling.
+    pub usage: Option<Duration>,
+}
+
+/// Configuration for reading resource metrics from kubelets.
+#[derive(Debug, Clone)]
+pub struct KubeletConfig {
+    /// The kubelet port.
+    pub port: u16,
+    /// Whether to disable kubelet certificate and hostname verification.
+    pub insecure_tls: bool,
+    /// An optional kubelet CA bundle path.
+    pub ca_path: Option<std::path::PathBuf>,
 }
 
 /// Represents state shared between different monitor tokio tasks.
@@ -113,6 +127,8 @@ struct State {
     namespaces: Namespaces,
     /// The monitor intervals.
     intervals: Intervals,
+    /// The kubelet configuration for resource usage sampling.
+    kubelet: KubeletConfig,
     /// The task template for deleting task resources.
     template: Template,
 }
@@ -124,6 +140,7 @@ impl State {
         templates_dir: impl Into<PathBuf>,
         namespaces: Namespaces,
         intervals: Intervals,
+        kubelet: KubeletConfig,
     ) -> Result<Self> {
         let client = Client::try_default()
             .await
@@ -150,6 +167,7 @@ impl State {
             discovery,
             namespaces,
             intervals,
+            kubelet,
             template,
         })
     }
@@ -179,6 +197,8 @@ pub struct Monitor {
     garbage: JoinHandle<()>,
     /// The handle to the cancellation monitoring tokio task.
     cancellations: JoinHandle<()>,
+    /// The handle to the resource usage sampling tokio task, if enabled.
+    usage: Option<JoinHandle<()>>,
 }
 
 impl Monitor {
@@ -191,8 +211,10 @@ impl Monitor {
         namespaces: Namespaces,
         templates_dir: impl Into<PathBuf>,
         intervals: Intervals,
+        kubelet: KubeletConfig,
     ) -> Result<Self> {
-        let state = Arc::new(State::new(database, templates_dir, namespaces, intervals).await?);
+        let state =
+            Arc::new(State::new(database, templates_dir, namespaces, intervals, kubelet).await?);
 
         // Spawn the orphan monitoring tokio task
         let orphans = tokio::spawn(Self::monitor_orphans(state.clone(), orchestrator));
@@ -203,11 +225,20 @@ impl Monitor {
         // Spawn the cancellations monitoring tokio task
         let cancellations = tokio::spawn(Self::monitor_cancellations(state.clone()));
 
+        // A zero interval would panic in `tokio::time::interval`, so treat it
+        // as disabled.
+        let usage = state
+            .intervals
+            .usage
+            .filter(|interval| !interval.is_zero())
+            .map(|interval| tokio::spawn(Self::monitor_usage(state.clone(), interval)));
+
         Ok(Self {
             shutdown: state.shutdown.clone(),
             orphans,
             garbage,
             cancellations,
+            usage,
         })
     }
 
@@ -223,6 +254,120 @@ impl Monitor {
         self.cancellations
             .await
             .expect("failed to join cancellations monitoring task");
+        if let Some(usage) = self.usage {
+            usage
+                .await
+                .expect("failed to join resource usage sampling task");
+        }
+    }
+
+    /// Samples and records task pod resource usage.
+    async fn monitor_usage(state: Arc<State>, sample_interval: Duration) {
+        info!("task resource usage sampler has started");
+
+        let pods: Api<Pod> = Api::namespaced(state.client.clone(), &state.namespaces.tasks);
+
+        let mut interval = tokio::time::interval(sample_interval);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        let mut kubelet: Option<crate::usage::KubeletClient> = None;
+
+        let mut client_failing = false;
+
+        let mut failing = false;
+
+        loop {
+            select! {
+                biased;
+                _ = state.shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    // Cumulative counters make an aborted round recoverable on
+                    // the next sample.
+                    let round = async {
+                        if kubelet.is_none() {
+                            match crate::usage::KubeletClient::new(
+                                state.kubelet.port,
+                                state.kubelet.insecure_tls,
+                                state.kubelet.ca_path.clone(),
+                            ) {
+                                Ok(client) => {
+                                    if client_failing {
+                                        client_failing = false;
+                                        info!("kubelet client initialization has recovered");
+                                    }
+
+                                    kubelet = Some(client);
+                                }
+                                Err(e) => {
+                                    if client_failing {
+                                        debug!("failed to initialize the kubelet client: {e:#}");
+                                    } else {
+                                        client_failing = true;
+                                        error!(
+                                            "failed to initialize the kubelet client (will retry \
+                                             every sampling interval): {e:#}"
+                                        );
+                                    }
+
+                                    return;
+                                }
+                            }
+                        }
+
+                        let kubelet = kubelet
+                            .as_ref()
+                            .expect("kubelet client should be initialized above");
+
+                        match crate::usage::sample_task_pods(
+                            kubelet,
+                            &pods,
+                            &state.namespaces.tasks,
+                        )
+                        .await
+                        {
+                            Ok(samples) => {
+                                if failing {
+                                    failing = false;
+                                    info!("sampling task pod resource usage has recovered");
+                                }
+
+                                if let Err(e) = state
+                                    .database
+                                    .add_task_resource_usage_samples(&samples)
+                                    .await
+                                {
+                                    // CPU baselines advance atomically with aggregates, so the
+                                    // next cumulative sample safely covers an interrupted or
+                                    // ambiguously committed round.
+                                    error!(
+                                        "failed to record resource usage samples (the round \
+                                         will be covered by the next successful sample): {e:#}"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                if failing {
+                                    debug!("failed to sample task pod resource usage: {e:#}");
+                                } else {
+                                    failing = true;
+                                    warn!(
+                                        "failed to sample task pod resource usage (does the \
+                                         monitor's service account have permission to list task \
+                                         pods, and to `get` `nodes/metrics`?): {e:#}"
+                                    );
+                                }
+                            }
+                        }
+                    };
+
+                    if state.shutdown.run_until_cancelled(round).await.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!("task resource usage sampler has shut down");
     }
 
     /// Implements the orphan monitoring tokio task.
@@ -242,23 +387,26 @@ impl Monitor {
                 biased;
                 _ = state.shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    // Start by getting the current pod map
-                    match Self::get_task_pod_map(&task_pods).await {
-                        Ok(pod_map) => {
-                            // Check for orphaned tasks
-                            if let Err(e) = Self::check_orphaned_tasks(&http_client, &orchestrator, &planetary_pods, &pod_map).await {
-                                state.log_error(None,  &format!("failed to check for orphaned pods: {e:#}")).await;
-                            }
+                    let round = async {
+                        match Self::get_task_pod_map(&task_pods).await {
+                            Ok(pod_map) => {
+                                if let Err(e) = Self::check_orphaned_tasks(&http_client, &orchestrator, &planetary_pods, &pod_map).await {
+                                    state.log_error(None,  &format!("failed to check for orphaned pods: {e:#}")).await;
+                                }
 
-                            // Check for missing task resources
-                            if let Err(e) = Self::check_missing_resources(state.database.as_ref(), &pod_map).await {
-                                state.log_error(None,  &format!("failed to check for missing Kubernetes resources: {e:#}")).await;
+                                if let Err(e) = Self::check_missing_resources(state.database.as_ref(), &pod_map).await {
+                                    state.log_error(None,  &format!("failed to check for missing Kubernetes resources: {e:#}")).await;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            state.log_error(None,  &format!("failed to get task pod map: {e:#}")).await;
+                            Err(e) => {
+                                state.log_error(None,  &format!("failed to get task pod map: {e:#}")).await;
+                            }
                         }
                     };
+
+                    if state.shutdown.run_until_cancelled(round).await.is_none() {
+                        break;
+                    }
                 }
             }
         }
@@ -429,7 +577,10 @@ impl Monitor {
         info!("garbage monitor has shut down");
     }
 
-    /// Performs a garbage collection for terminated tasks.
+    /// Performs garbage collection for terminated tasks.
+    ///
+    /// Cancellation is checked between pages and tasks so an in-progress
+    /// resource deletion is not abandoned.
     async fn gc(state: &State, task_pods: &Api<Pod>) -> Result<()> {
         /// The maximum number of tasks to collect per iteration
         const MAX_TASKS: u32 = 100;
@@ -471,6 +622,10 @@ impl Monitor {
         let now = Timestamp::now();
 
         loop {
+            if state.shutdown.is_cancelled() {
+                return Ok(());
+            }
+
             // Query all finished (succeeded or failed) task pods
             let ObjectList {
                 metadata, items, ..
@@ -488,6 +643,10 @@ impl Monitor {
             token = metadata.continue_;
 
             for pod in &items {
+                if state.shutdown.is_cancelled() {
+                    return Ok(());
+                }
+
                 let Some(id) = filter_pod(pod, now, state.intervals.keep) else {
                     continue;
                 };
@@ -602,6 +761,10 @@ impl Monitor {
                     match event {
                         Some(Ok(Event::InitApply(pod) | Event::Apply(pod))) => {
                             let state = state.clone();
+                            // Detached deliberately: an in-flight deletion
+                            // cut short by process exit is recoverable, as
+                            // the cancellation label persists on the pod and
+                            // the next monitor instance re-observes it.
                             tokio::spawn(async move {
                                 if let Some(id) = pod.labels().get(TASK_LABEL) &&
                                     let Err(e) = Self::delete_resources(&state, id).await {

@@ -134,6 +134,14 @@ monitor:
     limits:
       memory: 4Gi
   log: info
+  # Resource usage sampling interval in seconds; null disables sampling.
+  usageSampleInterval: null
+  # Kubelet HTTPS port.
+  kubeletPort: 10250
+  # Disable kubelet certificate and hostname verification. Development only.
+  kubeletInsecureTls: false
+  # Secret containing the kubelet CA bundle in `ca.crt`.
+  kubeletCaSecretName: ""
 
 # Configuration relating to the transporter used by Planetary for
 # transferring files to and from cloud storage.
