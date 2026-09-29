@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Added optional per-container task resource usage sampling with kubelet TLS
   configuration
   ([#48](https://github.com/stjude-rust-labs/planetary/pull/48)).
+* Added `task.storageClass` for selecting the task PVC StorageClass ([#52](https://github.com/stjude-rust-labs/planetary/pull/52)).
 
 ### Fixed
 
@@ -26,7 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed), and the `outputs` container had no way to resolve such
   symlinks, causing the output sweep to fail with a misleading "no such
   file or directory" error that masked the task's real failure. ([#50](https://github.com/stjude-rust-labs/planetary/pull/50))
-
 
 ## v0.1.0 (2025-10-13)
 

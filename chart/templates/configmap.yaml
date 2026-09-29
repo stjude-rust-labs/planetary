@@ -15,6 +15,9 @@ data:
     metadata:
       name: {{ `{{ id }}` }}
     spec:
+      {{- if ne .Values.task.storageClass nil }}
+      storageClassName: {{ .Values.task.storageClass | quote }}
+      {{- end }}
       accessModes:
       - ReadWriteOnce
       resources:
