@@ -53,7 +53,8 @@ local:
   storage:
     nfs:
       server: 10.96.85.10
-      path: /local/{{ `{{ username }}` }}
+      # Consider the username safe for the development environment
+      path: "/local/{{ `{{ username | safe }}` }}"
 
 extra:
 # Create an NFS service for the shared storage

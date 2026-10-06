@@ -76,4 +76,5 @@ postgresql:
 local:
   storage:
     hostPath:
-      path: /mnt/planetary/local/{{ `{{ username }}` }}
+      # Consider the username safe for the test environment
+      path: "/mnt/planetary/local/{{ `{{ username | safe }}` }}"

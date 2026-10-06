@@ -143,28 +143,6 @@ pub fn normalize_cpu_seconds(cpu_seconds: f64) -> Option<f64> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cpu_seconds_require_finite_non_negative_values() {
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.001] {
-            assert_eq!(normalize_cpu_seconds(value), None);
-        }
-
-        assert_eq!(normalize_cpu_seconds(1.5), Some(1.5));
-    }
-
-    #[test]
-    fn cpu_seconds_normalize_negative_zero() {
-        let value = normalize_cpu_seconds(-0.0).expect("negative zero should be valid");
-
-        assert_eq!(value, 0.0);
-        assert!(!value.is_sign_negative());
-    }
-}
-
 /// An abstraction for the planetary database.
 #[async_trait::async_trait]
 pub trait Database: Send + Sync + 'static {
@@ -263,4 +241,26 @@ pub trait Database: Send + Sync + 'static {
 #[macro_export]
 macro_rules! format_log_message {
     ($($arg:tt)*) => { format!("[{ts}] {args}", ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ"), args = format_args!($($arg)*)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_seconds_require_finite_non_negative_values() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.001] {
+            assert_eq!(normalize_cpu_seconds(value), None);
+        }
+
+        assert_eq!(normalize_cpu_seconds(1.5), Some(1.5));
+    }
+
+    #[test]
+    fn cpu_seconds_normalize_negative_zero() {
+        let value = normalize_cpu_seconds(-0.0).expect("negative zero should be valid");
+
+        assert_eq!(value, 0.0);
+        assert!(!value.is_sign_negative());
+    }
 }

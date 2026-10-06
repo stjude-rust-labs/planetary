@@ -14,6 +14,7 @@
 use planetary_tests::TestEnvironment;
 use planetary_tests::take;
 use planetary_tests::unique_username;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 
@@ -92,6 +93,24 @@ fn basic_auth_fallback() {
     let (status, body) = client.get("/v1/tasks");
     assert_eq!(status, 200, "unexpected response: {body:#}");
     assert_eq!(body, json!({ "tasks": [] }));
+}
+
+/// Tests for invalid username.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn invalid_username() {
+    let env = TestEnvironment::get();
+    let client = env.basic_auth_client(&unique_username("invalid\nusername"));
+
+    let (status, body) = client.get("/v1/tasks");
+    assert_eq!(status, 400, "unexpected response: {body:#}");
+    assert_eq!(
+        body,
+        json!({
+            "message": "username is invalid",
+            "status": 400
+        })
+    );
 }
 
 /// Tests that an unknown route responds with a "not found" error.
@@ -821,5 +840,88 @@ fn executor_failure() {
     assert_eq!(
         body["logs"][0]["logs"][0]["stderr"], "something went wrong\n",
         "unexpected response: {body:#}"
+    );
+}
+
+/// Tests that relevant strings within a task definition are handled properly
+/// for the default task template.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn task_newlines() {
+    const CONTENT: &str = "test for newlines in task fields!\n";
+
+    let env = TestEnvironment::get();
+    let username = unique_username("newlines");
+    let client = env.client(Some(&username));
+
+    env.write_local_file(&username, "inputs/input\n1.txt", CONTENT);
+
+    let id = client.create_task(&json!({
+        "name": "hello\nworld",
+        "description": "task\ndescription",
+        "inputs": [
+            {
+                "name": "input\n1",
+                "description": "input\ndescription",
+                "url": "file:///inputs/input%0A1.txt",
+                "path": "/data/input\n1.txt",
+                "type": "FILE"
+            }
+        ],
+        "outputs": [
+            {
+                "name": "output\n1",
+                "description": "output\ndescription",
+                "url": "file:///outputs/output%0A1.txt",
+                "path": "/data/output\n1.txt",
+                "type": "FILE"
+            }
+        ],
+        "resources": {
+            "zones": [
+                "zone\n1",
+                "zone\n2",
+                "zone\n3"
+            ]
+        },
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "workdir": "/work\ndir",
+                "command": ["sh", "-c", "cat \"/data/input\n1.txt\" > \"/data/output\n1.txt\" && echo \"$ENV1\""],
+                "env": {
+                    "ENV1": "env\n1"
+                }
+            }
+        ],
+        "volumes": [
+            "/mnt/volume\n1"
+        ],
+        "tags": {
+            "TAG": "tag\n1"
+        }
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let executor_logs = body["logs"][0]["logs"]
+        .as_array()
+        .expect("executor logs should be an array");
+    assert_eq!(executor_logs.len(), 1, "unexpected response: {body:#}");
+    assert_eq!(
+        executor_logs[0]["exit_code"], 0,
+        "unexpected response: {body:#}"
+    );
+    assert_eq!(
+        executor_logs[0]["stdout"], "env\n1\n",
+        "unexpected response: {body:#}"
+    );
+
+    assert_eq!(
+        env.read_local_file(&username, "outputs/output\n1.txt"),
+        CONTENT
     );
 }

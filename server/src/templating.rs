@@ -5,6 +5,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -26,7 +27,6 @@ use tera::Context;
 use tera::Map;
 use tera::Tera;
 use tera::Value;
-use tera_contrib::json::json_encode;
 use tes::v1::types::task::Executor;
 
 /// The orchestrator id label.
@@ -53,6 +53,15 @@ const DEFAULT_CPU: i32 = 1;
 ///
 /// Uses a 256 MiB default.
 const DEFAULT_MEMORY: f64 = 0.268435455;
+
+/// Determines if the given username is valid.
+pub fn is_username_valid(username: &str) -> bool {
+    // Ensure the username does not contain any control characters
+    // YAML 1.1 treats `\u2028` and `\u2029` as line breaks, so exclude them
+    !username
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+}
 
 /// Helper for converting a URL to a file path.
 ///
@@ -81,14 +90,24 @@ impl Template {
         let templates_dir = templates_dir.as_ref();
 
         let mut templates = Tera::new();
-        templates.register_filter("json_encode", json_encode);
 
-        templates.load_from_glob(templates_dir.join("**/*").to_str().with_context(|| {
-            format!(
-                "templates directory `{path}` is not valid UTF-8",
-                path = templates_dir.display()
-            )
-        })?)?;
+        // Set the default escape function so that, by default, unsafe strings
+        // are JSON serialized
+        templates.set_escape_fn(|value: &str, writer: &mut dyn Write| {
+            serde_json::to_writer(writer, value).map_err(std::io::Error::other)
+        });
+
+        templates.load_from_glob(templates_dir.join("**/*.yaml").to_str().with_context(
+            || {
+                format!(
+                    "templates directory `{path}` is not valid UTF-8",
+                    path = templates_dir.display()
+                )
+            },
+        )?)?;
+
+        // Automatically escape any YAML or JSON templates
+        templates.autoescape_on([".yaml"]);
 
         if !templates.get_template_names().any(|n| n == TEMPLATE_NAME) {
             bail!(
@@ -124,10 +143,7 @@ impl Template {
         namespace: &str,
         script: impl Fn(&Executor) -> Result<String>,
     ) -> Result<Vec<TaskResource>> {
-        let rendered = self
-            .0
-            .render(TEMPLATE_NAME, &Self::create_context(data, script)?)
-            .context("failed to render task resource template")?;
+        let rendered = self.render_to_string(data, script)?;
 
         let resources = serde_yaml_ng::Deserializer::from_str(&rendered)
             .map(|de| self.deserialize_object(&data.id, discovery, namespace, de))
@@ -190,6 +206,17 @@ impl Template {
         )
     }
 
+    /// Renders the template to a string.
+    fn render_to_string(
+        &self,
+        data: &TaskTemplateData,
+        script: impl Fn(&Executor) -> Result<String>,
+    ) -> Result<String> {
+        self.0
+            .render(TEMPLATE_NAME, &Self::create_context(data, script)?)
+            .context("failed to render task resource template")
+    }
+
     /// Creates a template context for a TES task.
     ///
     /// The provided callback is used to format an executor script for the
@@ -200,6 +227,14 @@ impl Template {
         data: &TaskTemplateData,
         script: impl Fn(&Executor) -> Result<String>,
     ) -> Result<Context> {
+        // Validate the username as often it is treated as "safe"
+        if !is_username_valid(&data.username) {
+            bail!(
+                "username `{username}` is invalid for template rendering",
+                username = data.username
+            );
+        }
+
         let mut context = Context::new();
         context.insert("id", data.id.as_str());
         context.insert("username", data.username.as_str());
@@ -386,5 +421,69 @@ impl TaskResource {
     /// Gets a mutable reference to the object defining the resource.
     pub fn object_mut(&mut self) -> &mut DynamicObject {
         &mut self.object
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use pretty_assertions::assert_eq;
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn it_json_encodes_strings() {
+        let dir = tempdir().unwrap();
+        let template_path = dir.path().join(TEMPLATE_NAME);
+
+        // Test some of the string context variables
+        // Not every variable needs to be tested here as this is just testing
+        // that, by default, string values are rendered as JSON strings
+        fs::write(
+            &template_path,
+            r#"
+{{ id }}
+{{ id | safe }}
+{{ username }}
+{{ memory }}
+{{ disk }}
+"#,
+        )
+        .unwrap();
+
+        let template = Template::new(dir.path()).unwrap();
+
+        // Render with some dummy strings containing a newline
+        let rendered = template
+            .render_to_string(
+                &TaskTemplateData {
+                    id: "task\nid".into(),
+                    username: "user\nname".into(),
+                    preemptible: false,
+                    cpu: Some(1),
+                    memory: Some(1.0),
+                    disk: Some(10.0),
+                    inputs: Default::default(),
+                    outputs: Default::default(),
+                    volumes: Default::default(),
+                    executors: Default::default(),
+                },
+                |_| Ok(String::new()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            rendered,
+            r#"
+"task\nid"
+task
+id
+"user\nname"
+"1G"
+"10G"
+"#
+        );
     }
 }

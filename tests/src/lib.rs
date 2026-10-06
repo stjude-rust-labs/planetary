@@ -495,7 +495,7 @@ impl TestEnvironment {
             NODE_CONTAINER,
             "sh",
             "-c",
-            &format!("mkdir -p {dir} && chown {TASK_USER} {dir}"),
+            &format!("mkdir -p \"{dir}\" && chown {TASK_USER} \"{dir}\""),
         ]))
         .with_context(|| {
             format!("failed to create the local storage directory for `{username}`")
@@ -530,7 +530,10 @@ impl TestEnvironment {
                     NODE_CONTAINER,
                     "sh",
                     "-c",
-                    &format!("mkdir -p {dir} && cat > {path} && chown -R {TASK_USER} {dir} {path}"),
+                    &format!(
+                        "mkdir -p {dir} && cat > \"{path}\" && chown -R {TASK_USER} {dir} \
+                         \"{path}\""
+                    ),
                 ])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())

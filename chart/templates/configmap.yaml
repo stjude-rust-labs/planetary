@@ -5,7 +5,30 @@ metadata:
 data:
   # The orchestrator uses this template when creating resources for tasks.
   # See https://keats.github.io/tera for the template syntax.
-  # NOTE: all Tera template expression tags (e.g. `{{` and `}}`) must be escaped for the Helm chart.
+  #
+  # The following task variables are available:
+  #
+  #  * `id` (string) - The TES identifier of the task.
+  #  * `username` (string) - The username of the user creating the task.
+  #  * `cpu` (integer) - The requested number of CPUs for the task.
+  #  * `memory` (string) - The requested amount of memory for the task (in GB).
+  #  * `disk` (string) - The requested amount of disk space for the task (in GB).
+  #  * `inputs` (array of object) - The requested inputs to the task, with fields:
+  #    * `path` (string) - The guest path of the input (i.e. from inside the container).
+  #    * `local_path` (string, optional) - The shared local storage path of the input, for `file://` inputs.
+  #  * `outputs` (array of object) - The requested outputs of the task, with fields:
+  #    * `path` (string) - The guest path of the output (i.e. from inside the container).
+  #    * `local_path` (string, optional) - The shared local storage path of the output, for `file://` inputs.
+  #  * `volumes` (array of string) - The requested volumes for the task.
+  #  * `executors` (array of object) - The requested executors of the task, with fields:
+  #    * `image` (string) - The image to use for the task.
+  #    * `script` (string) - The script to execute for the task.
+  #    * `workdir` (string) - The guest working directory of the task (i.e. from inside the container).
+  #    * `env` (object with string values) - The environment variable map for the task.
+  #
+  # All string variables are automatically encoded as JSON strings.
+  #
+  # All Tera template expression tags (e.g. `{{` and `}}`) must be escaped for the Helm chart.
   task.yaml: |
     # This is the PVC used for the task's `disk` requirement.
     # The task's non-local inputs, non-local outputs, work directory, and
@@ -48,7 +71,7 @@ data:
       # The first init container is responsible for downloading inputs and creating empty outputs to mount
       - name: inputs
         image: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
-        args: ["-v", "--mode", "inputs", "--orchestrator-dir", "/mnt/orchestrator", "--inputs-dir", "/mnt/storage/inputs", "--outputs-dir", "/mnt/storage/outputs", {{ if .Values.local.storage }}"--local-dir", "/mnt/local",{{ end }} {{ `{{ id | json_encode }}` }}]
+        args: ["-v", "--mode", "inputs", "--orchestrator-dir", "/mnt/orchestrator", "--inputs-dir", "/mnt/storage/inputs", "--outputs-dir", "/mnt/storage/outputs", {{ if .Values.local.storage }}"--local-dir", "/mnt/local",{{ end }} {{ `{{ id }}` }}]
         envFrom:
         - secretRef:
             name: azure-storage-credentials
@@ -75,14 +98,14 @@ data:
           recursiveReadOnly: IfPossible
         resources:
           requests:
-            cpu: "{{ .Values.transporter.cpu }}"
+            cpu: {{ .Values.transporter.cpu }}
             memory: "{{ .Values.transporter.memory }}"
       # The remaining init containers are the task's executors
       {% for executor in executors %}
       - name: executor-{{ `{{ loop.index0 }}` }}
         image: {{ `{{ executor.image }}` }}
         command: ["/bin/sh"]
-        args: ["-c", {{ `{{ executor.script | json_encode }}` }}]
+        args: ["-c", {{ `{{ executor.script }}` }}]
         workingDir: {{ `{{ executor.workdir }}` }}
         env:
         {% for key, value in executor.env %}
@@ -91,8 +114,8 @@ data:
         {% endfor %}
         resources:
           requests:
-            cpu: {{ `"{{ cpu }}"` }}
-            memory: {{ `"{{ memory }}"` }}
+            cpu: {{ `{{ cpu }}` }}
+            memory: {{ `{{ memory }}` }}
         volumeMounts:
           - name: storage
             mountPath: /tmp
@@ -125,7 +148,7 @@ data:
       # The primary container of the task pod is responsible for uploading the task's outputs
       - name: outputs
         image: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
-        args: ["-v", "--mode", "outputs", "--orchestrator-dir", "/mnt/orchestrator", "--outputs-dir", "/mnt/outputs", {{ if .Values.local.storage }}"--local-dir", "/mnt/local",{{ end }} {{ `{{ id | json_encode }}` }}]
+        args: ["-v", "--mode", "outputs", "--orchestrator-dir", "/mnt/orchestrator", "--outputs-dir", "/mnt/outputs", {{ if .Values.local.storage }}"--local-dir", "/mnt/local",{{ end }} {{ `{{ id }}` }}]
         envFrom:
         - secretRef:
             name: azure-storage-credentials
@@ -172,7 +195,7 @@ data:
           mountPath: /mnt/orchestrator
         resources:
           requests:
-            cpu: "{{ .Values.transporter.cpu }}"
+            cpu: {{ .Values.transporter.cpu }}
             memory: "{{ .Values.transporter.memory }}"
       volumes:
       - name: storage

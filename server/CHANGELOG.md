@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Security Fix
+
+* Ensure strings are rendered as JSON strings in the `task.yaml` template by
+  default ([GHSA-xpq5-f3m7-cxh3](https://github.com/stjude-rust-labs/planetary/security/advisories/GHSA-xpq5-f3m7-cxh3)).
+
 #### Added
 
 * Added support for rendering templates with local inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
