@@ -2802,6 +2802,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "bon",
+ "k8s-openapi",
  "kube",
  "planetary-db",
  "pretty_assertions",

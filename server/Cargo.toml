@@ -12,13 +12,14 @@ rust-version.workspace = true
 [features]
 default = ["postgres"]
 postgres = ["planetary-db/postgres"]
-templating = ["serde_yaml_ng", "tes", "tera", "kube"]
+templating = ["dep:serde_yaml_ng", "dep:tes", "dep:tera", "dep:kube", "dep:k8s-openapi"]
 
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
 axum-extra.workspace = true
 bon.workspace = true
+k8s-openapi = { workspace = true, optional = true }
 kube = { workspace = true, optional = true }
 planetary-db = { version = "0.1.0", path = "../db" }
 reqwest.workspace = true
