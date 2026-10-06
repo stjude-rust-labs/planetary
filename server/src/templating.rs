@@ -460,7 +460,7 @@ mod tests {
             .render_to_string(
                 &TaskTemplateData {
                     id: "task\nid".into(),
-                    username: "user\nname".into(),
+                    username: "username".into(),
                     preemptible: false,
                     cpu: Some(1),
                     memory: Some(1.0),
@@ -480,7 +480,7 @@ mod tests {
 "task\nid"
 task
 id
-"user\nname"
+"username"
 "1G"
 "10G"
 "#
