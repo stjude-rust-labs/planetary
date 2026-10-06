@@ -1,8 +1,0 @@
-{
-    "rust-analyzer.check.features": [
-        "postgres"
-    ],
-    "cSpell.words": [
-        "Timestamptz"
-    ]
-}

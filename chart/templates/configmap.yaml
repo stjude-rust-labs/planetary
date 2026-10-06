@@ -148,7 +148,7 @@ data:
       # The primary container of the task pod is responsible for uploading the task's outputs
       - name: outputs
         image: "{{ .Values.transporter.image.name }}:{{ .Values.transporter.image.tag | default .Chart.AppVersion }}"
-        args: ["-v", "--mode", "outputs", "--orchestrator-dir", "/mnt/orchestrator", "--outputs-dir", "/mnt/outputs", {{ if .Values.local.storage }}"--local-dir", "/mnt/local",{{ end }} {{ `{{ id }}` }}]
+        args: ["-v", "--mode", "outputs", "--orchestrator-dir", "/mnt/orchestrator", "--inputs-dir", "/mnt/storage/inputs", "--outputs-dir", "/mnt/storage/outputs", {{ if .Values.local.storage }}"--local-dir", "/mnt/local",{{ end }} {{ `{{ id }}` }}]
         envFrom:
         - secretRef:
             name: azure-storage-credentials
@@ -164,15 +164,10 @@ data:
           value: {{ .Values.transporter.log }}
         volumeMounts:
         - name: storage
-          mountPath: /mnt/outputs
-          subPath: outputs
-          readOnly: true
-          recursiveReadOnly: IfPossible
+          mountPath: /mnt/storage
         {{ if .Values.local.storage -}}
         - name: local
           mountPath: /mnt/local
-          readOnly: true
-          recursiveReadOnly: IfPossible
         {{ end -}}
         # Also mount the task's inputs at the same paths the executors used.
         # A task's work directory may still contain symlinks pointing at

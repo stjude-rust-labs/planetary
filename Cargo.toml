@@ -8,7 +8,7 @@ edition = "2024"
 authors = ["St. Jude Rust Labs"]
 homepage = "https://github.com/stjude-rust-labs/planetary"
 repository = "https://github.com/stjude-rust-labs/planetary"
-rust-version = "1.91.1"
+rust-version = "1.98.0"
 
 [workspace.dependencies]
 anyhow = "1.0.99"
@@ -37,6 +37,8 @@ http = "1.4.0"
 k8s-openapi = { version = "0.28.0", features = ["v1_32"] }
 kube = { version = "4.2.0", features = ["runtime", "aws-lc-rs"] }
 opool = "0.2.0"
+path-clean = "1.0.1"
+pathdiff = "0.2.3"
 pin-project-lite = "0.2.16"
 pretty_assertions = "1.4.1"
 rand = "0.10.0"

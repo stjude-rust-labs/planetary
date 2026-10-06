@@ -91,6 +91,7 @@ fn validate_task(task: &RequestTask, allow_file_urls: bool) -> Result<()> {
 
         match (&input.url, &input.content) {
             (None, None) => bail!("input URL is required"),
+            (None, Some(content)) if content.is_empty() => bail!("input URL is required"),
             (Some(url), None) => {
                 // Check for supported URL schemes
                 ensure_supported_url(url, "input", allow_file_urls)?;

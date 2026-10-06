@@ -925,3 +925,420 @@ fn task_newlines() {
         CONTENT
     );
 }
+
+/// Tests that an output symlink to an input file works.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn output_symlink_to_input_file() {
+    /// The content of the local input file.
+    const CONTENT: &str = "hello from local storage\n";
+
+    let env = TestEnvironment::get();
+    let username = unique_username("input-file-symlink");
+    let client = env.client(Some(&username));
+
+    env.write_local_file(&username, "inputs/greeting.txt", CONTENT);
+
+    let id = client.create_task(&json!({
+        "inputs": [
+            {
+                "url": "file:///inputs/greeting.txt",
+                "path": "/inputs/input.txt",
+                "type": "FILE",
+            }
+        ],
+        "outputs": [
+            {
+                "url": "file:///outputs",
+                "path": "/workdir",
+                "type": "DIRECTORY",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "workdir": "/workdir",
+                "command": ["sh", "-c", "ln -s /inputs/input.txt output.txt"],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    assert_eq!(
+        env.read_local_file(&username, "outputs/output.txt"),
+        CONTENT
+    );
+
+    // The file should still be a link, but relative
+    assert_eq!(
+        env.read_link(&username, "outputs/output.txt").unwrap(),
+        "../inputs/greeting.txt\n"
+    );
+}
+
+/// Tests that an output symlink to an input directory works.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn output_symlink_to_input_directory() {
+    /// The content of the local input file.
+    const CONTENT: &str = "hello from local storage\n";
+
+    let env = TestEnvironment::get();
+    let username = unique_username("input-dir-symlink");
+    let client = env.client(Some(&username));
+
+    env.write_local_file(&username, "inputs/greeting.txt", CONTENT);
+
+    let id = client.create_task(&json!({
+        "inputs": [
+            {
+                "url": "file:///inputs",
+                "path": "/inputs",
+                "type": "DIRECTORY",
+            }
+        ],
+        "outputs": [
+            {
+                "url": "file:///outputs",
+                "path": "/workdir",
+                "type": "DIRECTORY",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "workdir": "/workdir",
+                "command": ["sh", "-c", "ln -s /inputs/greeting.txt output.txt"],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    assert_eq!(
+        env.read_local_file(&username, "outputs/output.txt"),
+        CONTENT
+    );
+
+    // The file should still be a link, but relative
+    assert_eq!(
+        env.read_link(&username, "outputs/output.txt").unwrap(),
+        "../inputs/greeting.txt\n"
+    );
+}
+
+/// Tests that an output symlink to an content-specified input file works.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn output_symlink_to_content_input_file() {
+    /// The content of the input file.
+    const CONTENT: &str = "hello world!\n";
+
+    let env = TestEnvironment::get();
+    let username = unique_username("input-content-file-symlink");
+    let client = env.client(Some(&username));
+
+    let id = client.create_task(&json!({
+        "inputs": [
+            {
+                "url": "file:///inputs/greeting.txt",
+                "path": "/inputs/input.txt",
+                "type": "FILE",
+                "content": CONTENT,
+            }
+        ],
+        "outputs": [
+            {
+                "url": "file:///outputs",
+                "path": "/workdir",
+                "type": "DIRECTORY",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "workdir": "/workdir",
+                "command": ["sh", "-c", "ln -s /inputs/input.txt output.txt"],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    assert_eq!(
+        env.read_local_file(&username, "outputs/output.txt"),
+        CONTENT
+    );
+
+    // The file should not be a link because the `url` would have been ignored
+    assert!(env.read_link(&username, "outputs/output.txt").is_err());
+}
+
+/// Tests that an output symlink to a remote input file works.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn output_symlink_to_remote_input_file() {
+    let env = TestEnvironment::get();
+    let username = unique_username("remote-input-symlink");
+    let client = env.client(Some(&username));
+
+    let id = client.create_task(&json!({
+        "inputs": [
+            {
+                "url": "https://httpbin.org/status/200",
+                "path": "/inputs/input.txt",
+                "type": "FILE"
+            }
+        ],
+        "outputs": [
+            {
+                "url": "file:///outputs",
+                "path": "/workdir",
+                "type": "DIRECTORY",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "workdir": "/workdir",
+                "command": ["sh", "-c", "ln -s /inputs/input.txt output.txt"],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    // The response from `httpbin.org` should be empty
+    assert_eq!(env.read_local_file(&username, "outputs/output.txt"), "");
+
+    // The file should not be a link
+    assert!(env.read_link(&username, "outputs/output.txt").is_err());
+}
+
+/// Tests that relative symlink outputs work.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn relative_output_symlink() {
+    let env = TestEnvironment::get();
+    let username = unique_username("relative-output-symlink");
+    let client = env.client(Some(&username));
+
+    let id = client.create_task(&json!({
+        "outputs": [
+            {
+                "url": "file:///outputs",
+                "path": "/workdir",
+                "type": "DIRECTORY",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "workdir": "/workdir",
+                "command": ["sh", "-c", "echo 'hello' > first.txt && ln -s first.txt second.txt"],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    assert_eq!(
+        env.read_local_file(&username, "outputs/first.txt"),
+        "hello\n"
+    );
+
+    assert_eq!(
+        env.read_local_file(&username, "outputs/second.txt"),
+        "hello\n"
+    );
+
+    // The file should still be a link
+    assert_eq!(
+        env.read_link(&username, "outputs/second.txt").unwrap(),
+        "first.txt\n"
+    )
+}
+
+/// Tests that a symlink not to an input errors.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn output_symlink_errors() {
+    let env = TestEnvironment::get();
+    let username = unique_username("output-symlink-error");
+    let client = env.client(Some(&username));
+
+    let id = client.create_task(&json!({
+        "outputs": [
+            {
+                "url": "file:///outputs",
+                "path": "/workdir",
+                "type": "DIRECTORY",
+            }
+        ],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "workdir": "/workdir",
+                "command": ["sh", "-c", "ln -s z link.txt  && ln -s /proc/self/environ z"],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "SYSTEM_ERROR");
+
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let last_log = body["logs"].as_array().unwrap()[0]["system_logs"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        last_log.contains(
+            "error: output `/workdir/z` is a symbolic link to guest path `/proc/self/environ` \
+             that is outside of output directory `/workdir`"
+        ),
+        "unexpected last log message\n{last_log}"
+    );
+}
+
+/// Ensures that a symlink with `..` doesn't escape the output directory.
+#[test]
+#[ignore = "requires docker, kind, kubectl, and helm"]
+fn output_symlink_parent_escape_fails() {
+    let env = TestEnvironment::get();
+    let username = unique_username("output-symlink-parent-escape");
+    let client = env.client(Some(&username));
+    let id = client.create_task(&json!({
+        "outputs": [{
+            "url": "file:///outputs/victim",
+            "path": "/workdir",
+            "type": "DIRECTORY"
+        }],
+        "executors": [{
+            "image": EXECUTOR_IMAGE,
+            "workdir": "/workdir",
+            "command": [
+                "sh",
+                "-c",
+                "ln -s /workdir/../../../../proc/self/environ escaped.txt"
+            ]
+        }]
+    }));
+
+    client.wait_for_task_state(&id, "SYSTEM_ERROR");
+
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let last_log = body["logs"].as_array().unwrap()[0]["system_logs"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        last_log.contains(
+            "output `/workdir/escaped.txt` is a symbolic link to guest path `/proc/self/environ` \
+             that is outside of output directory `/workdir`"
+        ),
+        "unexpected last log message:\n{last_log}"
+    );
+}
+
+/// Ensures that an input that is a symlink is an error.
+#[test]
+#[ignore = "requires docker, kind, kubectl, and helm"]
+fn input_file_symlink_is_error() {
+    let env = TestEnvironment::get();
+    let username = unique_username("input-file-symlink-is-error");
+    let client = env.client(Some(&username));
+
+    env.write_local_file(&username, "original", "");
+    env.write_link(&username, "original", "link").unwrap();
+
+    let id = client.create_task(&json!({
+        "inputs": [{
+            "url": "file:///link",
+            "path": "/workdir/link",
+            "type": "FILE"
+        }],
+        "executors": [{
+            "image": EXECUTOR_IMAGE,
+            "workdir": "/workdir",
+            "command": [
+                "sh",
+                "-c",
+                "ls -l"
+            ]
+        }]
+    }));
+
+    client.wait_for_task_state(&id, "SYSTEM_ERROR");
+
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let last_log = body["logs"].as_array().unwrap()[0]["system_logs"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        last_log.contains("input `file:///link` cannot be a symbolic link"),
+        "unexpected last log message:\n{last_log}"
+    );
+}
+
+/// Ensures that an input that is a directory containing a symlink is an error.
+#[test]
+#[ignore = "requires docker, kind, kubectl, and helm"]
+fn input_directory_contains_symlink_is_error() {
+    let env = TestEnvironment::get();
+    let username = unique_username("input-directory-contains-symlink-is-error");
+    let client = env.client(Some(&username));
+
+    env.write_link(&username, "dir/does-not-exist", "dir/link")
+        .unwrap();
+
+    let id = client.create_task(&json!({
+        "inputs": [{
+            "url": "file:///dir",
+            "path": "/workdir",
+            "type": "DIRECTORY"
+        }],
+        "executors": [{
+            "image": EXECUTOR_IMAGE,
+            "workdir": "/workdir",
+            "command": [
+                "sh",
+                "-c",
+                "echo done"
+            ]
+        }]
+    }));
+
+    client.wait_for_task_state(&id, "SYSTEM_ERROR");
+
+    let (status, body) = client.get_task(&id, "FULL");
+    assert_eq!(status, 200, "unexpected response: {body:#}");
+
+    let last_log = body["logs"].as_array().unwrap()[0]["system_logs"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .as_str()
+        .unwrap();
+    assert!(
+        last_log.contains("input `file:///dir` cannot contain a symbolic link"),
+        "unexpected last log message:\n{last_log}"
+    );
+}

@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Security Fix
+
+* Ensure output symlinks cannot escape the output directory ([GHSA-r3cq-9r6g-c766](https://github.com/stjude-rust-labs/planetary/security/advisories/GHSA-r3cq-9r6g-c766)).
+
 #### Fixed
 
+* Set pipefail for certain Docker build commands ([GHSA-r3cq-9r6g-c766](https://github.com/stjude-rust-labs/planetary/security/advisories/GHSA-r3cq-9r6g-c766)).
 * Fixed handling of `FILE` type outputs with path prefixes ([#46](https://github.com/stjude-rust-labs/planetary/pull/46)).
 
 #### Added
+
+* Added support for output directories containing symlinks ([GHSA-r3cq-9r6g-c766](https://github.com/stjude-rust-labs/planetary/security/advisories/GHSA-r3cq-9r6g-c766)).
 
 * Added support for local (file://) inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).
 * Added `--azure-account-name` and `--azure-access-key` options for Azure

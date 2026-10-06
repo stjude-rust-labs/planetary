@@ -39,17 +39,23 @@
 //! recursively search for files for recording outputs of the TES task. Local
 //! output files aren't copied.
 
+use std::borrow::Cow;
 use std::fs;
+use std::fs::Metadata;
 use std::fs::Permissions;
+use std::fs::canonicalize;
+use std::fs::read_link;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::IsTerminal;
 use std::io::stderr;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::symlink;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -76,6 +82,8 @@ use futures::StreamExt;
 use futures::stream;
 use glob::MatchOptions;
 use glob::Pattern;
+use path_clean::PathClean;
+use pathdiff::diff_paths;
 use reqwest::Url;
 use secrecy::SecretString;
 use serde::Serialize;
@@ -92,6 +100,7 @@ use tokio::fs::set_permissions;
 use tokio::pin;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+use tracing::debug;
 use tracing::info;
 use tracing_indicatif::IndicatifLayer;
 use tracing_subscriber::EnvFilter;
@@ -171,8 +180,8 @@ struct Args {
     orchestrator_dir: PathBuf,
 
     /// The path to the task's inputs directory.
-    #[arg(long, required_if_eq("mode", "inputs"))]
-    inputs_dir: Option<PathBuf>,
+    #[arg(long)]
+    inputs_dir: PathBuf,
 
     /// The path to the task's outputs directory.
     #[arg(long)]
@@ -252,19 +261,23 @@ struct Args {
     tes_id: String,
 }
 
-/// Gets the inputs file path for a TES task.
-fn inputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
-    orchestrator_dir.join(tes_id).join("inputs.json")
-}
+impl Args {
+    /// Gets the inputs file path for a TES task.
+    fn inputs_file_path(&self) -> PathBuf {
+        self.orchestrator_dir.join(&self.tes_id).join("inputs.json")
+    }
 
-/// Gets the outputs file path for a TES task.
-fn outputs_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
-    orchestrator_dir.join(tes_id).join("outputs.json")
-}
+    /// Gets the outputs file path for a TES task.
+    fn outputs_file_path(&self) -> PathBuf {
+        self.orchestrator_dir
+            .join(&self.tes_id)
+            .join("outputs.json")
+    }
 
-/// Gets the final outputs file path for a TES task.
-fn output_files_file_path(orchestrator_dir: &Path, tes_id: &str) -> PathBuf {
-    orchestrator_dir.join(tes_id).join("final.json")
+    /// Gets the final outputs file path for a TES task.
+    fn output_files_file_path(&self) -> PathBuf {
+        self.orchestrator_dir.join(&self.tes_id).join("final.json")
+    }
 }
 
 /// Helper function for serializing an array of serializable items to a file.
@@ -337,7 +350,9 @@ impl TransferContext {
 /// For local inputs, this will ensure that the specified path exists and is the
 /// expected type.
 async fn prepare_input(context: TransferContext, input: &Input, path: &Path) -> Result<()> {
-    let permissions = if let Some(contents) = &input.content {
+    let permissions = if let Some(content) = &input.content
+        && !content.is_empty()
+    {
         // Write the contents if directly given, but only if the input is a file
         match input.ty {
             IoType::File => {}
@@ -352,7 +367,16 @@ async fn prepare_input(context: TransferContext, input: &Input, path: &Path) -> 
             path = input.path,
         );
 
-        tokio::fs::write(&path, contents)
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.with_context(|| {
+                format!(
+                    "failed to create parent directory of input file `{path}`",
+                    path = input.path
+                )
+            })?;
+        }
+
+        tokio::fs::write(&path, content)
             .await
             .with_context(|| format!("failed to create input file `{path}`", path = input.path))?;
 
@@ -366,26 +390,62 @@ async fn prepare_input(context: TransferContext, input: &Input, path: &Path) -> 
             .context("input URL is invalid")?;
 
         // For `file://` URLs, just ensure the path exists and is the expected type
+        // Local inputs cannot contain symbolic links
         if url.scheme() == "file" {
             // Ensure the path exists
             if !path.exists() {
-                bail!("file input `{url}` does not exist");
+                bail!("input `{url}` does not exist", url = url.display());
+            }
+
+            let metadata = path.symlink_metadata().with_context(|| {
+                format!(
+                    "failed to read metadata of input `{url}`",
+                    url = url.display()
+                )
+            })?;
+
+            if metadata.is_symlink() {
+                bail!(
+                    "input `{url}` cannot be a symbolic link",
+                    url = url.display()
+                );
             }
 
             // Check that the result matches the input type
             match input.ty {
                 IoType::Directory => {
-                    if path.is_file() {
+                    if metadata.is_file() {
                         bail!(
-                            "input `{url}` was a file but the input type was `DIRECTORY`",
+                            "input `{url}` is a file but the input type was `DIRECTORY`",
                             url = url.display()
                         );
                     }
+
+                    // Walk files looking for symbolic links
+                    for entry in WalkDir::new(path) {
+                        let entry = entry.with_context(|| {
+                            format!("failed to read input `{url}`", url = url.display())
+                        })?;
+
+                        let metadata = entry.metadata().with_context(|| {
+                            format!(
+                                "failed to read metadata for input `{url}`",
+                                url = url.display()
+                            )
+                        })?;
+
+                        if metadata.is_symlink() {
+                            bail!(
+                                "input `{url}` cannot contain a symbolic link",
+                                url = url.display()
+                            );
+                        }
+                    }
                 }
                 IoType::File => {
-                    if !path.is_file() {
+                    if !metadata.is_file() {
                         bail!(
-                            "input `{url}` was a directory but the input type was `FILE`",
+                            "input `{url}` is a directory but the input type was `FILE`",
                             url = url.display()
                         );
                     }
@@ -460,28 +520,24 @@ async fn prepare_input(context: TransferContext, input: &Input, path: &Path) -> 
 /// if the file doesn't exist.
 async fn prepare_inputs(
     context: TransferContext,
-    tes_id: &str,
-    orchestrator_dir: &Path,
-    inputs_dir: &Path,
-    outputs_dir: &Path,
-    local_dir: Option<&Path>,
+    args: &Arc<Args>,
 ) -> Result<(TimeDelta, Option<TransferStats>)> {
-    let inputs: Vec<Input> = deserialize_items(inputs_file_path(orchestrator_dir, tes_id))?;
-    let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
+    let inputs: Vec<Input> = deserialize_items(args.inputs_file_path())?;
+    let outputs: Vec<Output> = deserialize_items(args.outputs_file_path())?;
 
     // Create the inputs directory
-    create_dir_all(inputs_dir).await.with_context(|| {
+    create_dir_all(&args.inputs_dir).await.with_context(|| {
         format!(
             "failed to create inputs directory `{path}`",
-            path = inputs_dir.display()
+            path = args.inputs_dir.display()
         )
     })?;
 
     // Create the outputs directory
-    create_dir_all(outputs_dir).await.with_context(|| {
+    create_dir_all(&args.outputs_dir).await.with_context(|| {
         format!(
             "failed to create outputs directory `{path}`",
-            path = outputs_dir.display()
+            path = args.outputs_dir.display()
         )
     })?;
 
@@ -495,20 +551,20 @@ async fn prepare_inputs(
     let prepare = async move || {
         let mut tasks = stream::iter(inputs.into_iter().enumerate())
             .map(|(index, input)| {
-                let inputs_dir = inputs_dir.to_path_buf();
-                let local_dir = local_dir.map(Path::to_path_buf);
+                let args = args.clone();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    let path = if let Some(url) = input.url.as_deref()
+                    let path = if input.content.as_deref().unwrap_or("").is_empty()
+                        && let Some(url) = input.url.as_deref()
                         && let Some(path) = url_to_file_path(url)
                     {
-                        match local_dir {
+                        match &args.local_dir {
                             Some(local_dir) => local_dir
                                 .join(path.strip_prefix("/").expect("path should be absolute")),
-                            None => bail!("input file URL `{url}` is not supported"),
+                            None => bail!("file URLs are not supported"),
                         }
                     } else {
-                        inputs_dir.join(index.to_string())
+                        args.inputs_dir.join(index.to_string())
                     };
 
                     prepare_input(ctx, &input, &path).await
@@ -540,23 +596,22 @@ async fn prepare_inputs(
     // We also need to create any file outputs so that Kubernetes will mount
     // them as files and not directories
     for (index, output) in outputs.into_iter().enumerate() {
+        let output_path = output.path_prefix.as_deref().unwrap_or(&output.path);
+
         // For local `file://` output URLs, create the file or directory at the
         // expected output location; executor containers will mount it directly.
         if let Some(path) = url_to_file_path(&output.url) {
-            let path = match local_dir {
+            let path = match &args.local_dir {
                 Some(local_dir) => {
                     local_dir.join(path.strip_prefix("/").expect("path should be absolute"))
                 }
-                None => bail!("output file URL `{url}` is not supported", url = output.url),
+                None => bail!("file URLs are not supported for output `{output_path}`"),
             };
 
             // Create the parent directory for the output
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create parent directory of output `{url}`",
-                        url = output.url
-                    )
+                    format!("failed to create parent directory of output `{output_path}`")
                 })?;
             }
 
@@ -565,34 +620,34 @@ async fn prepare_inputs(
             // that we're filtering
             if output.ty == IoType::File && output.path_prefix.is_none() {
                 // Create the file
-                File::create(&path).await.with_context(|| {
-                    format!("failed to create output `{url}`", url = output.url)
-                })?;
+                File::create(&path)
+                    .await
+                    .with_context(|| format!("failed to create output `{output_path}`"))?;
             } else {
                 // Create the directory
-                create_dir_all(&path).await.with_context(|| {
-                    format!("failed to create output `{url}`", url = output.url)
-                })?;
+                create_dir_all(&path)
+                    .await
+                    .with_context(|| format!("failed to create output `{output_path}`"))?;
             }
 
             continue;
         }
 
-        let path = outputs_dir.join(index.to_string());
+        let path = args.outputs_dir.join(index.to_string());
         // If the output is a file *without* a path prefix, create it as a file
         // If it has a path prefix, it's really a directory that we're filtering
         let permissions = if output.ty == IoType::File && output.path_prefix.is_none() {
             // Create the file
             File::create(&path)
                 .await
-                .with_context(|| format!("failed to create output `{path}`", path = output.path))?;
+                .with_context(|| format!("failed to create output `{output_path}`"))?;
 
             0o666
         } else {
             // Create the directory
             create_dir_all(&path)
                 .await
-                .with_context(|| format!("failed to create output `{path}`", path = output.path))?;
+                .with_context(|| format!("failed to create output `{output_path}`"))?;
 
             0o777
         };
@@ -601,12 +656,7 @@ async fn prepare_inputs(
         // container runs as will be able to write to the output.
         set_permissions(&path, Permissions::from_mode(permissions))
             .await
-            .with_context(|| {
-                format!(
-                    "failed to set permissions for output `{path}`",
-                    path = output.path
-                )
-            })?;
+            .with_context(|| format!("failed to set permissions for output `{output_path}`"))?;
     }
 
     Ok((end - start, stats))
@@ -618,32 +668,57 @@ async fn prepare_inputs(
 ///
 /// For local outputs, the output is not uploaded.
 ///
-/// If the output is a directory it is recursively scanned for files.
+/// If the output is a directory, it is recursively scanned for files.
 ///
 /// Returns the set of discovered output files that will be used for associating
 /// a TES task with its actual output files.
 async fn prepare_output(
     context: TransferContext,
-    output: &Output,
-    path: &Path,
+    args: &Args,
+    outputs: &[Output],
+    inputs: &[Input],
+    index: usize,
+    output_host_path: &Path,
 ) -> Result<Vec<OutputFile>> {
-    let mut url = output.url.parse::<Url>().context("output URL is invalid")?;
+    let output = &outputs[index];
 
-    let metadata = path.metadata().with_context(|| {
+    let output_guest_path = Path::new(output.path_prefix.as_deref().unwrap_or(&output.path));
+
+    let metadata = fs::symlink_metadata(output_host_path).with_context(|| {
         format!(
-            "failed to read metadata of output `{path}`",
-            path = output.path
+            "failed to read metadata of output `{output_guest_path}`",
+            output_guest_path = output_guest_path.display()
         )
     })?;
 
+    // The output path itself cannot be a symlink
+    if metadata.is_symlink() {
+        bail!(
+            "output `{output_guest_path}` cannot be a symbolic link",
+            output_guest_path = output_guest_path.display()
+        );
+    }
+
+    let mut url = output.url.parse::<Url>().context("output URL is invalid")?;
+
+    // Check for the output being a directory
     if metadata.is_dir() {
-        return prepare_directory_output(context, output, &url, path).await;
+        return prepare_directory_output(
+            context,
+            args,
+            output,
+            inputs,
+            &url,
+            output_guest_path,
+            output_host_path,
+        )
+        .await;
     }
 
     if output.ty != IoType::File {
         bail!(
-            "output `{path}` exists but the output is not a file",
-            path = output.path
+            "output `{output_guest_path}` exists but the output is not a file",
+            output_guest_path = output_guest_path.display(),
         );
     }
 
@@ -658,16 +733,16 @@ async fn prepare_output(
         cloud_copy::copy(
             context.config,
             context.client,
-            path,
-            url.clone(),
+            output_host_path,
+            &url,
             context.cancel,
             Some(context.events),
         )
         .await
         .with_context(|| {
             format!(
-                "failed to upload output `{path}` to `{url}`",
-                path = output.path,
+                "failed to upload output `{output_guest_path}` to `{url}`",
+                output_guest_path = output_guest_path.display(),
                 url = url.display(),
             )
         })?;
@@ -684,6 +759,270 @@ async fn prepare_output(
     }])
 }
 
+/// Updates a symbolic link that uses a guest path to one that uses a
+/// corresponding host path.
+///
+/// The symbolic link's guest path must be contained to the directory guest path
+/// or target a known input guest path, otherwise an error is returned.
+///
+/// The symbolic link is replaced with a copy of the targeted file is made if
+/// the output is local (i.e. `file://`) and the input is not local.
+fn update_link(
+    args: &Args,
+    inputs: &[Input],
+    link_guest_path: &Path,
+    link_host_path: &Path,
+    directory_guest_path: &Path,
+    directory_host_path: &Path,
+) -> Result<()> {
+    assert!(link_guest_path.is_absolute());
+    assert!(link_host_path.is_absolute());
+    assert!(directory_guest_path.is_absolute());
+    assert!(directory_host_path.is_absolute());
+
+    // Read the target guest path
+    let target_guest_path = read_link(link_host_path).with_context(|| {
+        format!(
+            "failed to read link for output `{link_guest_path}`",
+            link_guest_path = link_guest_path.display()
+        )
+    })?;
+
+    // Join it with the directory guest path, relative to the link's host
+    // subpath.
+    // SAFETY: the link host path is always prefixed by the directory host path
+    let target_guest_path = if let Some(parent) = link_host_path
+        .strip_prefix(directory_host_path)
+        .unwrap()
+        .parent()
+    {
+        directory_guest_path
+            .join(parent)
+            .join(target_guest_path)
+            .clean()
+    } else {
+        directory_guest_path.join(target_guest_path).clean()
+    };
+
+    debug!(
+        "output `{link_guest_path}` is a symbolic link to `{target_guest_path}`",
+        link_guest_path = link_guest_path.display(),
+        target_guest_path = target_guest_path.display(),
+    );
+
+    // Convert the target guest path to a target host path
+    // This also determines if we need to replace the link with a copy if it
+    // links to a remote input but the output is local.
+    let (replace_with_copy, target_host_path): (_, Cow<'_, Path>) = if let Ok(stripped) =
+        target_guest_path.strip_prefix(directory_guest_path)
+    {
+        // The target is within the output's directory
+        (
+            false,
+            if !stripped.is_empty() {
+                directory_host_path.join(stripped).into()
+            } else {
+                directory_host_path.into()
+            },
+        )
+    } else {
+        // The target is outside of the output directory, therefore it must
+        // point at an input
+        let (input_index, input) = inputs
+            .iter()
+            .enumerate()
+            .find(|(_, input)| target_guest_path.starts_with(&input.path))
+            .with_context(|| {
+                format!(
+                    "output `{link_guest_path}` is a symbolic link to guest path \
+                     `{target_guest_path}` that is outside of output directory \
+                     `{output_guest_path}`",
+                    link_guest_path = link_guest_path.display(),
+                    target_guest_path = target_guest_path.display(),
+                    output_guest_path = directory_guest_path.display()
+                )
+            })?;
+
+        // Get the base path for the input
+        let (replace_with_copy, base_path) = if input.content.as_deref().unwrap_or("").is_empty()
+            && let Some(input_url) = input.url.as_deref()
+            && let Some(input_path) = url_to_file_path(input_url)
+        {
+            // A local input never needs to be replaced with a copy
+            match &args.local_dir {
+                Some(local_dir) => (
+                    false,
+                    local_dir.join(
+                        input_path
+                            .strip_prefix("/")
+                            .expect("path should be absolute"),
+                    ),
+                ),
+                None => bail!("input file URL `{input_url}` is not supported"),
+            }
+        } else {
+            // If the output directory is "local" then the link needs to be
+            // replaced with a copy of the target
+            let replace_with_copy = if let Some(local_dir) = &args.local_dir {
+                directory_host_path.starts_with(local_dir)
+            } else {
+                false
+            };
+
+            (
+                replace_with_copy,
+                args.inputs_dir.join(input_index.to_string()),
+            )
+        };
+
+        // Join with the stripped target path
+        let resolved = if let Ok(stripped) = target_guest_path.strip_prefix(&input.path)
+            && !stripped.is_empty()
+        {
+            base_path.join(stripped)
+        } else {
+            base_path
+        };
+
+        (replace_with_copy, resolved.into())
+    };
+
+    // The target host path should be absolute
+    assert!(target_host_path.is_absolute());
+
+    // SAFETY: the link's host path always has a parent as it is a subpath of
+    // the output directory
+    let link_parent_host_path = link_host_path.parent().unwrap();
+
+    if replace_with_copy {
+        debug!(
+            "output `{link_guest_path}` is a symbolic link to guest path `{target_guest_path}` \
+             and will be replaced with a copy of `{target_host_path}`",
+            link_guest_path = link_guest_path.display(),
+            target_guest_path = target_guest_path.display(),
+            target_host_path = target_host_path.display()
+        );
+
+        // Create a temp file path for atomically replacing the file
+        let mut temp = tempfile::NamedTempFile::new_in(link_parent_host_path)
+            .context("failed to create temporary file for updating symbolic link")?;
+
+        // Open the target file
+        let mut target = fs::File::open(target_host_path).with_context(|| {
+            format!(
+                "failed to open `{target_guest_path}`",
+                target_guest_path = target_guest_path.display()
+            )
+        })?;
+
+        // Copy the target to the temp file
+        std::io::copy(&mut target, &mut temp.as_file_mut()).with_context(|| {
+            format!(
+                "failed to copy contents of `{target_guest_path}` to `{link_guest_path}`",
+                target_guest_path = target_guest_path.display(),
+                link_guest_path = link_guest_path.display()
+            )
+        })?;
+
+        // Atomically persist the temp file at the link's host path
+        temp.persist(link_host_path).with_context(|| {
+            format!(
+                "failed to persist update to symbolic link `{link_guest_path}`",
+                link_guest_path = link_guest_path.display()
+            )
+        })?;
+    } else {
+        // Try to make the target host path relative to the link parent's host
+        // path
+        let target_host_path = diff_paths(&target_host_path, link_parent_host_path)
+            .map(Cow::Owned)
+            .unwrap_or(target_host_path);
+
+        debug!(
+            "output `{link_guest_path}` is a symbolic link to guest path `{target_guest_path}` \
+             and will be replaced with a symbolic link to `{target_host_path}`",
+            link_guest_path = link_guest_path.display(),
+            target_guest_path = target_guest_path.display(),
+            target_host_path = target_host_path.display(),
+        );
+
+        // Remove the link
+        fs::remove_file(link_host_path).with_context(|| {
+            format!(
+                "failed to remove output `{link_guest_path}`",
+                link_guest_path = link_guest_path.display()
+            )
+        })?;
+
+        // Create the link with the target host path
+        symlink(target_host_path, link_host_path).with_context(|| {
+            format!(
+                "failed to create symbolic link `{link_guest_path}` to `{target_guest_path}`",
+                link_guest_path = link_guest_path.display(),
+                target_guest_path = target_guest_path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Walks the files of the given host directory.
+///
+/// Invokes the callback for any file recursively contained in the directory,
+/// providing the file's metadata, guest path, and host path.
+///
+/// If the callback returns `Some`, its return value is pushed onto the return
+/// value list.
+///
+/// Returns a list of all `Some` return values from the given callback.
+async fn walk_files<'a, F, Fut, R>(
+    directory_guest_path: &'a Path,
+    directory_host_path: &'a Path,
+    cb: F,
+) -> Result<Vec<R>>
+where
+    F: Fn(Metadata, PathBuf, PathBuf) -> Fut,
+    Fut: Future<Output = Result<Option<R>>> + Send + 'a,
+{
+    let mut list = Vec::new();
+    for entry in WalkDir::new(directory_host_path).sort_by_file_name() {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read directory `{directory_guest_path}`",
+                directory_guest_path = directory_guest_path.display()
+            )
+        })?;
+
+        // Determine the guest path for the entry
+        let relative_path = entry
+            .path()
+            .strip_prefix(directory_host_path)
+            .expect("should be relative");
+        let guest_path = directory_guest_path.join(relative_path);
+
+        let metadata = entry.metadata().with_context(|| {
+            format!(
+                "failed to read metadata for output `{guest_path}`",
+                guest_path = guest_path.display()
+            )
+        })?;
+
+        // Ignore directories
+        if metadata.is_dir() {
+            continue;
+        }
+
+        // Invoke the callback providing whether or not its a symlink, the guest
+        // path, and the host path
+        if let Some(r) = cb(metadata, guest_path, entry.into_path()).await? {
+            list.push(r);
+        }
+    }
+
+    Ok(list)
+}
+
 /// Prepares a directory output.
 ///
 /// This will recursively search the directory for files.
@@ -694,9 +1033,12 @@ async fn prepare_output(
 /// Returns the output files discovered during the walk of the directory.
 async fn prepare_directory_output(
     context: TransferContext,
+    args: &Args,
     output: &Output,
+    inputs: &[Input],
     url: &Url,
-    directory: &Path,
+    directory_guest_path: &Path,
+    directory_host_path: &Path,
 ) -> Result<Vec<OutputFile>> {
     if output.ty != IoType::Directory && output.path_prefix.is_none() {
         bail!(
@@ -704,7 +1046,7 @@ async fn prepare_directory_output(
             path = output.path
         );
     }
-    let container_base_path = Path::new(output.path_prefix.as_deref().unwrap_or(&output.path));
+
     let pattern =
         if output.path_prefix.is_some() {
             Some(Pattern::new(&output.path).with_context(|| {
@@ -714,98 +1056,127 @@ async fn prepare_directory_output(
             None
         };
 
-    let mut files = Vec::new();
-    for entry in WalkDir::new(directory).sort_by_file_name() {
-        let entry = entry
-            .with_context(|| format!("failed to read directory `{path}`", path = output.path))?;
-
-        let relative_path = entry
-            .path()
-            .strip_prefix(directory)
-            .expect("should be relative");
-        let container_path = container_base_path.join(relative_path);
-        let container_path = container_path.to_str().with_context(|| {
-            format!(
-                "output `{path}` is not UTF-8",
-                path = container_path.display()
-            )
-        })?;
-        let metadata = entry
-            .metadata()
-            .with_context(|| format!("failed to read metadata for output `{container_path}`"))?;
-
-        // Only upload files
-        if metadata.is_dir() {
-            continue;
-        }
-
-        // If there's a pattern, ensure the container path matches it
-        if let Some(pattern) = &pattern
-            && !pattern.matches_with(
-                container_path,
-                MatchOptions {
-                    require_literal_separator: true,
-                    ..Default::default()
-                },
-            )
-        {
-            info!("skipping output file `{container_path}` as it does not match the pattern");
-            continue;
-        }
-
-        let mut url = url.clone();
-        {
-            // Append the relative path to the URL
-            let mut segments = url.path_segments_mut().unwrap();
-            for component in relative_path.components() {
-                match component {
-                    Component::Normal(segment) => {
-                        segments.push(segment.to_str().unwrap());
-                    }
-                    _ => bail!(
-                        "invalid relative path `{path}`",
-                        path = relative_path.display()
-                    ),
-                }
+    // Start by replacing all symbolic links with their targets
+    // This will also validate that the symlinks are relative to the directory
+    // output or point to an input
+    walk_files(
+        directory_guest_path,
+        directory_host_path,
+        |metadata, link_guest_path, link_host_path| async move {
+            if metadata.is_symlink() {
+                update_link(
+                    args,
+                    inputs,
+                    &link_guest_path,
+                    &link_host_path,
+                    directory_guest_path,
+                    directory_host_path,
+                )?;
             }
-        }
 
-        // Perform the copy if it isn't a `file://` output
-        if url.scheme() != "file" {
-            info!(
-                "uploading output file `{container_path}` to `{url}`",
-                url = url.display()
-            );
+            Ok(None::<()>)
+        },
+    )
+    .await?;
 
-            cloud_copy::copy(
-                context.config.clone(),
-                context.client.clone(),
-                entry.path(),
-                url.clone(),
-                context.cancel.clone(),
-                Some(context.events.clone()),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to upload output `{container_path}` to `{url}`",
-                    url = url.display(),
-                )
-            })?;
-        }
+    let pattern = &pattern;
+    walk_files(
+        directory_guest_path,
+        directory_host_path,
+        |metadata, file_guest_path, file_host_path| {
+            let context = context.clone();
 
-        // Clear the query and fragment before saving the output
-        url.set_query(None);
-        url.set_fragment(None);
+            async move {
+                let file_guest_path_str = file_guest_path.to_str().with_context(|| {
+                    format!(
+                        "output file `{file_guest_path}` is not UTF-8",
+                        file_guest_path = file_guest_path.display()
+                    )
+                })?;
 
-        files.push(OutputFile {
-            url: url.into(),
-            path: container_path.to_string(),
-            size_bytes: metadata.len().to_string(),
-        });
-    }
+                // If there's a pattern, ensure the container path matches it
+                if let Some(pattern) = &pattern
+                    && !pattern.matches_with(
+                        file_guest_path_str,
+                        MatchOptions {
+                            require_literal_separator: true,
+                            ..Default::default()
+                        },
+                    )
+                {
+                    info!(
+                        "skipping output file `{file_guest_path}` as it does not match the pattern",
+                        file_guest_path = file_guest_path.display()
+                    );
+                    return Ok(None);
+                }
 
-    Ok(files)
+                let mut url = url.clone();
+                {
+                    // Append the relative path to the URL
+                    let mut segments = url.path_segments_mut().unwrap();
+                    for component in file_host_path
+                        .strip_prefix(directory_host_path)
+                        .unwrap()
+                        .components()
+                    {
+                        match component {
+                            Component::Normal(segment) => {
+                                segments.push(segment.to_str().with_context(|| {
+                                    format!(
+                                        "output file `{file_guest_path}` is not UTF-8",
+                                        file_guest_path = file_guest_path.display()
+                                    )
+                                })?);
+                            }
+                            _ => {
+                                unreachable!(
+                                    "the file host path should only have normal path segments"
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Perform the copy if it isn't a `file://` output
+                if url.scheme() != "file" {
+                    info!(
+                        "uploading output file `{file_guest_path}` to `{url}`",
+                        file_guest_path = file_guest_path.display(),
+                        url = url.display(),
+                    );
+
+                    cloud_copy::copy(
+                        context.config.clone(),
+                        context.client.clone(),
+                        file_host_path,
+                        url.clone(),
+                        context.cancel.clone(),
+                        Some(context.events.clone()),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to upload output `{file_guest_path}` to `{url}`",
+                            file_guest_path = file_guest_path.display(),
+                            url = url.display(),
+                        )
+                    })?;
+                }
+
+                // Clear the query and fragment before saving the output
+                url.set_query(None);
+                url.set_fragment(None);
+
+                Ok(Some(OutputFile {
+                    url: url.into(),
+                    path: file_guest_path_str.to_string(),
+                    size_bytes: metadata.len().to_string(),
+                }))
+            }
+        },
+    )
+    .await
 }
 
 /// Prepares outputs from the specified outputs and local directory.
@@ -816,12 +1187,10 @@ async fn prepare_directory_output(
 /// the orchestrator.
 async fn prepare_outputs(
     context: TransferContext,
-    tes_id: &str,
-    orchestrator_dir: &Path,
-    outputs_dir: &Path,
-    local_dir: Option<&Path>,
+    args: &Arc<Args>,
 ) -> Result<(TimeDelta, Option<TransferStats>)> {
-    let outputs: Vec<Output> = deserialize_items(outputs_file_path(orchestrator_dir, tes_id))?;
+    let inputs = Arc::new(deserialize_items::<Input>(args.inputs_file_path())?);
+    let outputs = Arc::new(deserialize_items::<Output>(args.outputs_file_path())?);
 
     // Create an event handling task
     let events = context.events.subscribe();
@@ -831,14 +1200,16 @@ async fn prepare_outputs(
     // Create a task for preparing each output
     let prepare = async || {
         let mut files = Vec::new();
-        let mut tasks = stream::iter(outputs.into_iter().enumerate())
-            .map(|(index, output)| {
-                let outputs_dir = outputs_dir.to_path_buf();
-                let local_dir = local_dir.map(Path::to_path_buf);
+        let mut tasks = stream::iter(0..outputs.len())
+            .map(|index| {
                 let ctx = context.clone();
+                let args = args.clone();
+                let inputs = inputs.clone();
+                let outputs = outputs.clone();
                 tokio::spawn(async move {
+                    let output = &outputs[index];
                     let path = if let Some(path) = url_to_file_path(&output.url) {
-                        match local_dir {
+                        match &args.local_dir {
                             Some(local_dir) => local_dir
                                 .join(path.strip_prefix("/").expect("path should be absolute")),
                             None => {
@@ -846,10 +1217,10 @@ async fn prepare_outputs(
                             }
                         }
                     } else {
-                        outputs_dir.join(index.to_string())
+                        args.outputs_dir.join(index.to_string())
                     };
 
-                    prepare_output(ctx, &output, &path).await
+                    prepare_output(ctx, &args, &outputs, &inputs, index, &path).await
                 })
                 .map(|r| r.expect("task panicked"))
             })
@@ -877,7 +1248,7 @@ async fn prepare_outputs(
     let outputs = result?;
 
     // Write the output files for the task
-    serialize_items(output_files_file_path(orchestrator_dir, tes_id), &outputs)?;
+    serialize_items(args.output_files_file_path(), &outputs)?;
 
     Ok((end - start, stats))
 }
@@ -917,7 +1288,26 @@ async fn terminate(cancel: CancellationToken) {
 
 /// Runs the program.
 async fn run(cancel: CancellationToken) -> Result<()> {
-    let args = Args::parse();
+    let mut args = Args::parse();
+
+    // Create the directory arguments
+    fs::create_dir_all(&args.inputs_dir).context("failed to create inputs directory")?;
+    fs::create_dir_all(&args.outputs_dir).context("failed to create outputs directory")?;
+    if let Some(local_dir) = &args.local_dir {
+        fs::create_dir_all(local_dir).context("failed to create local directory")?;
+    }
+
+    // Canonicalize the directory arguments
+    args.inputs_dir =
+        canonicalize(args.inputs_dir).context("failed to canonicalize input directory")?;
+    args.outputs_dir =
+        canonicalize(args.outputs_dir).context("failed to canonicalize output directory")?;
+    args.local_dir = args
+        .local_dir
+        .map(|p| canonicalize(p).context("failed to canonicalize local directory"))
+        .transpose()?;
+
+    let args = Arc::new(args);
 
     match std::env::var("RUST_LOG") {
         Ok(_) => {
@@ -948,20 +1338,23 @@ async fn run(cancel: CancellationToken) -> Result<()> {
 
     let azure = args
         .azure_account_name
-        .and_then(|name| Some((name, args.azure_access_key?)))
+        .as_ref()
+        .and_then(|name| Some((name, args.azure_access_key.clone()?)))
         .map(|(name, key)| AzureConfig::default().with_auth(name, key))
         .unwrap_or_default();
 
     let s3 = args
         .aws_access_key_id
-        .and_then(|id| Some((id, args.aws_secret_access_key?)))
+        .as_ref()
+        .and_then(|id| Some((id, args.aws_secret_access_key.clone()?)))
         .map(|(id, key)| S3Config::default().with_auth(id, key))
         .unwrap_or_default()
-        .with_maybe_region(args.aws_default_region);
+        .with_maybe_region(args.aws_default_region.clone());
 
     let google = args
         .google_hmac_access_key
-        .and_then(|key| Some((key, args.google_hmac_secret?)))
+        .as_ref()
+        .and_then(|key| Some((key, args.google_hmac_secret.clone()?)))
         .map(|(key, secret)| GoogleConfig::default().with_auth(key, secret))
         .unwrap_or_default();
 
@@ -978,27 +1371,8 @@ async fn run(cancel: CancellationToken) -> Result<()> {
     let context = TransferContext::new(config, cancel);
 
     let (delta, stats) = match args.mode {
-        Mode::Inputs => {
-            prepare_inputs(
-                context,
-                &args.tes_id,
-                &args.orchestrator_dir,
-                &args.inputs_dir.expect("option should be present"),
-                &args.outputs_dir,
-                args.local_dir.as_deref(),
-            )
-            .await?
-        }
-        Mode::Outputs => {
-            prepare_outputs(
-                context,
-                &args.tes_id,
-                &args.orchestrator_dir,
-                &args.outputs_dir,
-                args.local_dir.as_deref(),
-            )
-            .await?
-        }
+        Mode::Inputs => prepare_inputs(context, &args).await?,
+        Mode::Outputs => prepare_outputs(context, &args).await?,
     };
 
     // Print the statistics if there are some

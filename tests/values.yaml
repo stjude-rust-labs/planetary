@@ -10,7 +10,7 @@
 api:
   replicas: 1
   allowAuthorizationFallback: true
-  log: info
+  log: debug
   image:
     name: stjude-rust-labs/planetary-api
     tag: test
@@ -22,7 +22,7 @@ api:
 
 orchestrator:
   replicas: 1
-  log: info
+  log: debug
   image:
     name: stjude-rust-labs/planetary-orchestrator
     tag: test
@@ -37,7 +37,7 @@ orchestrator:
       type: Directory
 
 monitor:
-  log: info
+  log: debug
   usageSampleInterval: 1
   kubeletInsecureTls: true
   image:
@@ -50,7 +50,7 @@ monitor:
       memory: 1Gi
 
 transporter:
-  log: info
+  log: debug
   image:
     name: stjude-rust-labs/planetary-transporter
     tag: test
