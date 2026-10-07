@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## v0.2.0 (2026-10-07)
+
 #### Added
 
 * Added per-container task resource usage aggregation and TES task log

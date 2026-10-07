@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## v0.2.0 (2026-10-07)
+
 #### Security Fix
 
 * Ensure output symlinks cannot escape the output directory ([GHSA-r3cq-9r6g-c766](https://github.com/stjude-rust-labs/planetary/security/advisories/GHSA-r3cq-9r6g-c766)).

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## v0.2.0 (2026-10-07)
+
 #### Security Fix
 
 * Ensure strings are rendered as JSON strings in the `task.yaml` template by
