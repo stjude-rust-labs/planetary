@@ -59,7 +59,7 @@ fn service_info() {
                 "name": "Example Organization",
                 "url": "https://example.com/",
             },
-            "version": "0.1.0",
+            "version": "0.2.0",
         })
     );
 }
