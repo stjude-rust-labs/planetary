@@ -80,8 +80,9 @@ async fn auth(
             .map(|v| v.to_str()),
         &authorization,
     ) {
-        // Note: if the `X-Forwarded-User` is present but malformed (i.e. `Some(Err(_))`), then we
-        // intentionally return forbidden rather than look at the `Authorization` header
+        // Note: if the `X-Forwarded-User` is present but malformed (i.e.
+        // `Some(Err(_))`), then we intentionally return forbidden rather than
+        // look at the `Authorization` header
         (Some(Ok(username)), _) if !username.is_empty() => username,
         (None, Some(auth)) if allow_authorization_fallback => auth.username(),
         _ => return Error::forbidden().into_response(),
