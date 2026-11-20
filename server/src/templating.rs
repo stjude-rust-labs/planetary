@@ -310,25 +310,21 @@ impl Template {
             .collect();
         context.insert("outputs", &outputs);
 
-        // Set the volumes, dropping any volume that would duplicate another
-        // mount path; Kubernetes rejects pods with duplicate mount paths and
-        // an input or output mount already provides the path
-        let mut mounts: Vec<&Path> = data
-            .inputs
-            .iter()
-            .map(|i| Path::new(&i.path))
-            .chain(
-                data.outputs
-                    .iter()
-                    .map(|o| Path::new(o.path_prefix.as_deref().unwrap_or(&o.path))),
-            )
-            .collect();
-        let mut volumes = Vec::with_capacity(data.volumes.len());
+        // Set the volumes, dropping any volume that would duplicate an output
+        // or another volume's mount path; Kubernetes rejects pods with
+        // duplicate mount paths and the existing mount already provides the
+        // path (task validation rejects volumes that duplicate an input path)
+        let mut volumes: Vec<&str> = Vec::with_capacity(data.volumes.len());
         for volume in &data.volumes {
             let path = Path::new(volume);
-            if !mounts.contains(&path) {
-                mounts.push(path);
-                volumes.push(volume.as_str());
+            let duplicate = data
+                .outputs
+                .iter()
+                .any(|o| Path::new(o.path_prefix.as_deref().unwrap_or(&o.path)) == path)
+                || volumes.iter().any(|v| Path::new(v) == path);
+
+            if !duplicate {
+                volumes.push(volume);
             }
         }
         context.insert("volumes", &volumes);
@@ -485,7 +481,6 @@ mod tests {
             volumes: vec![
                 "/mnt/usage/".into(),
                 "/mnt/glob".into(),
-                "/mnt/input".into(),
                 "/mnt/data".into(),
                 "/mnt/data/".into(),
             ],

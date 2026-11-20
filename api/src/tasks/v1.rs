@@ -1,6 +1,8 @@
 //! The implementation of the TES task endpoints (v1).
 
+use std::collections::HashSet;
 use std::path::Component;
+use std::path::Path as FsPath;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -292,36 +294,42 @@ fn validate_task(task: &RequestTask, allow_file_urls: bool) -> Result<()> {
 /// output's mount path (or another volume's) is allowed as the output's mount
 /// already provides a writable directory at that path.
 fn validate_mount_paths(task: &RequestTask) -> Result<()> {
-    use std::path::Path;
+    let mut inputs: HashSet<&FsPath> = HashSet::new();
+    for input in task.inputs.as_deref().unwrap_or_default() {
+        let path = FsPath::new(&input.path);
+        if !inputs.insert(path) {
+            bail!(
+                "input path `{path}` duplicates the mount path `{existing}`",
+                path = input.path,
+                existing = inputs.get(path).expect("path should exist").display()
+            );
+        }
+    }
 
-    let inputs = task.inputs.as_deref().unwrap_or_default();
-    let paths =
-        inputs
-            .iter()
-            .map(|i| (i.path.as_str(), "input path"))
-            .chain(task.outputs.as_deref().unwrap_or_default().iter().map(
-                |o| match &o.path_prefix {
-                    Some(prefix) => (prefix.as_str(), "output path prefix"),
-                    None => (o.path.as_str(), "output path"),
-                },
-            ));
+    let mut outputs: HashSet<&FsPath> = HashSet::new();
+    for output in task.outputs.as_deref().unwrap_or_default() {
+        let (path, kind) = match &output.path_prefix {
+            Some(prefix) => (prefix.as_str(), "output path prefix"),
+            None => (output.path.as_str(), "output path"),
+        };
 
-    let mut mounts: Vec<&Path> = Vec::new();
-    for (path, kind) in paths {
-        if let Some(existing) = mounts.iter().find(|m| **m == Path::new(path)) {
+        let mount = FsPath::new(path);
+        let existing = match inputs.get(mount) {
+            Some(existing) => Some(existing),
+            None if !outputs.insert(mount) => outputs.get(mount),
+            None => None,
+        };
+
+        if let Some(existing) = existing {
             bail!(
                 "{kind} `{path}` duplicates the mount path `{existing}`",
                 existing = existing.display()
             );
         }
-
-        mounts.push(Path::new(path));
     }
+
     for volume in task.volumes.as_deref().unwrap_or_default() {
-        if inputs
-            .iter()
-            .any(|i| Path::new(&i.path) == Path::new(volume))
-        {
+        if inputs.contains(FsPath::new(volume)) {
             bail!("volume path `{volume}` duplicates an input path");
         }
     }

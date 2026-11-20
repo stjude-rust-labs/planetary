@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-#### Fixed
-
-* The task's system log now includes the reason a task failed to start ([#57](https://github.com/stjude-rust-labs/planetary/pull/57)).
-
 ## v0.2.0 (2026-10-07)
 
 #### Added
