@@ -13,11 +13,13 @@ use secrecy::SecretString;
 use url::Url;
 
 use crate::monitor::Intervals;
+use crate::monitor::KubeletConfig;
 use crate::monitor::Monitor;
 use crate::monitor::Namespaces;
 use crate::monitor::OrchestratorServiceInfo;
 
 mod monitor;
+mod usage;
 
 /// The task monitor server.
 #[derive(Clone, Builder)]
@@ -57,6 +59,20 @@ pub struct Server {
     #[builder(into)]
     keep_interval: Duration,
 
+    /// The kubelet HTTPS port, defaulting to 10250.
+    #[builder(default = crate::usage::DEFAULT_KUBELET_PORT)]
+    kubelet_port: u16,
+
+    /// Whether to disable kubelet certificate and hostname verification.
+    #[builder(default)]
+    kubelet_insecure_tls: bool,
+
+    /// An optional kubelet CA bundle path.
+    kubelet_ca_path: Option<PathBuf>,
+
+    /// The resource usage sampling interval, or `None` to disable sampling.
+    usage_sample_interval: Option<Duration>,
+
     /// The Planetary orchestrator service URL.
     #[builder(into)]
     orchestrator_url: Url,
@@ -93,7 +109,6 @@ impl Server {
             .port(self.port)
             .build();
 
-        // Spawn the monitor
         let monitor = Monitor::spawn(
             self.database,
             OrchestratorServiceInfo {
@@ -108,14 +123,18 @@ impl Server {
             Intervals {
                 check: self.check_interval,
                 keep: self.keep_interval,
+                usage: self.usage_sample_interval,
+            },
+            KubeletConfig {
+                port: self.kubelet_port,
+                insecure_tls: self.kubelet_insecure_tls,
+                ca_path: self.kubelet_ca_path,
             },
         )
         .await?;
 
-        // Run the server to completion
         server.run((), shutdown).await?;
 
-        // Finally, shutdown the monitor
         monitor.shutdown().await;
         Ok(())
     }

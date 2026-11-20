@@ -7,8 +7,7 @@ ARG TARGETPLATFORM
 
 # Install the necessary packages and Rust.
 RUN apk add --update curl clang gcc musl-dev openssl-libs-static libpq-dev
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal
+RUN set -o pipefail && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 
 # Add `cargo` to the path.
 ENV PATH=/root/.cargo/bin:$PATH
@@ -134,8 +133,7 @@ USER diesel
 WORKDIR /home/diesel
 
 # Install Rust.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal
+RUN set -o pipefail && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 
 # Add `cargo` to the path.
 ENV PATH=/home/diesel/.cargo/bin:$PATH

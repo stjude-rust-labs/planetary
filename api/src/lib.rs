@@ -16,6 +16,7 @@ use planetary_db::Database;
 use planetary_server::DEFAULT_ADDRESS;
 use planetary_server::DEFAULT_PORT;
 use planetary_server::Error;
+use planetary_server::templating::is_username_valid;
 use reqwest::Client;
 use secrecy::SecretString;
 use tes::v1::types::responses::ServiceInfo;
@@ -82,12 +83,15 @@ async fn auth(
         // Note: if the `X-Forwarded-User` is present but malformed (i.e. `Some(Err(_))`), then we
         // intentionally return forbidden rather than look at the `Authorization` header
         (Some(Ok(username)), _) if !username.is_empty() => username,
-        (None, Some(auth)) if allow_authorization_fallback && !auth.username().is_empty() => {
-            auth.username()
-        }
+        (None, Some(auth)) if allow_authorization_fallback => auth.username(),
         _ => return Error::forbidden().into_response(),
     }
     .to_string();
+
+    // Ensure the username is valid
+    if username.is_empty() || !is_username_valid(&username) {
+        return Error::bad_request("username is invalid").into_response();
+    }
 
     request.extensions_mut().insert(Username(username));
     next.run(request).await

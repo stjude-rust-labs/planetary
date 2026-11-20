@@ -253,6 +253,28 @@ impl From<MinimalTask> for TesMinimalTask {
     }
 }
 
+/// Represents the aggregated resource usage of a single task container.
+#[derive(Queryable, Selectable, Identifiable, Associations, Debug, PartialEq)]
+#[diesel(belongs_to(BasicTask, foreign_key = task_id))]
+#[diesel(belongs_to(FullTask, foreign_key = task_id))]
+#[diesel(table_name = super::schema::task_container_usage)]
+#[diesel(primary_key(task_id, container_name))]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct ContainerUsage {
+    /// The task database identifier.
+    pub task_id: i32,
+    /// The name of the container within the task's pod.
+    pub container_name: String,
+    /// The peak observed working set memory of the container, in bytes.
+    pub peak_memory_bytes: Option<i64>,
+    /// The running total of sampled working set memory, in bytes.
+    pub memory_total_bytes: Option<i64>,
+    /// The number of memory samples taken.
+    pub memory_sample_count: Option<i64>,
+    /// The accumulated CPU time of the container, in seconds.
+    pub cpu_seconds: Option<f64>,
+}
+
 /// Represents a basic view of a task.
 #[derive(Debug, Queryable, Selectable, Identifiable)]
 #[diesel(table_name = super::schema::tasks)]

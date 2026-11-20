@@ -495,7 +495,7 @@ impl TestEnvironment {
             NODE_CONTAINER,
             "sh",
             "-c",
-            &format!("mkdir -p {dir} && chown {TASK_USER} {dir}"),
+            &format!("mkdir -p \"{dir}\" && chown {TASK_USER} \"{dir}\""),
         ]))
         .with_context(|| {
             format!("failed to create the local storage directory for `{username}`")
@@ -520,8 +520,7 @@ impl TestEnvironment {
             let dir = path
                 .rsplit_once('/')
                 .expect("path should contain a separator")
-                .0
-                .to_string();
+                .0;
 
             let mut child = Command::new("docker")
                 .args([
@@ -530,7 +529,10 @@ impl TestEnvironment {
                     NODE_CONTAINER,
                     "sh",
                     "-c",
-                    &format!("mkdir -p {dir} && cat > {path} && chown -R {TASK_USER} {dir} {path}"),
+                    &format!(
+                        "mkdir -p {dir} && cat > \"{path}\" && chown -R {TASK_USER} {dir} \
+                         \"{path}\""
+                    ),
                 ])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -564,6 +566,23 @@ impl TestEnvironment {
         })
     }
 
+    /// Writes a link to the given user's local storage.
+    pub fn write_link(&self, username: &str, original: &str, link: &str) -> Result<String> {
+        let link = format!("{LOCAL_STORAGE_PATH}/{username}/{link}");
+        let link_dir = link
+            .rsplit_once('/')
+            .expect("path should contain a separator")
+            .0;
+
+        run_with_output(Command::new("docker").args([
+            "exec",
+            NODE_CONTAINER,
+            "sh",
+            "-c",
+            &format!("mkdir -p {link_dir} && ln -s {original} {link}"),
+        ]))
+    }
+
     /// Reads a file from the given user's local storage.
     ///
     /// The path is relative to the root of the user's local storage (i.e. a
@@ -583,6 +602,20 @@ impl TestEnvironment {
         .unwrap_or_else(|e| {
             panic!("failed to read local file `{path}` for user `{username}`: {e:#}")
         })
+    }
+
+    /// Reads a link from the given user's local storage.
+    ///
+    /// The path is relative to the root of the user's local storage (i.e. a
+    /// task output URL of `file:///foo/bar.txt` corresponds to a path of
+    /// `foo/bar.txt`).
+    pub fn read_link(&self, username: &str, path: &str) -> Result<String> {
+        run_with_output(Command::new("docker").args([
+            "exec",
+            NODE_CONTAINER,
+            "readlink",
+            &format!("{LOCAL_STORAGE_PATH}/{username}/{path}"),
+        ]))
     }
 }
 
