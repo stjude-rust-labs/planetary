@@ -241,8 +241,14 @@ fn validate_task(task: &RequestTask, allow_file_urls: bool) -> Result<()> {
     }
 
     fn validate_volume(volume: &str) -> Result<()> {
-        if !Path::new(volume).is_absolute() {
+        let path = Path::new(volume);
+        if !path.is_absolute() {
             bail!("volume path `{volume}` is not absolute");
+        }
+
+        // The volume path cannot contain `..` segments
+        if path.components().any(|c| matches!(c, Component::ParentDir)) {
+            bail!("volume path `{volume}` cannot contain `..` path segments");
         }
 
         Ok(())
@@ -270,6 +276,53 @@ fn validate_task(task: &RequestTask, allow_file_urls: bool) -> Result<()> {
 
     for volume in task.volumes.as_deref().unwrap_or_default() {
         validate_volume(volume)?;
+    }
+
+    validate_mount_paths(task)?;
+
+    Ok(())
+}
+
+/// Ensures that no two inputs or outputs share a mount path and that no volume
+/// shares an input's mount path.
+///
+/// Each input and output is mounted separately into the task's containers and
+/// Kubernetes rejects pods with duplicate mount paths. A volume that shares an
+/// output's mount path (or another volume's) is allowed as the output's mount
+/// already provides a writable directory at that path.
+fn validate_mount_paths(task: &RequestTask) -> Result<()> {
+    use std::path::Path;
+
+    let inputs = task.inputs.as_deref().unwrap_or_default();
+    let paths =
+        inputs
+            .iter()
+            .map(|i| (i.path.as_str(), "input path"))
+            .chain(task.outputs.as_deref().unwrap_or_default().iter().map(
+                |o| match &o.path_prefix {
+                    Some(prefix) => (prefix.as_str(), "output path prefix"),
+                    None => (o.path.as_str(), "output path"),
+                },
+            ));
+
+    let mut mounts: Vec<&Path> = Vec::new();
+    for (path, kind) in paths {
+        if let Some(existing) = mounts.iter().find(|m| **m == Path::new(path)) {
+            bail!(
+                "{kind} `{path}` duplicates the mount path `{existing}`",
+                existing = existing.display()
+            );
+        }
+
+        mounts.push(Path::new(path));
+    }
+    for volume in task.volumes.as_deref().unwrap_or_default() {
+        if inputs
+            .iter()
+            .any(|i| Path::new(&i.path) == Path::new(volume))
+        {
+            bail!("volume path `{volume}` duplicates an input path");
+        }
     }
 
     Ok(())
@@ -448,4 +501,82 @@ pub async fn cancel_task(
 
     // The spec uses a 200 response with an empty JSON object
     Ok(Json(serde_json::Value::Object(Default::default())))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// Validates a task with the given inputs, outputs, and volumes.
+    fn validate(
+        inputs: serde_json::Value,
+        outputs: serde_json::Value,
+        volumes: &[&str],
+    ) -> Result<()> {
+        let task: RequestTask = serde_json::from_value(json!({
+            "inputs": inputs,
+            "outputs": outputs,
+            "volumes": volumes,
+            "executors": [{ "image": "alpine", "command": ["true"] }],
+        }))
+        .unwrap();
+        validate_task(&task, false)
+    }
+
+    #[test]
+    fn duplicate_input_and_output_paths_are_rejected() {
+        let input = |path: &str| json!({ "path": path, "content": "x", "type": "FILE" });
+        let output = |path: &str| json!({ "path": path, "url": "az://a/b", "type": "FILE" });
+
+        let e = validate(json!([input("/mnt/a"), input("/mnt/a/")]), json!([]), &[]).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "input path `/mnt/a/` duplicates the mount path `/mnt/a`"
+        );
+
+        let e = validate(json!([input("/mnt/a")]), json!([output("/mnt/a")]), &[]).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "output path `/mnt/a` duplicates the mount path `/mnt/a`"
+        );
+
+        let glob = json!({
+            "path": "/mnt/b/*.txt",
+            "path_prefix": "/mnt/b",
+            "url": "az://a/b",
+            "type": "FILE",
+        });
+        let e = validate(json!([]), json!([output("/mnt/b"), glob]), &[]).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "output path prefix `/mnt/b` duplicates the mount path `/mnt/b`"
+        );
+    }
+
+    #[test]
+    fn volumes_cannot_contain_parent_segments() {
+        let e = validate(json!([]), json!([]), &["/mnt/x/../usage"]).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "volume path `/mnt/x/../usage` cannot contain `..` path segments"
+        );
+    }
+
+    #[test]
+    fn volumes_cannot_duplicate_input_paths() {
+        let input = json!({ "path": "/mnt/a", "content": "x", "type": "FILE" });
+        let e = validate(json!([input]), json!([]), &["/mnt/a"]).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "volume path `/mnt/a` duplicates an input path"
+        );
+    }
+
+    #[test]
+    fn volumes_may_duplicate_output_paths_and_other_volumes() {
+        let output = json!({ "path": "/mnt/a", "url": "az://a/b", "type": "DIRECTORY" });
+        validate(json!([]), json!([output]), &["/mnt/a", "/mnt/b", "/mnt/b/"]).unwrap();
+    }
 }

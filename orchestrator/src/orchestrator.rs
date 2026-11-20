@@ -615,18 +615,15 @@ impl TaskOrchestrator {
         };
 
         if let Err(e) = start.await {
-            self.log_error(
-                Some(tes_id),
-                &format!("failed to start task `{tes_id}`: {e:#}"),
-            )
-            .await;
+            let message = format!("failed to start task `{tes_id}`: {e:#}");
+            self.log_error(Some(tes_id), &message).await;
 
             let _ = self
                 .database
                 .update_task_state(
                     tes_id,
                     State::SystemError,
-                    &[&format_log_message!("task `{tes_id}` failed to start")],
+                    &[&format_log_message!("{message}")],
                     None,
                     None,
                 )

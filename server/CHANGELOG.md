@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Fixed
+
+* Template rendering now drops volumes that share a path with an input,
+  output, or another volume, so task pods no longer have duplicate mount paths ([#57](https://github.com/stjude-rust-labs/planetary/pull/57)).
+
 #### Added
 
 * Added support for rendering templates with local inputs and outputs ([#41](https://github.com/stjude-rust-labs/planetary/pull/41)).

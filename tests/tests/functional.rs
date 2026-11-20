@@ -592,6 +592,42 @@ fn directory_outputs() {
     );
 }
 
+/// Tests a task with a volume at the same path as a `DIRECTORY` output.
+///
+/// The redundant volume should be dropped instead of creating a pod with
+/// duplicate mount paths, and the output should still be uploaded.
+#[test]
+#[ignore = "requires `docker`, `kind`, `kubectl`, and `helm`"]
+fn volume_at_directory_output_path() {
+    let env = TestEnvironment::get();
+    let username = unique_username("volume-output");
+    let client = env.client(Some(&username));
+
+    let id = client.create_task(&json!({
+        "outputs": [
+            {
+                "url": "file:///outputs/usage/",
+                "path": "/mnt/usage",
+                "type": "DIRECTORY",
+            }
+        ],
+        "volumes": ["/mnt/usage"],
+        "executors": [
+            {
+                "image": EXECUTOR_IMAGE,
+                "command": ["sh", "-c", "echo recorded > /mnt/usage/recording"],
+            }
+        ]
+    }));
+
+    client.wait_for_task_state(&id, "COMPLETE");
+
+    assert_eq!(
+        env.read_local_file(&username, "outputs/usage/recording"),
+        "recorded\n"
+    );
+}
+
 /// Tests a task with a wildcard `DIRECTORY` output: a `DIRECTORY` output
 /// whose `path` is a glob pattern and whose `path_prefix` is the directory to
 /// scan.

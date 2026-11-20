@@ -275,8 +275,28 @@ impl Template {
             .collect();
         context.insert("outputs", &outputs);
 
-        // Set the volumes
-        context.insert("volumes", &data.volumes);
+        // Set the volumes, dropping any volume that would duplicate another
+        // mount path; Kubernetes rejects pods with duplicate mount paths and
+        // an input or output mount already provides the path
+        let mut mounts: Vec<&Path> = data
+            .inputs
+            .iter()
+            .map(|i| Path::new(&i.path))
+            .chain(
+                data.outputs
+                    .iter()
+                    .map(|o| Path::new(o.path_prefix.as_deref().unwrap_or(&o.path))),
+            )
+            .collect();
+        let mut volumes = Vec::with_capacity(data.volumes.len());
+        for volume in &data.volumes {
+            let path = Path::new(volume);
+            if !mounts.contains(&path) {
+                mounts.push(path);
+                volumes.push(volume.as_str());
+            }
+        }
+        context.insert("volumes", &volumes);
 
         // Set the executors
         let executors: Vec<_> = data
@@ -386,5 +406,57 @@ impl TaskResource {
     /// Gets a mutable reference to the object defining the resource.
     pub fn object_mut(&mut self) -> &mut DynamicObject {
         &mut self.object
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tes::v1::types::task::Input;
+    use tes::v1::types::task::Output;
+
+    use super::*;
+
+    #[test]
+    fn volumes_that_duplicate_other_mounts_are_dropped() {
+        let data = TaskTemplateData {
+            id: "task".into(),
+            username: "user".into(),
+            preemptible: false,
+            cpu: None,
+            memory: None,
+            disk: None,
+            inputs: vec![Input {
+                path: "/mnt/input".into(),
+                content: Some("content".into()),
+                ..Default::default()
+            }],
+            outputs: vec![
+                Output {
+                    url: "az://account/container/usage/".into(),
+                    path: "/mnt/usage".into(),
+                    ..Default::default()
+                },
+                Output {
+                    url: "az://account/container/glob".into(),
+                    path: "/mnt/glob/*.txt".into(),
+                    path_prefix: Some("/mnt/glob".into()),
+                    ..Default::default()
+                },
+            ],
+            volumes: vec![
+                "/mnt/usage/".into(),
+                "/mnt/glob".into(),
+                "/mnt/input".into(),
+                "/mnt/data".into(),
+                "/mnt/data/".into(),
+            ],
+            executors: Default::default(),
+        };
+
+        let context = Template::create_context(&data, |_| Ok(String::new())).unwrap();
+        assert_eq!(
+            context.get("volumes").unwrap(),
+            &Value::from(vec!["/mnt/data"])
+        );
     }
 }

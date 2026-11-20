@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fixed
 
+* Tasks are now rejected when inputs or outputs share a mount path, when a
+  volume shares an input's path, or when a volume path contains `..`
+  segments, instead of failing to start ([#57](https://github.com/stjude-rust-labs/planetary/pull/57)).
 * Fixed handling of `FILE` type outputs with path prefixes ([#46](https://github.com/stjude-rust-labs/planetary/pull/46)).
 
 #### Added
