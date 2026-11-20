@@ -310,8 +310,24 @@ impl Template {
             .collect();
         context.insert("outputs", &outputs);
 
-        // Set the volumes
-        context.insert("volumes", &data.volumes);
+        // Set the volumes, dropping any volume that would duplicate an output
+        // or another volume's mount path; Kubernetes rejects pods with
+        // duplicate mount paths and the existing mount already provides the
+        // path (task validation rejects volumes that duplicate an input path)
+        let mut volumes: Vec<&str> = Vec::with_capacity(data.volumes.len());
+        for volume in &data.volumes {
+            let path = Path::new(volume);
+            let duplicate = data
+                .outputs
+                .iter()
+                .any(|o| Path::new(o.path_prefix.as_deref().unwrap_or(&o.path)) == path)
+                || volumes.iter().any(|v| Path::new(v) == path);
+
+            if !duplicate {
+                volumes.push(volume);
+            }
+        }
+        context.insert("volumes", &volumes);
 
         // Set the executors
         let executors: Vec<_> = data
@@ -430,10 +446,54 @@ mod tests {
 
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
+    use tes::v1::types::task::Input;
+    use tes::v1::types::task::Output;
 
     use super::*;
 
     #[test]
+    fn volumes_that_duplicate_other_mounts_are_dropped() {
+        let data = TaskTemplateData {
+            id: "task".into(),
+            username: "user".into(),
+            preemptible: false,
+            cpu: None,
+            memory: None,
+            disk: None,
+            inputs: vec![Input {
+                path: "/mnt/input".into(),
+                content: Some("content".into()),
+                ..Default::default()
+            }],
+            outputs: vec![
+                Output {
+                    url: "az://account/container/usage/".into(),
+                    path: "/mnt/usage".into(),
+                    ..Default::default()
+                },
+                Output {
+                    url: "az://account/container/glob".into(),
+                    path: "/mnt/glob/*.txt".into(),
+                    path_prefix: Some("/mnt/glob".into()),
+                    ..Default::default()
+                },
+            ],
+            volumes: vec![
+                "/mnt/usage/".into(),
+                "/mnt/glob".into(),
+                "/mnt/data".into(),
+                "/mnt/data/".into(),
+            ],
+            executors: Default::default(),
+        };
+
+        let context = Template::create_context(&data, |_| Ok(String::new())).unwrap();
+        assert_eq!(
+            context.get("volumes").unwrap(),
+            &Value::from(vec!["/mnt/data"])
+        );
+    }
+
     fn it_json_encodes_strings() {
         let dir = tempdir().unwrap();
         let template_path = dir.path().join(TEMPLATE_NAME);

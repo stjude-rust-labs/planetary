@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+#### Fixed
+
+* Tasks are now rejected when inputs or outputs share a mount path, when a
+  volume shares an input's path, or when a volume path contains `..`
+  segments, instead of failing to start ([#57](https://github.com/stjude-rust-labs/planetary/pull/57)).
+
 ## v0.2.0 (2026-10-07)
 
 #### Fixed

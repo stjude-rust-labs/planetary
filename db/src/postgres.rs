@@ -690,14 +690,16 @@ impl Database for PostgresDatabase {
                 TaskState::Queued,
                 TaskState::Initializing,
             ],
-            // [Unknown | Queued | Initializing | Running] -> [Complete | ExecutorError]
+            // [Unknown | Queued | Initializing | Running] -> [Complete |
+            // ExecutorError]
             State::Complete | State::ExecutorError => &[
                 TaskState::Unknown,
                 TaskState::Queued,
                 TaskState::Initializing,
                 TaskState::Running,
             ],
-            // [Unknown | Queued | Initializing | Running] -> [SystemError | Canceling]
+            // [Unknown | Queued | Initializing | Running] -> [SystemError |
+            // Canceling]
             State::SystemError | State::Canceling => &[
                 TaskState::Unknown,
                 TaskState::Queued,
