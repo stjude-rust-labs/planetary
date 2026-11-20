@@ -446,12 +446,12 @@ impl TaskResource {
 
 #[cfg(test)]
 mod tests {
-    use tes::v1::types::task::Input;
-    use tes::v1::types::task::Output;
     use std::fs;
 
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
+    use tes::v1::types::task::Input;
+    use tes::v1::types::task::Output;
 
     use super::*;
 
@@ -496,9 +496,9 @@ mod tests {
         assert_eq!(
             context.get("volumes").unwrap(),
             &Value::from(vec!["/mnt/data"])
-          );
+        );
     }
-  
+
     fn it_json_encodes_strings() {
         let dir = tempdir().unwrap();
         let template_path = dir.path().join(TEMPLATE_NAME);
